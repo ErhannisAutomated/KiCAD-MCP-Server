@@ -259,6 +259,14 @@ class JLCPCBPartsManager:
         self.conn.commit()
         logger.info(f"Import complete: {imported} parts imported, {skipped} skipped")
 
+    # Whitelist of allowed ORDER BY clauses, indexed by user-facing key.
+    # Never interpolate raw user input into SQL — only values from this map are used.
+    _ORDER_BY_CLAUSES = {
+        "stock_desc": "ORDER BY stock DESC",
+        "stock_asc": "ORDER BY stock ASC",
+        "none": "",
+    }
+
     def search_parts(
         self,
         query: Optional[str] = None,
@@ -268,6 +276,7 @@ class JLCPCBPartsManager:
         manufacturer: Optional[str] = None,
         in_stock: bool = True,
         limit: int = 20,
+        order_by: str = "stock_desc",
     ) -> List[Dict]:
         """
         Search for parts with filters
@@ -280,10 +289,19 @@ class JLCPCBPartsManager:
             manufacturer: Filter by manufacturer name
             in_stock: Only return parts with stock > 0
             limit: Maximum number of results
+            order_by: One of "stock_desc" (default), "stock_asc", "none".
+                "stock_desc" surfaces high-volume parts first as a proxy for ongoing
+                availability. Unknown values raise ValueError.
 
         Returns:
             List of matching parts
         """
+        if order_by not in self._ORDER_BY_CLAUSES:
+            raise ValueError(
+                f"Invalid order_by={order_by!r}; expected one of "
+                f"{sorted(self._ORDER_BY_CLAUSES)}"
+            )
+
         cursor = self.conn.cursor()
 
         # Build query
@@ -323,6 +341,10 @@ class JLCPCBPartsManager:
 
         if in_stock:
             sql_parts.append("AND stock > 0")
+
+        order_clause = self._ORDER_BY_CLAUSES[order_by]
+        if order_clause:
+            sql_parts.append(order_clause)
 
         sql_parts.append("LIMIT ?")
         params.append(limit)

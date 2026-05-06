@@ -89,6 +89,13 @@ Use this to find components with exact specifications and cost optimization.`,
         .default(true)
         .describe("Only show parts with available stock"),
       limit: z.number().optional().default(20).describe("Maximum number of results to return"),
+      order_by: z
+        .enum(["stock_desc", "stock_asc", "none"])
+        .optional()
+        .default("stock_desc")
+        .describe(
+          "Result ordering. 'stock_desc' (default) prefers high-stock parts as a proxy for ongoing availability; 'stock_asc' surfaces low-stock parts (e.g., to flag risk); 'none' uses unspecified DB order.",
+        ),
     },
     async (args: any) => {
       const result = await callKicadScript("search_jlcpcb_parts", args);

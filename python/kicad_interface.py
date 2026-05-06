@@ -5751,20 +5751,25 @@ print("ok")
             manufacturer = params.get("manufacturer")
             in_stock = params.get("in_stock", True)
             limit = params.get("limit", 20)
+            order_by = params.get("order_by", "stock_desc")
 
             # Adjust library_type filter
             if library_type == "All":
                 library_type = None
 
-            parts = self.jlcpcb_parts.search_parts(
-                query=query,
-                category=category,
-                package=package,
-                library_type=library_type,
-                manufacturer=manufacturer,
-                in_stock=in_stock,
-                limit=limit,
-            )
+            try:
+                parts = self.jlcpcb_parts.search_parts(
+                    query=query,
+                    category=category,
+                    package=package,
+                    library_type=library_type,
+                    manufacturer=manufacturer,
+                    in_stock=in_stock,
+                    limit=limit,
+                    order_by=order_by,
+                )
+            except ValueError as ve:
+                return {"success": False, "message": str(ve)}
 
             # Add price breaks and footprints to each part
             for part in parts:

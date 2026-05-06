@@ -4,6 +4,15 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Tool Enhancements (this branch: fixes/improvements_2)
+
+- **`search_jlcpcb_parts` order_by parameter** — New `order_by` parameter on `search_jlcpcb_parts`,
+  with values `"stock_desc"` (default), `"stock_asc"`, and `"none"`. Previously the SQL had no
+  `ORDER BY` clause so result order was implementation-defined. The new default surfaces high-stock
+  parts first, restoring the long-standing "search → sort by stock → pick first relevant" workflow
+  as a proxy for ongoing availability. Allowed values are validated against a whitelist (no SQL
+  injection surface). Added 6 regression tests.
+
 ### Bug Fixes (this branch: fixes/mcp-server-improvements)
 
 - **`search_symbols` 30 s timeout** — Background cache warming writes all 224 symbol libraries
