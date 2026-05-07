@@ -1,5 +1,20 @@
 # Schematic Autorouter — Design Plan
 
+Status: **Phase 5 (auto-label) SHIPPED (2026-05-07).**
+- After `connect_pins` lays any wire, it ensures the connected wire fragment
+  carries the `resolved_net` as a label. Without this, KiCad auto-names
+  unlabeled wires (`Net-(R1-Pad2)` etc.) and named nets silently fragment
+  across multiple `connect_pins` calls.
+- The auto-label is placed at the end of the first segment of the first
+  wired pair — a corner for multi-segment paths (visually clean), at p2's
+  pin endpoint for single-segment paths (not pretty but always at a wire
+  endpoint, where future net-detection looks).
+- Skipped when the just-laid wire is already reachable from an existing
+  `resolved_net` label via wire/T-junction connectivity. Detection uses
+  `_classify_wires_by_net` (label-only mode, no `own_pin_endpoints`).
+- Result dict gains `auto_label_position` when a label was added.
+- Tests: 103 cases pass. New: `test_phase5_auto_label_skipped_when_tee_into_existing_labeled_net`.
+
 Status: **Phase 4 (same-net tee detection) SHIPPED (2026-05-07).**
 - New helper `_classify_wires_by_net(obstacles, target_net,
   own_pin_endpoints=...)` walks the wire-adjacency graph (with T-junction

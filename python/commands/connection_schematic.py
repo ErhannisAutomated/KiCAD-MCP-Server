@@ -777,6 +777,68 @@ class ConnectionManager:
                 ),
             }
 
+        # Phase 5 — auto-label: if any pair was wired, ensure the resulting
+        # connected wire fragment carries `resolved_net` as a label. KiCad
+        # otherwise auto-names unlabeled wires (Net-(R1-Pad2) etc.), which
+        # silently fragments named nets across multiple connect_pins calls.
+        #
+        # We skip the auto-label only when the just-laid wires are already
+        # reachable from an existing `resolved_net` label via wire/T-junction
+        # connectivity — e.g. the route tee'd into existing labeled geometry.
+        # We use schematic_router._classify_wires_by_net with no
+        # own_pin_endpoints so it relies purely on label connectivity.
+        auto_label_added: Optional[List[float]] = None
+        if wired_pairs and resolved_net:
+            from commands.schematic_router import (
+                _classify_wires_by_net,
+                collect_obstacles as _re_collect_obs,
+            )
+
+            post_obs = _re_collect_obs(schematic_path, exclude_pins=exclude)
+            label_reachable = _classify_wires_by_net(
+                post_obs, resolved_net, own_pin_endpoints=()
+            )
+
+            def _key(p):
+                return (round(p[0] * 100), round(p[1] * 100))
+
+            reachable_endpoints = set()
+            for idx in label_reachable:
+                wa, wb = post_obs.other_wires[idx]
+                reachable_endpoints.add(_key(wa))
+                reachable_endpoints.add(_key(wb))
+            # Same-net label positions themselves are also reachable (for
+            # endpoint-coincident labels — most common case).
+            for (lpos, lname) in post_obs.other_labels:
+                if lname == resolved_net:
+                    reachable_endpoints.add(_key(lpos))
+
+            needs_label = True
+            for wp in wired_pairs:
+                for (a, b) in wp["segments"]:
+                    for endpoint in (a, b):
+                        if _key(endpoint) in reachable_endpoints:
+                            needs_label = False
+                            break
+                    if not needs_label:
+                        break
+                if not needs_label:
+                    break
+
+            if needs_label:
+                # Place at the end of the first segment of the first wired
+                # pair. For multi-segment paths this is a corner (clean spot).
+                # For straight single-segment paths it falls on the second
+                # pin's endpoint; not pretty, but always a wire endpoint so
+                # detection works on the next call.
+                segs = wired_pairs[0]["segments"]
+                if segs:
+                    label_pos = list(segs[0][1])
+                    if WireManager.add_label(
+                        schematic_path, resolved_net, label_pos, label_type="label"
+                    ):
+                        auto_label_added = label_pos
+
         # Phase 3: per-pin label loop for everything not already wired
         connected: List[str] = []
         already_connected: List[str] = []
@@ -842,6 +904,8 @@ class ConnectionManager:
         if try_wire:
             result_dict["wired_pairs"] = wired_pairs
             result_dict["routing_failures"] = routing_failures
+            if auto_label_added is not None:
+                result_dict["auto_label_position"] = auto_label_added
         return result_dict
 
     @staticmethod

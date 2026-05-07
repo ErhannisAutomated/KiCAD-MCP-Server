@@ -922,7 +922,7 @@ class TestConnectPinsStyle:
         assert result["success"] is False
         assert "invalid style" in result["message"]
 
-    def test_auto_writes_wire_segment_to_file(self, tmp_path):
+    def test_auto_writes_wire_segment_and_one_auto_label(self, tmp_path):
         from commands.connection_schematic import ConnectionManager
 
         sch = _write(tmp_path, "auto.kicad_sch", _make_two_resistors_sch())
@@ -935,11 +935,14 @@ class TestConnectPinsStyle:
         assert result["success"], result.get("message")
         assert result["style"] == "auto"
         assert len(result["wired_pairs"]) == 1
-        # Confirm a wire shows up in the schematic file.
         text = sch.read_text()
+        # Wire was laid.
         assert "(wire" in text
-        # And no SIG label was added (auto preferred wire over label)
-        assert '"SIG"' not in text and "(label SIG" not in text
+        # Phase 5: one SIG label is added at a wire endpoint so the net is
+        # named in KiCad (otherwise multi-call usage would silently fragment
+        # named nets across calls).
+        assert text.count('(label "SIG"') == 1
+        assert "auto_label_position" in result
 
     def test_auto_falls_back_to_label_when_no_phase12_path(self, tmp_path):
         # Pins are aligned on y=100 but face AWAY from each other — no
@@ -1013,8 +1016,9 @@ class TestConnectPinsStyle:
         assert len(wp["segments"]) == 3
         text = sch.read_text()
         assert text.count("(wire") == 3
-        # No SIG label was added — the U-shape covered the whole net.
-        assert '"SIG"' not in text
+        # Phase 5: exactly one auto-label was added (multi-segment paths
+        # place it at the first corner — visually clean).
+        assert text.count('(label "SIG"') == 1
 
     def test_phase4_tees_into_existing_same_net_wire(self, tmp_path):
         # Pre-existing R1↔R2 wire labeled SIG at the R1 endpoint; R3 placed
@@ -1069,6 +1073,52 @@ class TestConnectPinsStyle:
         # And the file now contains both the original and the new wire.
         text = sch.read_text()
         assert text.count("(wire") >= 2
+
+    def test_phase5_auto_label_skipped_when_tee_into_existing_labeled_net(
+        self, tmp_path
+    ):
+        # Existing R1↔R2 wire labeled SIG. connect_pins([R3, R1], net="SIG")
+        # tees R3 into the wire. The new fragment is already reachable from
+        # the existing SIG label via the shared wire, so no second SIG label
+        # should be auto-added.
+        from commands.connection_schematic import ConnectionManager
+
+        sch_text = textwrap.dedent("""\
+            (kicad_sch (version 20250114) (generator "test")
+              %s
+              (symbol (lib_id "Device:R") (at 101.6 101.6 90) (unit 1)
+                (property "Reference" "R1" (at 101.6 101.6 0))
+                (property "Value" "10k" (at 101.6 101.6 0))
+                (instances (project "test" (path "/" (reference "R1") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 125.73 101.6 90) (unit 1)
+                (property "Reference" "R2" (at 125.73 101.6 0))
+                (property "Value" "10k" (at 125.73 101.6 0))
+                (instances (project "test" (path "/" (reference "R2") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 113.03 116.84 0) (unit 1)
+                (property "Reference" "R3" (at 113.03 116.84 0))
+                (property "Value" "1k" (at 113.03 116.84 0))
+                (instances (project "test" (path "/" (reference "R3") (unit 1))))
+              )
+              (wire (pts (xy 105.41 101.6) (xy 121.92 101.6)) (stroke (width 0) (type default)))
+              (label "SIG" (at 105.41 101.6 0))
+              (sheet_instances (path "/" (page "1")))
+            )
+        """) % R_LIB
+        sch = _write(tmp_path, "tee_no_extra_label.kicad_sch", sch_text)
+        result = ConnectionManager.connect_pins(
+            sch,
+            [{"ref": "R3", "pin": "1"}, {"ref": "R1", "pin": "2"}],
+            net_name="SIG",
+            style="auto",
+        )
+        assert result["success"], result.get("message")
+        text = sch.read_text()
+        # Original SIG label is still there; no new one was added because the
+        # tee'd wire is reachable from the existing label via wire connectivity.
+        assert text.count('(label "SIG"') == 1
+        assert "auto_label_position" not in result
 
     def test_label_default_unchanged(self, tmp_path):
         # Default style is "label" — no routing attempt, behaviour identical to before.
