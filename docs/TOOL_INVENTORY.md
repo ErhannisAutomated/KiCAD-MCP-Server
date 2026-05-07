@@ -163,7 +163,7 @@ _Source: `src/tools/schematic.ts`_
 | `add_no_connect`                  | Add no-connect flag (X marker) to an unconnected pin                                   | Direct             |
 | `move_schematic_net_label`        | Move net label to new position                                                          | Routed (schematic) |
 | `connect_to_net`                  | Connect component pin to named net                                                      | Direct             |
-| `connect_pins`                    | Connect N pins to a shared net in one call; auto-discovers existing labels via BFS      | Direct             |
+| `connect_pins`                    | Connect N pins to a shared net (label/wire/auto); autorouter with tee detection         | Direct             |
 | `connect_component_to_nets`       | Connect all pins of one component via a `{pin: net}` map in one call                   | Direct             |
 | `connect_passthrough`             | Connect all matching pins between two connectors                                        | Direct             |
 | `get_schematic_pin_locations`     | Get pin locations for a component                                                       | Additional         |

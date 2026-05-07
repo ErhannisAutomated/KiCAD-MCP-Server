@@ -69,7 +69,10 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 - **`connect_pins`** — Connect N pins to a single net. Discovers existing labels via BFS before
   writing, avoids duplicate/orphaned labels, handles A→B→C orphan case, detects conflicts,
-  idempotent.
+  idempotent. With `style="auto"` or `"wire"`, draws real polyline wires between pins instead
+  of label stubs everywhere — tries straight → L → U → A\* in order, with same-net tee
+  detection, a 5-rule spurious-connection guard, and an auto-label so the wire fragment is
+  named in KiCad. See `docs/SCHEMATIC_AUTOROUTER_PLAN.md` for the full design.
 
 - **`connect_component_to_nets`** — Connect all pins of one component via a `{pin: net}` map.
   Replaces N individual `connect_to_net` calls. Same guarantees as `connect_pins`.

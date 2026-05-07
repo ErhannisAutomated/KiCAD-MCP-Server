@@ -279,24 +279,50 @@ Connect a component pin to a named net by adding a wire stub from the pin endpoi
 
 ### connect_pins
 
-Connect two or more component pins to the same named net in a single call. Discovers existing labels on any of the listed pins via BFS through the wire+label graph before writing — avoids creating duplicate or orphaned labels.
+Connect two or more component pins to the same net. Replaces N individual `connect_to_net` calls and (with `style="auto"` or `"wire"`) can draw real polyline wires between pins instead of labels everywhere.
 
-| Parameter     | Type    | Required | Description                                                                                       |
-| ------------- | ------- | -------- | ------------------------------------------------------------------------------------------------- |
-| schematicPath | string  | Yes      | Path to the schematic file                                                                        |
-| pins          | array   | Yes      | List of `{ref, pin}` objects, e.g. `[{"ref": "R1", "pin": "1"}, {"ref": "U1", "pin": "VCC"}]`   |
-| netName       | string  | No       | Net to assign. If omitted, discovered from existing labels; fails if two different nets conflict. |
+| Parameter     | Type   | Required | Description                                                                                                                                           |
+| ------------- | ------ | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
+| schematicPath | string | Yes      | Path to the schematic file                                                                                                                            |
+| pins          | array  | Yes      | List of `{ref, pin}` objects, e.g. `[{"ref": "R1", "pin": "1"}, {"ref": "U1", "pin": "VCC"}]`                                                         |
+| netName       | string | No       | Target net. If omitted, discovered from existing labels on any listed pin; fails if two different non-power nets conflict.                            |
+| style         | enum   | No       | `"label"` (default): stub+label per pin (legacy behaviour). `"auto"`: try real wire, fall back to label per pin if not. `"wire"`: hard-fail on miss. |
+| maxLen        | number | No       | Maximum wire path length in mm. Longer candidates fall back to label. Default 80.                                                                     |
+| maxBends      | number | No       | Maximum bends per wired pair. Over this falls back to label. Default 4.                                                                               |
+| powerNets     | array  | No       | Extends the built-in power-net list (`VBUS`, `GND`, `+3V3`, `+5V`, etc.) which always uses labels in `auto` mode.                                     |
 
 **Response fields:**
 
-| Field             | Description                                                   |
-| ----------------- | ------------------------------------------------------------- |
-| net_used          | The net name applied (discovered or explicit)                 |
-| connected         | List of `ref/pin` keys successfully connected this call       |
-| already_connected | List of `ref/pin` keys that were already on the target net    |
-| failed            | List of `{pin, reason}` for any pins that could not be wired  |
+| Field                    | Description                                                                                                                                                     |
+| ------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `net_used`               | The net name applied (discovered or explicit)                                                                                                                   |
+| `style`                  | The style argument echoed back (`label` / `wire` / `auto`)                                                                                                      |
+| `connected`              | List of `ref/pin` keys successfully connected this call (via wire OR label)                                                                                     |
+| `already_connected`      | List of `ref/pin` keys that were already on the target net                                                                                                      |
+| `failed`                 | List of `{pin, reason}` for pins that could not be wired (e.g. on a different net)                                                                              |
+| `wired_pairs`            | Per-pair routing detail (`auto`/`wire` only): `{a, b, style, segments}`. `style` is the route shape: `straight`, `L`, `U`, `astar`, or `astar-tee`.            |
+| `routing_failures`       | Per-pair failures (`auto`/`wire` only): `{pair, reason}`. In `wire` mode any failure aborts the whole call before labels are placed.                            |
+| `auto_label_position`    | `[x, y]` of the single auto-label placed to name the wired fragment (omitted if no wire was laid or an existing same-net label already covers the new wire).    |
 
-**Usage Notes:** Handles the A→B→C orphan case — if B already has a "VCC" label and you call `connect_pins([B, C])`, C gets the label "VCC" too (not a new disconnected label). Idempotent: calling again with the same pins has no effect. Also mirrors the PCB pad net assignment for each newly connected pin. For connecting all pins of one component at once, use `connect_component_to_nets`.
+**Wire-routing algorithm** (`style="auto"` or `"wire"`): for each consecutive pin pair,
+
+1. Try a single straight segment if the pins are collinear and face each other.
+2. Try one-bend L-shapes (corner at either coordinate combination consistent with the pin angles).
+3. Try two-bend U-shapes (H-V-H or V-H-V bridges) when both pins face the same axis.
+4. Fall back to A\* on the 1.27 mm grid with bbox-and-wire obstacle avoidance, direction-aware corner cost, and same-net tee detection (the new wire may terminate on an existing same-net wire's interior).
+
+A 5-rule spurious-connection guard runs on every candidate path: rejects any segment that lands on an unrelated pin, an unrelated-net label, an unrelated-net wire endpoint (T-junction), collinearly overlaps an unrelated wire, or passes through the body bounding box of an unrelated symbol. Same-net wires/T-junctions are allowed (they're intended joins).
+
+**Auto-label**: when wires were laid and the resulting fragment isn't already reachable from an existing `netName` label via wire connectivity, `connect_pins` adds exactly one label at a wire endpoint to name the net. Without this, KiCad would auto-name unlabeled wire fragments (`Net-(R1-Pad2)` etc.) and multi-call usage would silently fragment named nets.
+
+**Usage Notes:**
+
+- Handles the A→B→C orphan case — if B already has a `"VCC"` label and you call `connect_pins([B, C])`, C joins net VCC (no duplicate disconnected label).
+- Idempotent: calling again with the same pins has no effect.
+- Mirrors PCB pad net assignment for each newly connected pin.
+- Power nets default to labels even in `auto` mode — they typically fan out widely and are clearer as labels.
+- Off-grid placements (where Δ between pins isn't a multiple of 1.27 mm) silently skip A\* and fall back to label.
+- For connecting all pins of one component at once, use `connect_component_to_nets`.
 
 ### connect_component_to_nets
 
