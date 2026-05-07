@@ -1,24 +1,44 @@
 # Schematic Autorouter — Design Plan
 
-Status: **Phase 2 SHIPPED (2026-05-07).**
-- `schematic_router.py` now generates straight, L-shape (1 bend), and
-  U-shape (2 bend) candidates. The first candidate that passes
-  `check_spurious_connections`, `max_len`, and `max_bends` wins.
-- `RouteResult.style` is now one of `"straight"`, `"L"`, or `"U"`.
-- `max_bends` is enforced (Phase 1 ignored it). Bumping below 1 or 2
-  reverts to straight-only / no L+U.
-- New helpers: `_l_shape_candidates`, `_u_shape_candidates`. Both filter
-  by pin outward angle so the polyline always exits each pin along its
-  outward direction. U-shape uses a 5.08 mm side-trip offset when both
-  pins face the same way.
-- Tests: `tests/test_schematic_router.py` (85 cases). Coverage includes
-  L/U candidate generators, L-shape route, U-V-H-V route, U-H-V-H route,
-  multi-segment polyline written to disk via `connect_pins`, and the
-  `max_bends=0` short-circuit.
-- **Restart the MCP server** to pick up Phase 2.
+Status: **Phase 3 SHIPPED (2026-05-07).**
+- A* on the 1.27 mm grid is now the fourth and final candidate generator.
+  `route_pair` tries straight → L → U → A*, returning the first that
+  passes `check_spurious_connections`, `max_len`, and `max_bends`.
+  `RouteResult.style` ∈ {"straight", "L", "U", "astar"}.
+- New 5th rule in `check_spurious_connections`: a candidate may not pass
+  through the interior of an unrelated symbol's body bbox. Bboxes that
+  contain an own pin endpoint are exempt. This rule applies to *every*
+  shape, not just A*; it caught Phase 1/2 cases where a straight wire
+  visually ran through a third symbol but didn't trip any electrical rule.
+- `Obstacles` gained `other_bboxes: List[(bbox, ref)]`, populated by
+  `_collect_bboxes` reusing `_compute_symbol_bbox_direct` from
+  `schematic_analysis`.
+- A* details: direction-aware nodes (state = (cell, last_dir)); cost
+  model `straight=1, corner=5, crossing=3` (crossing is unused in this
+  iteration — see "Deferred" below); first-step direction forced to d1's
+  outward angle; goal accepts only when arriving from the cell at
+  `goal + DIR[d2]` so the wire enters along d2's outward direction.
+  Search bounds = bbox of (p1, p2) + 25-cell margin.
+- Off-grid pin pairs (`p2 - p1` not a multiple of 1.27 mm) skip A* and
+  return the last shape-rejection reason.
+- Tests: `tests/test_schematic_router.py` (97 cases). New: `TestGridHelpers`,
+  `TestAStarSearch`, `test_astar_routes_around_obstacle_resistor`,
+  `test_astar_skipped_when_pins_off_relative_grid`.
+- **Restart the MCP server** to pick up Phase 3.
+
+**Deferred to Phase 4:**
+- Same-net wire detection (currently any existing wire blocks the cells
+  along it). Phase 4 should walk the wire/label graph to determine net
+  membership and allow A* to tee into existing same-net wires.
+- Crossing-with-penalty: currently `_build_grid_obstacles` blocks edges
+  collinear with any existing wire but doesn't apply a per-step penalty
+  for perpendicular crossings; the cost model has `crossing=3` reserved
+  for when this lands.
+- Multi-terminal Steiner tree (`route_pairs` with N>2 pins).
 
 Phase 1 (shipped 2026-05-06): straight-line + spurious-connection guard +
-`connect_pins(style=...)`. See git history for details.
+`connect_pins(style=...)`. Phase 2 (shipped 2026-05-07): L and U shapes.
+See git history for details.
 
 > **Pre-req that broke during Phase 1 work:** `PinLocator.get_pin_angle` had a
 > rotation-sign bug that was masked by rgb_switches being 100% rot=0. The
@@ -212,11 +232,16 @@ The router itself should be its own module — `python/commands/schematic_router
 - Still no full A\*. Most short pairs that aren't blocked by symbol
   obstacles will route with these shapes.
 
-**Phase 3 — A\* with obstacle avoidance** (~1–2 days):
-- Full grid search.
-- Symbol-bbox obstacles.
-- Other-net wire obstacles.
-- Crossing penalty, corner penalty.
+**Phase 3 — A\* with obstacle avoidance** ✅ DONE 2026-05-07:
+- 1.27 mm grid, 4-neighbour search, direction-aware nodes for the corner
+  cost model (straight=1, corner=5).
+- Symbol-bbox obstacles via `_build_grid_obstacles` (also used by the new
+  `check_spurious_connections` rule 5).
+- Existing wire edges: forbidden (blocks both same-net and other-net for
+  now — Phase 4 should split these so we can tee into same-net wires).
+- Pin entry/exit direction enforcement: first step from p1 must be along
+  d1; goal accepts only via the cell at `p2 + DIR[d2]`.
+- Off-grid pin pairs short-circuit to the last shape-rejection reason.
 
 **Phase 4 — agent feedback loop** (~few hours):
 - `connect_pins` returns enough diagnostic info for the agent to retry with

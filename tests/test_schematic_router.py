@@ -33,15 +33,22 @@ sys.modules.setdefault("pcbnew", MagicMock())
 from commands import schematic_router  # noqa: E402
 from commands.schematic_router import (  # noqa: E402
     DEFAULT_POWER_NETS,
+    GridObstacles,
     Obstacles,
     SchematicRouter,
+    _angle_to_dir,
+    _astar_search,
+    _cell_to_world,
     _collinear_and_facing,
     _l_shape_candidates,
+    _on_grid,
+    _opposite_dir,
     _point_on_segment,
     _segment_length,
     _segments_collinear_overlap,
     _U_OFFSET,
     _u_shape_candidates,
+    _world_to_cell,
     check_spurious_connections,
     is_power_net,
 )
@@ -251,6 +258,148 @@ class TestUShapeCandidates:
     def test_facing_apart_horizontal_no_u(self):
         # d1=180 (left), d2=0 (right), p2 is right of p1 → no consistent xm.
         assert _u_shape_candidates((10.0, 50.0), 180.0, (30.0, 60.0), 0.0) == []
+
+
+# ===========================================================================
+# Phase-3 grid + A* helpers
+# ===========================================================================
+
+
+@pytest.mark.unit
+class TestGridHelpers:
+    def test_angle_to_dir_cardinal(self):
+        # 0=E, 90=N, 180=W, 270=S
+        assert _angle_to_dir(0) == 0
+        assert _angle_to_dir(90) == 3
+        assert _angle_to_dir(180) == 2
+        assert _angle_to_dir(270) == 1
+
+    def test_opposite_dir(self):
+        assert _opposite_dir(0) == 2
+        assert _opposite_dir(1) == 3
+        assert _opposite_dir(2) == 0
+        assert _opposite_dir(3) == 1
+
+    def test_world_to_cell_round_trip(self):
+        origin = (101.6, 101.6)
+        cell = _world_to_cell((105.41, 101.6), origin)
+        assert cell == (3, 0)
+        back = _cell_to_world(cell, origin)
+        assert math.isclose(back[0], 105.41, abs_tol=1e-3)
+
+    def test_on_grid_true_for_multiples(self):
+        assert _on_grid((105.41, 101.6), origin=(101.6, 101.6))
+
+    def test_on_grid_false_for_non_multiples(self):
+        # Δ = (3.81, 0) = 3*1.27 ✓; but (3.5, 0) is not.
+        assert not _on_grid((105.1, 101.6), origin=(101.6, 101.6))
+
+
+@pytest.mark.unit
+class TestAStarSearch:
+    def test_straight_path_no_obstacles(self):
+        from commands.schematic_router import CostModel
+
+        cells = _astar_search(
+            start=(0, 0),
+            initial_dir=0,  # E
+            goal=(5, 0),
+            final_dir=2,  # W (outward from p2 → wire arrives east)
+            grid=GridObstacles(),
+            bounds_min=(-10, -10),
+            bounds_max=(10, 10),
+            cost_model=CostModel(),
+            max_steps=20,
+        )
+        assert cells is not None
+        # 6 cells: (0,0)..(5,0)
+        assert cells[0] == (0, 0) and cells[-1] == (5, 0)
+        assert len(cells) == 6
+
+    def test_routes_around_blocked_cells(self):
+        from commands.schematic_router import CostModel
+
+        # Block the direct east path at cells (3,0), (3,-1) etc. to force a
+        # detour either north or south.
+        blocked = {(3, 0), (3, 1), (3, 2), (3, 3), (3, 4), (3, 5)}
+        cells = _astar_search(
+            start=(0, 0),
+            initial_dir=0,
+            goal=(5, 0),
+            final_dir=2,
+            grid=GridObstacles(blocked_cells=blocked),
+            bounds_min=(-10, -10),
+            bounds_max=(10, 10),
+            cost_model=CostModel(),
+            max_steps=30,
+        )
+        assert cells is not None
+        # Path must not pass through any blocked cell
+        for c in cells:
+            assert c not in blocked
+        assert cells[0] == (0, 0) and cells[-1] == (5, 0)
+
+    def test_no_path_when_completely_walled_off(self):
+        from commands.schematic_router import CostModel
+
+        # Surround the goal with blocked cells so it is unreachable.
+        blocked = {
+            (4, 0), (5, -1), (6, 0), (5, 1),
+            # Plus the only feasible approach cell from goal+W = (4, 0)
+        }
+        cells = _astar_search(
+            start=(0, 0),
+            initial_dir=0,
+            goal=(5, 0),
+            final_dir=2,
+            grid=GridObstacles(blocked_cells=blocked),
+            bounds_min=(-3, -3),
+            bounds_max=(8, 3),
+            cost_model=CostModel(),
+            max_steps=40,
+        )
+        assert cells is None
+
+    def test_must_exit_in_initial_direction(self):
+        from commands.schematic_router import CostModel
+
+        # Goal lies WEST of start, but initial_dir forces an east first step.
+        # Path should still be findable with a U-turn detour.
+        cells = _astar_search(
+            start=(5, 0),
+            initial_dir=0,  # forced east
+            goal=(0, 0),
+            final_dir=0,  # outward east → wire arrives going west
+            grid=GridObstacles(),
+            bounds_min=(-2, -3),
+            bounds_max=(10, 3),
+            cost_model=CostModel(),
+            max_steps=30,
+        )
+        assert cells is not None
+        assert cells[0] == (5, 0)
+        assert cells[1] == (6, 0)  # forced first step east
+        assert cells[-1] == (0, 0)
+
+    def test_must_arrive_in_final_direction(self):
+        from commands.schematic_router import CostModel
+
+        # final_dir=N means the wire approaches goal from the north (cell goal+N).
+        cells = _astar_search(
+            start=(0, 0),
+            initial_dir=0,
+            goal=(5, 0),
+            final_dir=3,  # N → predecessor cell is (5,-1)
+            grid=GridObstacles(),
+            bounds_min=(-3, -3),
+            bounds_max=(8, 3),
+            cost_model=CostModel(),
+            max_steps=40,
+        )
+        assert cells is not None
+        # Last step must come from (5, -1)
+        assert cells[-2] == (5, -1)
+        assert cells[-1] == (5, 0)
 
 
 # ===========================================================================
@@ -582,6 +731,91 @@ class TestRoutePairIntegration:
         )
         assert not result.success
         assert result.reason == "over_max_bends"
+
+    def test_astar_routes_around_obstacle_resistor(self, tmp_path):
+        # On-grid placements: R1 at 101.6,101.6 (pin 2 at 105.41,101.6 going E)
+        # and R2 at 127.0,101.6 (pin 1 at 123.19,101.6 going W) — Δ = 14 cells
+        # in +x. R3 placed mid-way at (114.3, 101.6) rot=0 has a body bbox
+        # that completely blocks the y=101.6 horizontal line. A* should
+        # detour via 4+ cells north or south.
+        sch_text = textwrap.dedent("""\
+            (kicad_sch (version 20250114) (generator "test")
+              %s
+              (symbol (lib_id "Device:R") (at 101.6 101.6 90) (unit 1)
+                (property "Reference" "R1" (at 101.6 101.6 0))
+                (property "Value" "10k" (at 101.6 101.6 0))
+                (instances (project "test" (path "/" (reference "R1") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 127.0 101.6 90) (unit 1)
+                (property "Reference" "R2" (at 127.0 101.6 0))
+                (property "Value" "10k" (at 127.0 101.6 0))
+                (instances (project "test" (path "/" (reference "R2") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 114.3 101.6 0) (unit 1)
+                (property "Reference" "R3" (at 114.3 101.6 0))
+                (property "Value" "1k" (at 114.3 101.6 0))
+                (instances (project "test" (path "/" (reference "R3") (unit 1))))
+              )
+              (sheet_instances (path "/" (page "1")))
+            )
+        """) % R_LIB
+        sch = _write(tmp_path, "obstacle_astar.kicad_sch", sch_text)
+        result = SchematicRouter.route_pair(
+            sch, "R1", "2", "R2", "1",
+            target_net="SIG", max_len=100.0, max_bends=8,
+        )
+        assert result.success, f"route failed: {result.reason}"
+        assert result.style == "astar"
+        assert len(result.segments) >= 3
+        # First segment exits R1.pin2 (105.41, 101.6) going east
+        s0a, s0b = result.segments[0]
+        assert math.isclose(s0a[0], 105.41, abs_tol=1e-3)
+        assert math.isclose(s0a[1], 101.6, abs_tol=1e-3)
+        assert s0b[0] > s0a[0]
+        # Last segment arrives at R2.pin1 (123.19, 101.6) from the west
+        sNa, sNb = result.segments[-1]
+        assert math.isclose(sNb[0], 123.19, abs_tol=1e-3)
+        assert math.isclose(sNb[1], 101.6, abs_tol=1e-3)
+        assert sNa[0] < sNb[0]
+        # Path must NOT pass through R3's bbox y-range at the body x-range —
+        # specifically every interior point at x in [112.8, 115.8] must be
+        # outside [97.79, 105.41] in y.
+        for (a, b) in result.segments:
+            ax, ay = a
+            bx, by = b
+            if math.isclose(ay, by, abs_tol=1e-3):  # horizontal
+                # Horizontal segment at y=ay; check if it crosses R3's body x-range
+                xlo, xhi = min(ax, bx), max(ax, bx)
+                if xlo < 115.8 and xhi > 112.8:
+                    assert ay < 97.79 - 1e-3 or ay > 105.41 + 1e-3, (
+                        f"horizontal seg at y={ay} crosses R3 body"
+                    )
+
+    def test_astar_skipped_when_pins_off_relative_grid(self, tmp_path):
+        # Pre-existing fixture uses (100, 100) and (130, 110) which are NOT on
+        # a 1.27 mm relative grid. After L/U also fail, A* should be skipped
+        # rather than spinning up a search; the previous reject reason wins.
+        sch = _write(
+            tmp_path,
+            "offgrid.kicad_sch",
+            _make_two_resistors_sch(r2_xy=(130.0, 110.0)),
+        )
+        # Force a configuration where L/U have no candidate by using both
+        # pins facing the same way (R1.pin1 left and R2.pin2 right after
+        # placing R2 at off-grid x). For simplicity: pick the apart-pointing
+        # pair on aligned y=100 — Δ = (37.62, 0) is off grid, no shape works.
+        sch2 = _write(
+            tmp_path,
+            "apart_offgrid.kicad_sch",
+            _make_two_resistors_sch(r1_xy=(100.0, 100.0), r2_xy=(130.0, 100.0)),
+        )
+        result = SchematicRouter.route_pair(
+            sch2, "R1", "1", "R2", "2", target_net="SIG"
+        )
+        assert not result.success
+        # Either no_candidate_path (no shape worked, A* skipped due to off-grid)
+        # is acceptable; what matters is we don't return success or raise.
+        assert result.reason in ("no_candidate_path",)
 
     def test_obstacle_pin_in_path_rejected(self, tmp_path):
         # Place a third resistor whose pin 1 lies on the candidate y=100 segment.
