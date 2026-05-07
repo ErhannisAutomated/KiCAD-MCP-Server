@@ -514,3 +514,97 @@ class TestListFloatingLabelsIntegration:
         assert net["name"] == "FLOATING_NET"
         assert "connected_pin_count" in net
         assert net["connected_pin_count"] == 0
+
+
+# ---------------------------------------------------------------------------
+# TestPinNumberAssignmentRotated
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.integration
+class TestPinNumberAssignmentRotated:
+    """Regression: list_schematic_nets must report pin 1 vs pin 2 correctly when
+    a 2-pin symbol (e.g. resistor) is placed at rotation=90 or 270.  An earlier
+    inline transform omitted the math-CCW → screen-CCW angle negation, producing
+    mirrored pin coordinates that swapped pin 1 and pin 2 on rotated symbols.
+    """
+
+    def _make_rotated_resistor_sch(self, tmp_path: Path, rotation: int) -> Path:
+        """Build a schematic with one rotated Device:R; each pin gets its own named net."""
+        from commands.dynamic_symbol_loader import DynamicSymbolLoader
+
+        sch_path = tmp_path / f"rot{rotation}.kicad_sch"
+        shutil.copy(TEMPLATE_SCH, sch_path)
+
+        loader = DynamicSymbolLoader()
+        loader.add_component(
+            sch_path, "Device", "R",
+            reference="R1", value="1k", x=50.8, y=50.8, rotation=rotation,
+        )
+
+        # For Device:R, pin 1 is at lib (0, 3.81), pin 2 at (0, -3.81).
+        # After rotation in screen-CCW (negated math-CCW) the pin endpoints are:
+        #   rot=90:  pin1 → (sym_x - 3.81, sym_y), pin2 → (sym_x + 3.81, sym_y)
+        #   rot=270: pin1 → (sym_x + 3.81, sym_y), pin2 → (sym_x - 3.81, sym_y)
+        if rotation == 90:
+            pin1_x, pin1_y = 50.8 - 3.81, 50.8
+            pin2_x, pin2_y = 50.8 + 3.81, 50.8
+        elif rotation == 270:
+            pin1_x, pin1_y = 50.8 + 3.81, 50.8
+            pin2_x, pin2_y = 50.8 - 3.81, 50.8
+        else:
+            raise ValueError(rotation)
+
+        # 2.54 mm stub from each pin endpoint, then a label at the stub end.
+        def stub_to(x: float, y: float, dx: float) -> tuple[float, float]:
+            return x + dx, y
+
+        p1_end = stub_to(pin1_x, pin1_y, -2.54 if rotation == 90 else 2.54)
+        p2_end = stub_to(pin2_x, pin2_y, 2.54 if rotation == 90 else -2.54)
+
+        appended: list[str] = []
+        for i, (start, end) in enumerate([((pin1_x, pin1_y), p1_end), ((pin2_x, pin2_y), p2_end)], start=1):
+            appended.append(
+                f'  (wire (pts (xy {start[0]} {start[1]}) (xy {end[0]} {end[1]}))\n'
+                "    (stroke (width 0) (type default))\n"
+                f"    (uuid 22222222-0000-0000-0000-00000000000{i})\n"
+                "  )"
+            )
+        for i, (name, (x, y)) in enumerate([("PIN1_NET", p1_end), ("PIN2_NET", p2_end)], start=1):
+            appended.append(
+                f'  (label "{name}" (at {x} {y} 0)\n'
+                "    (effects (font (size 1.27 1.27)))\n"
+                f"    (uuid 33333333-0000-0000-0000-00000000000{i})\n"
+                "  )"
+            )
+
+        content = sch_path.read_text(encoding="utf-8")
+        idx = content.rfind(")")
+        content = content[:idx] + "\n" + "\n".join(appended) + "\n)"
+        sch_path.write_text(content, encoding="utf-8")
+        return sch_path
+
+    def _list_nets(self, sch_path: Path) -> dict:
+        with patch("kicad_interface.USE_IPC_BACKEND", False):
+            from kicad_interface import KiCADInterface
+            iface = KiCADInterface.__new__(KiCADInterface)
+        return iface._handle_list_schematic_nets({"schematicPath": str(sch_path)})
+
+    def _pins_on(self, result: dict, net_name: str) -> set:
+        for net in result["nets"]:
+            if net["name"] == net_name:
+                return {(c["component"], c["pin"]) for c in net.get("connections", [])}
+        return set()
+
+    @pytest.mark.parametrize("rotation", [90, 270])
+    def test_rotated_resistor_pin_numbers_match_geometry(self, rotation: int) -> None:
+        """Fixture wires pin 1 to PIN1_NET and pin 2 to PIN2_NET by geometry.
+        Bug pre-fix: list_schematic_nets reported them swapped."""
+        with tempfile.TemporaryDirectory() as tmp:
+            sch_path = self._make_rotated_resistor_sch(Path(tmp), rotation=rotation)
+            result = self._list_nets(sch_path)
+        assert result["success"] is True
+        assert ("R1", "1") in self._pins_on(result, "PIN1_NET")
+        assert ("R1", "2") in self._pins_on(result, "PIN2_NET")
+        assert ("R1", "2") not in self._pins_on(result, "PIN1_NET")
+        assert ("R1", "1") not in self._pins_on(result, "PIN2_NET")
