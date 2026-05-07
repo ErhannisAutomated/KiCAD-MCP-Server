@@ -1120,6 +1120,88 @@ class TestConnectPinsStyle:
         assert text.count('(label "SIG"') == 1
         assert "auto_label_position" not in result
 
+    def test_get_pin_net_finds_endpoint_label(self, tmp_path):
+        # Wire+label fixture: R1.pin2 should be detected as on net "OTHER".
+        # Previously masked by a kicad-skip __bool__ exception inside
+        # get_pin_net which silently returned None.
+        from commands.connection_schematic import ConnectionManager
+
+        sch_text = textwrap.dedent("""\
+            (kicad_sch (version 20250114) (generator "test")
+              %s
+              (symbol (lib_id "Device:R") (at 101.6 101.6 90) (unit 1)
+                (property "Reference" "R1" (at 101.6 101.6 0))
+                (property "Value" "10k" (at 101.6 101.6 0))
+                (instances (project "test" (path "/" (reference "R1") (unit 1))))
+              )
+              (wire (pts (xy 105.41 101.6) (xy 121.92 101.6)) (stroke (width 0) (type default)))
+              (label "OTHER" (at 105.41 101.6 0))
+              (sheet_instances (path "/" (page "1")))
+            )
+        """) % R_LIB
+        sch = _write(tmp_path, "labeled.kicad_sch", sch_text)
+        net = ConnectionManager.get_pin_net(sch, "R1", "2")
+        assert net == "OTHER"
+
+    def test_get_pin_net_finds_mid_wire_label(self, tmp_path):
+        # Label at a wire's interior (not at any endpoint) should still be
+        # detected — KiCad attaches labels to wires by geometric coincidence.
+        from commands.connection_schematic import ConnectionManager
+
+        sch_text = textwrap.dedent("""\
+            (kicad_sch (version 20250114) (generator "test")
+              %s
+              (symbol (lib_id "Device:R") (at 101.6 101.6 90) (unit 1)
+                (property "Reference" "R1" (at 101.6 101.6 0))
+                (property "Value" "10k" (at 101.6 101.6 0))
+                (instances (project "test" (path "/" (reference "R1") (unit 1))))
+              )
+              (wire (pts (xy 105.41 101.6) (xy 121.92 101.6)) (stroke (width 0) (type default)))
+              (label "MIDWIRE" (at 113.665 101.6 0))
+              (sheet_instances (path "/" (page "1")))
+            )
+        """) % R_LIB
+        sch = _write(tmp_path, "midlabel.kicad_sch", sch_text)
+        net = ConnectionManager.get_pin_net(sch, "R1", "2")
+        assert net == "MIDWIRE"
+
+    def test_connect_pins_detects_conflict_when_pin_on_different_net(
+        self, tmp_path
+    ):
+        # R1.pin2 is on labeled "OTHER" net; user tries to connect it to "SIG".
+        # connect_pins MUST refuse to silently merge OTHER and SIG.
+        from commands.connection_schematic import ConnectionManager
+
+        sch_text = textwrap.dedent("""\
+            (kicad_sch (version 20250114) (generator "test")
+              %s
+              (symbol (lib_id "Device:R") (at 101.6 101.6 90) (unit 1)
+                (property "Reference" "R1" (at 101.6 101.6 0))
+                (property "Value" "10k" (at 101.6 101.6 0))
+                (instances (project "test" (path "/" (reference "R1") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 125.73 101.6 90) (unit 1)
+                (property "Reference" "R2" (at 125.73 101.6 0))
+                (property "Value" "10k" (at 125.73 101.6 0))
+                (instances (project "test" (path "/" (reference "R2") (unit 1))))
+              )
+              (wire (pts (xy 105.41 101.6) (xy 121.92 101.6)) (stroke (width 0) (type default)))
+              (label "OTHER" (at 105.41 101.6 0))
+              (sheet_instances (path "/" (page "1")))
+            )
+        """) % R_LIB
+        sch = _write(tmp_path, "conflict.kicad_sch", sch_text)
+        result = ConnectionManager.connect_pins(
+            sch,
+            [{"ref": "R1", "pin": "2"}, {"ref": "R2", "pin": "1"}],
+            net_name="SIG",
+            style="auto",
+        )
+        assert result["success"] is False
+        # At least one failure mentioning OTHER (the conflicting net).
+        failed_reasons = [str(item) for item in result.get("failed", [])]
+        assert any("OTHER" in r for r in failed_reasons), failed_reasons
+
     def test_label_default_unchanged(self, tmp_path):
         # Default style is "label" — no routing attempt, behaviour identical to before.
         from commands.connection_schematic import ConnectionManager

@@ -464,11 +464,24 @@ class ConnectionManager:
         """
         Return the net label connected to this pin via the wire+label graph, or None.
 
-        Walks the wire network from the pin endpoint via BFS and returns the first
-        label found on any reachable node. Used by connect_pins to detect existing
-        net assignments before placing new labels.
+        Walks the wire/label graph from the pin endpoint via BFS and returns the
+        first label found on any reachable node OR on the interior of any
+        reachable wire segment. Used by connect_pins to detect existing net
+        assignments before placing new labels and to flag conflicts when a pin
+        is already on a different net than the caller's target.
+
+        Uses the sexpdata-based parsers from schematic_router.collect_obstacles
+        rather than kicad-skip's Schematic class — kicad-skip's collection
+        accessors have a __bool__ quirk (returns a list, not a bool) that
+        previously caused this function to silently raise and return None,
+        masking real cross-net conflicts.
         """
         try:
+            from commands.schematic_router import (
+                _point_on_segment as _pts_on_seg,
+                collect_obstacles,
+            )
+
             if not WIRE_MANAGER_AVAILABLE:
                 return None
             locator = ConnectionManager.get_pin_locator()
@@ -479,60 +492,52 @@ class ConnectionManager:
             if not pin_loc:
                 return None
 
-            sch = Schematic(str(schematic_path))
+            obstacles = collect_obstacles(schematic_path, exclude_pins=set())
+            pin_pt = (float(pin_loc[0]), float(pin_loc[1]))
+
             TOLS = 0.5  # mm
 
             def close(a: tuple, b: tuple) -> bool:
                 return abs(a[0] - b[0]) < TOLS and abs(a[1] - b[1]) < TOLS
 
-            # Collect wire edges as pairs of (x, y) tuples
-            wire_edges: List[tuple] = []
-            all_wire_pts: List[tuple] = []
-            for wire in getattr(sch, "wire", None) or []:
-                xy_list = getattr(getattr(wire, "pts", None), "xy", [])
-                pts_: List[tuple] = []
-                for pt in xy_list:
-                    v = getattr(pt, "value", None)
-                    if v:
-                        pts_.append((float(v[0]), float(v[1])))
-                for i in range(len(pts_) - 1):
-                    wire_edges.append((pts_[i], pts_[i + 1]))
-                    all_wire_pts.extend([pts_[i], pts_[i + 1]])
+            # Direct check: is any label coincident with the pin endpoint?
+            for (lpos, lname) in obstacles.other_labels:
+                if close(pin_pt, lpos):
+                    return lname
 
-            # Collect label positions → net name
-            label_map: List[tuple] = []  # [(pos_tuple, net_name)]
-            for lbl in getattr(sch, "label", None) or []:
-                at = getattr(lbl, "at", None)
-                v = getattr(at, "value", None) if at else None
-                name = getattr(lbl, "value", None)
-                if v and name:
-                    label_map.append(((float(v[0]), float(v[1])), name))
+            # Direct check: is the pin on the interior of any wire that has a
+            # coincident or interior label?
+            edges = obstacles.other_wires
+            for (ea, eb) in edges:
+                if _pts_on_seg(pin_pt[0], pin_pt[1], ea, eb, strict=False):
+                    for (lpos, lname) in obstacles.other_labels:
+                        if (
+                            close(ea, lpos)
+                            or close(eb, lpos)
+                            or _pts_on_seg(lpos[0], lpos[1], ea, eb, strict=False)
+                        ):
+                            return lname
 
-            pin_pt = (pin_loc[0], pin_loc[1])
-
-            # Seed BFS: pin endpoint itself plus any wire point coincident with pin
-            seeds: List[tuple] = [pin_pt] + [p for p in all_wire_pts if close(p, pin_pt)]
-
-            # Check seeds directly for a label
-            for seed in seeds:
-                for lpos, lname in label_map:
-                    if close(seed, lpos):
-                        return lname
-
-            # BFS through wire adjacency
-            visited: List[tuple] = list(seeds)
-            queue: List[tuple] = list(seeds)
+            # BFS through the wire graph from pin_pt. At each traversal, check
+            # for labels at the neighbor endpoint AND on the segment's interior
+            # (KiCad attaches labels to wires by geometric coincidence, so a
+            # mid-wire label still names the whole component).
+            visited: List[tuple] = [pin_pt]
+            queue: List[tuple] = [pin_pt]
             while queue:
-                current = queue.pop()
-                for ea, eb in wire_edges:
-                    if close(ea, current):
+                cur = queue.pop()
+                for (ea, eb) in edges:
+                    if close(ea, cur):
                         neighbor = eb
-                    elif close(eb, current):
+                    elif close(eb, cur):
                         neighbor = ea
                     else:
                         continue
-                    for lpos, lname in label_map:
-                        if close(neighbor, lpos):
+                    for (lpos, lname) in obstacles.other_labels:
+                        if (
+                            close(neighbor, lpos)
+                            or _pts_on_seg(lpos[0], lpos[1], ea, eb, strict=False)
+                        ):
                             return lname
                     if not any(close(neighbor, v) for v in visited):
                         visited.append(neighbor)
