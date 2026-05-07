@@ -98,6 +98,7 @@ export const toolCategories: ToolCategory[] = [
       "delete_schematic_net_label",
       "add_no_connect",
       "connect_to_net",
+      "connect_pins",
       "connect_passthrough",
       "get_net_connections",
       "list_schematic_nets",
@@ -159,6 +160,7 @@ export const directToolNames = [
   "annotate_schematic",
   "connect_passthrough",
   "connect_to_net",
+  "connect_pins",
   "add_schematic_net_label",
 
   // Schematic <-> PCB sync (F8 equivalent)

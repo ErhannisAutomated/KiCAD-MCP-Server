@@ -672,6 +672,88 @@ edit_schematic_component and set its value to an empty string.`,
     },
   );
 
+  // Connect multiple pins to one net (mixed wire/label routing)
+  server.tool(
+    "connect_pins",
+    "Connect two or more component pins to the same net. Replaces N individual connect_to_net calls. " +
+      "style='label' (default) gives every pin a stub+label like connect_to_net. " +
+      "style='auto' lays a real wire between consecutive pin pairs when geometry is friendly (straight, " +
+      "L, U, or A* with obstacle avoidance and same-net tee detection) and falls back to a label per pin " +
+      "when not. style='wire' is strict: hard-fails if any pair can't be wired. " +
+      "Power nets (VBUS, GND, +3V3, etc.) default to labels even in 'auto' mode. " +
+      "When a net is specified, exactly one auto-label is added at a wire endpoint so the net is named in " +
+      "KiCad (otherwise unlabeled wires get auto-generated names like Net-(R1-Pad2)). " +
+      "Use this for any 2+ pin same-net connection — handles existing labels, conflicts, and chained calls.",
+    {
+      schematicPath: z.string().describe("Path to the .kicad_sch file"),
+      pins: z
+        .array(
+          z.object({
+            ref: z.string().describe("Component reference (e.g. R1, U2)"),
+            pin: z.string().describe("Pin number/name (e.g. '1', '2', 'GND')"),
+          }),
+        )
+        .min(2)
+        .describe("List of pins to connect to the same net"),
+      netName: z
+        .string()
+        .optional()
+        .describe(
+          "Name of the target net. If omitted, an existing label on any of the listed pins is reused.",
+        ),
+      style: z
+        .enum(["label", "wire", "auto"])
+        .optional()
+        .describe(
+          "label: stub+label per pin (default). wire: hard-fail if any pair can't be wired. auto: try wire, fall back to label per pin.",
+        ),
+      maxLen: z
+        .number()
+        .optional()
+        .describe("Maximum wire path length in mm (longer falls back to label). Default 80."),
+      maxBends: z
+        .number()
+        .optional()
+        .describe("Maximum bends per wired pair (over this falls back to label). Default 4."),
+      powerNets: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Extends the built-in power-net list (VBUS, GND, +3V3, etc.) which always uses labels in auto mode.",
+        ),
+    },
+    async (args: {
+      schematicPath: string;
+      pins: { ref: string; pin: string }[];
+      netName?: string;
+      style?: "label" | "wire" | "auto";
+      maxLen?: number;
+      maxBends?: number;
+      powerNets?: string[];
+    }) => {
+      const result = await callKicadScript("connect_pins", args);
+      if (result.success) {
+        return {
+          content: [
+            {
+              type: "text",
+              text: JSON.stringify(result, null, 2),
+            },
+          ],
+        };
+      } else {
+        return {
+          content: [
+            {
+              type: "text",
+              text: `Failed to connect pins: ${result.message || "Unknown error"}`,
+            },
+          ],
+        };
+      }
+    },
+  );
+
   // Get net connections
   server.tool(
     "get_net_connections",
