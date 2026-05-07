@@ -14,6 +14,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 import sexpdata
 from commands.pin_locator import PinLocator
 from commands.wire_connectivity import _parse_virtual_connections, _to_iu
+from commands.wire_dragger import WireDragger
 from sexpdata import Symbol
 from skip import Schematic
 
@@ -348,25 +349,11 @@ def _transform_local_point(
     mirror_x: bool,
     mirror_y: bool,
 ) -> Tuple[float, float]:
+    """Transform a point from local symbol coordinates (lib y-up) to absolute
+    schematic coordinates (y-down).  Delegates to the canonical pin_world_xy
+    formula so this stays consistent with wire_dragger / wire_connectivity.
     """
-    Transform a point from local symbol coordinates to absolute schematic
-    coordinates using KiCad's transform order:
-    negate-y (lib y-up → schematic y-down) → mirror → rotate → translate.
-    """
-    # Library symbols use y-up; schematic uses y-down
-    ly = -ly
-
-    # Apply mirroring in local coords
-    if mirror_x:
-        ly = -ly
-    if mirror_y:
-        lx = -lx
-
-    # Apply rotation
-    if rotation != 0:
-        lx, ly = PinLocator.rotate_point(lx, ly, rotation)
-
-    return (sym_x + lx, sym_y + ly)
+    return WireDragger.pin_world_xy(lx, ly, sym_x, sym_y, rotation, mirror_x, mirror_y)
 
 
 def _compute_symbol_bbox_direct(
@@ -731,7 +718,8 @@ def _compute_pin_positions_direct(
     lookup in the schematic, so it works correctly when multiple symbols share
     the same reference designator (e.g. unannotated "Q?").
 
-    KiCad transform order: mirror (in local coords) → rotate → translate.
+    Delegates to the canonical pin_world_xy: y-flip → mirror → screen-CCW
+    rotate (= negated math angle) → translate.
     """
     sym_x = sym["x"]
     sym_y = sym["y"]
@@ -741,20 +729,11 @@ def _compute_pin_positions_direct(
 
     result: Dict[str, List[float]] = {}
     for pin_num, pin_data in pin_defs.items():
-        rel_x = float(pin_data["x"])
-        rel_y = float(pin_data["y"])
-
-        # Apply mirroring in local symbol coordinates
-        if mirror_x:
-            rel_y = -rel_y
-        if mirror_y:
-            rel_x = -rel_x
-
-        # Apply symbol rotation
-        if rotation != 0:
-            rel_x, rel_y = PinLocator.rotate_point(rel_x, rel_y, rotation)
-
-        result[pin_num] = [sym_x + rel_x, sym_y + rel_y]
+        wx, wy = WireDragger.pin_world_xy(
+            float(pin_data["x"]), float(pin_data["y"]),
+            sym_x, sym_y, rotation, mirror_x, mirror_y,
+        )
+        result[pin_num] = [wx, wy]
     return result
 
 

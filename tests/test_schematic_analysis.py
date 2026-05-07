@@ -769,10 +769,25 @@ class TestTransformLocalPoint:
         assert y == pytest.approx(-2.0)
 
     def test_rotation_90(self) -> None:
-        # ly=0 negated is still 0, then rotate lx=1 by 90°
+        # KiCad rotation is screen-CCW (= negated math-CCW).  After y-flip
+        # ly=0 stays 0, lx=1 rotated 90° screen-CCW goes from "right" to
+        # "above" — which in screen y-down means smaller y.
         x, y = _transform_local_point(1.0, 0.0, 0.0, 0.0, 90, False, False)
         assert x == pytest.approx(0.0, abs=1e-9)
-        assert y == pytest.approx(1.0, abs=1e-9)
+        assert y == pytest.approx(-1.0, abs=1e-9)
+
+    def test_rotation_matches_canonical_pin_world_xy(self) -> None:
+        """_transform_local_point must agree with WireDragger.pin_world_xy
+        for every rotation, since they share that single source of truth.
+        """
+        from commands.wire_dragger import WireDragger
+
+        for rot in (0, 90, 180, 270):
+            for mx in (False, True):
+                for my in (False, True):
+                    got = _transform_local_point(2.5, -1.5, 10.0, 20.0, rot, mx, my)
+                    want = WireDragger.pin_world_xy(2.5, -1.5, 10.0, 20.0, rot, mx, my)
+                    assert got == pytest.approx(want, abs=1e-9), (rot, mx, my)
 
 
 # ===================================================================
@@ -858,6 +873,40 @@ class TestComputeSymbolBboxWithGraphics:
         # X should be expanded with min_body=1.5: 100 ± 1.5
         assert min_x == pytest.approx(100 - 1.5)
         assert max_x == pytest.approx(100 + 1.5)
+
+    def test_asymmetric_symbol_bbox_matches_canonical(self) -> None:
+        """Regression: an asymmetric symbol (pins clustered on one side, body
+        offset from origin) must produce a bbox at the correct screen position
+        for every rotation.  The previous implementation skipped the y-flip in
+        pin transforms and used a non-negated rotation angle, which mirrored
+        pin coords across the symbol axis and shifted the bbox.
+
+        Validates against the canonical pin_world_xy formula.
+        """
+        from commands.wire_dragger import WireDragger
+
+        # Pins all on the +x side, body slightly above the origin in lib y-up.
+        pin_defs = {
+            "1": {"x": 5.08, "y": 3.81, "angle": 180, "length": 1.27, "name": "A", "type": "passive"},
+            "2": {"x": 5.08, "y": 1.27, "angle": 180, "length": 1.27, "name": "B", "type": "passive"},
+            "3": {"x": 5.08, "y": -1.27, "angle": 180, "length": 1.27, "name": "C", "type": "passive"},
+        }
+        graphics_points = [(-1.27, -1.27), (-1.27, 3.81), (3.81, -1.27), (3.81, 3.81)]
+
+        for rot in (0, 90, 180, 270):
+            sym = {"x": 100.0, "y": 100.0, "rotation": rot, "mirror_x": False, "mirror_y": False}
+            bbox = _compute_symbol_bbox_direct(sym, pin_defs, graphics_points=graphics_points)
+            assert bbox is not None
+
+            # Independent reference: union of canonical-transformed pin and graphics points
+            pts = []
+            for pdata in pin_defs.values():
+                pts.append(WireDragger.pin_world_xy(pdata["x"], pdata["y"], 100.0, 100.0, rot, False, False))
+            for lx, ly in graphics_points:
+                pts.append(WireDragger.pin_world_xy(lx, ly, 100.0, 100.0, rot, False, False))
+            xs = [p[0] for p in pts]; ys = [p[1] for p in pts]
+            want = (min(xs), min(ys), max(xs), max(ys))
+            assert bbox == pytest.approx(want, abs=1e-6), f"rot={rot}: bbox={bbox} want={want}"
 
     def test_rotated_symbol_graphics(self) -> None:
         """Graphics points should be rotated along with the symbol."""
