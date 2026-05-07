@@ -126,6 +126,29 @@ class TestCreateComponentInstanceUnit:
         assert 1 in units
         assert 2 in units
 
+    def test_instances_block_uses_real_project_and_root_uuid(self, tmp_path: Any) -> None:
+        """KiCad shows components as 'R?' / 'SW?' if (project ...) and (path ...) are
+        the literal placeholders 'project' and '/'. They must be the schematic stem
+        and '/<root_sheet_uuid>' so per-project annotation lookup succeeds."""
+        sch = tmp_path / "my_design.kicad_sch"
+        shutil.copy(EMPTY_SCH, sch)
+
+        root_uuid_match = re.search(r"\(uuid\s+\"?([0-9a-fA-F-]+)\"?\)", sch.read_text())
+        assert root_uuid_match
+        root_uuid = root_uuid_match.group(1)
+
+        loader = self._loader()
+        loader.create_component_instance(
+            sch, "Device", "R", reference="R7", value="10k", x=20, y=20
+        )
+        content = sch.read_text()
+
+        assert '(project "project"' not in content
+        assert '(project "my_design"' in content
+        assert f'(path "/{root_uuid}"' in content
+        # The only legitimate (path "/" ...) occurrence is sheet_instances.
+        assert content.count('(path "/"') <= 1
+
 
 # ---------------------------------------------------------------------------
 # Handler-level tests – _handle_add_schematic_component

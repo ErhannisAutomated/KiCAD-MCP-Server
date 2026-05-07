@@ -413,6 +413,22 @@ class DynamicSymbolLoader:
         full_lib_id = f"{library_name}:{symbol_name}"
         new_uuid = str(uuid.uuid4())
 
+        with open(schematic_path, "r", encoding="utf-8") as f:
+            content = f.read()
+
+        # KiCad keys per-project annotation off (project "<name>") (path "/<root_sheet_uuid>").
+        # Without real values KiCad can't match the open project to the placement-time
+        # reference and shows every component as un-annotated ("R?", "SW?", ...).
+        sch_path_obj = schematic_path if hasattr(schematic_path, "stem") else Path(schematic_path)
+        project_name = sch_path_obj.stem
+        root_uuid_match = re.search(r"\(uuid\s+\"?([0-9a-fA-F-]+)\"?\)", content)
+        if not root_uuid_match:
+            raise ValueError(
+                f"Could not find root sheet UUID in {schematic_path}; "
+                "schematic file appears malformed."
+            )
+        root_sheet_uuid = root_uuid_match.group(1)
+
         instance_block = f"""  (symbol (lib_id "{full_lib_id}") (at {x} {y} {int(rotation)}) (unit {unit})
     (in_bom yes) (on_board yes) (dnp no)
     (uuid "{new_uuid}")
@@ -429,17 +445,14 @@ class DynamicSymbolLoader:
       (effects (font (size 1.27 1.27)) (hide yes))
     )
     (instances
-      (project "project"
-        (path "/"
+      (project "{project_name}"
+        (path "/{root_sheet_uuid}"
           (reference "{reference}")
           (unit {unit})
         )
       )
     )
   )"""
-
-        with open(schematic_path, "r", encoding="utf-8") as f:
-            content = f.read()
 
         # Insert before (sheet_instances using direct string search.
         # This works for both pretty-printed and sexpdata-compacted single-line files.
