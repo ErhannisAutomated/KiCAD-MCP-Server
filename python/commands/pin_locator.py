@@ -279,11 +279,14 @@ class PinLocator:
 
             pin_def_angle = pins[pin_number].get("angle", 0)
 
-            # Mirror this exactly the way WireDragger.pin_world_xy does, in the
-            # same order: Y-flip (lib Y-up → screen Y-down) → mirror → rotate.
-            #
-            # Y-flip on an angle: negate it (reflects across X axis).
-            pin_def_angle = (-pin_def_angle) % 360
+            # NOTE: pin_world_xy Y-flips POSITIONS (lib Y-up → screen Y-down).
+            # We do NOT Y-flip the angle here. Callers use the formula
+            #   stub.x = pin.x + d * cos(angle)
+            #   stub.y = pin.y - d * sin(angle)
+            # The `-sin` already compensates for Y-down screen coords, so the
+            # angle stays in lib Y-up convention end-to-end. (An earlier version
+            # negated the angle here, which mis-cancelled the `-sin` and produced
+            # wire stubs going UP for bottom pins / DOWN for top pins.)
 
             # eeschema (symbol.h:43-44):
             #   (mirror x) = SYM_MIRROR_X = TRANSFORM(1,0,0,-1) → negates Y →
@@ -295,11 +298,20 @@ class PinLocator:
             if mirror_y:
                 pin_def_angle = (180 - pin_def_angle) % 360
 
-            # eeschema's rotation TRANSFORM is screen-CCW in Y-down, which is
-            # math-CW in standard atan2 convention — so subtract the rotation
-            # to match `pin_world_xy`'s `_rotate(..., -rotation)` call.
-            absolute_angle = (pin_def_angle - symbol_rotation) % 360
-            return absolute_angle
+            # In screen-stub-angle space (where dx = cos θ and dy_screen = -sin θ),
+            # rotating a symbol by `symbol_rotation` adds that rotation to the
+            # pin's angle. Derivation: the lib direction (cos θ, sin θ) becomes
+            # screen direction (cos θ, -sin θ) after Y-flip, then `_rotate(...,
+            # -rotation)` produces screen vector (cos(θ+rotation), -sin(θ+rotation)),
+            # i.e. the screen-stub-angle increases by `rotation`. (An earlier
+            # version subtracted the rotation; that worked for rot=0 only and
+            # silently produced 180°-wrong stubs on rotated symbols.)
+            absolute_angle = (pin_def_angle + symbol_rotation) % 360
+            # KiCad library pin (at x y angle) places the connecting end at (x,y)
+            # with `angle` pointing FROM the connecting end INTO the symbol body
+            # (i.e. inward). Callers want the outward direction so a wire stub
+            # extends away from the body — flip 180°.
+            return (absolute_angle + 180) % 360
 
         except Exception:
             return None

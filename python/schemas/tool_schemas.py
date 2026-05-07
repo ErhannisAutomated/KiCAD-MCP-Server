@@ -1525,7 +1525,15 @@ SCHEMATIC_TOOLS = [
             "existing label and reuses it for C, so A (already on B's net) is not orphaned. "
             "Conflict detection: if two pins carry *different* human-readable nets the call "
             "fails and lists conflicting_nets. Pins already on the target net are skipped "
-            "(idempotent). Returns: net_used, connected, already_connected, failed lists."
+            "(idempotent). "
+            "Style: 'label' (default) gives every fresh pin a stub + label (legacy "
+            "behaviour). 'wire' tries to draw a real wire between each consecutive "
+            "unconnected pair — Phase 1 only handles trivial collinear-and-facing cases — "
+            "and hard-fails any pair that cannot be routed. 'auto' tries wire first and "
+            "falls back to label per-pair on failure. Power/ground nets (VBUS, GND, +3V3 "
+            "etc.) default to label even in 'auto'. "
+            "Returns: net_used, connected, already_connected, failed lists; plus "
+            "wired_pairs and routing_failures when style != 'label'."
         ),
         "inputSchema": {
             "type": "object",
@@ -1558,6 +1566,38 @@ SCHEMATIC_TOOLS = [
                     "description": (
                         "Net name to use. Optional: if omitted, auto-detected from "
                         "existing labels on the listed pins."
+                    ),
+                },
+                "style": {
+                    "type": "string",
+                    "enum": ["label", "wire", "auto"],
+                    "description": (
+                        "How to connect each pair: 'label' (default, stub+label per pin), "
+                        "'wire' (real wires only, hard-fail otherwise), 'auto' (wire when "
+                        "possible, label fallback per pair)."
+                    ),
+                },
+                "maxLen": {
+                    "type": "number",
+                    "description": (
+                        "Max wire length in mm for a single segment "
+                        "(default 80.0). Only consulted when style != 'label'."
+                    ),
+                },
+                "maxBends": {
+                    "type": "integer",
+                    "description": (
+                        "Max corners allowed in a wire path (default 4). Phase 1 only "
+                        "emits zero-bend straight segments."
+                    ),
+                },
+                "powerNets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Extra net names to treat as power/ground (default-to-label even "
+                        "in 'auto' mode). Built-in defaults already cover VBUS, GND, "
+                        "+3V3, +5V, etc."
                     ),
                 },
             },

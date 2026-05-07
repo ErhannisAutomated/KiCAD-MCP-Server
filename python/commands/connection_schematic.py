@@ -548,6 +548,10 @@ class ConnectionManager:
         schematic_path: Path,
         pins: List[Dict[str, str]],
         net_name: Optional[str] = None,
+        style: str = "label",
+        max_len: float = 80.0,
+        max_bends: int = 4,
+        power_nets: Optional[List[str]] = None,
     ) -> Dict[str, Any]:
         """
         Connect two or more component pins to the same named net.
@@ -560,13 +564,30 @@ class ConnectionManager:
         Handles the A→B→C orphan case: connect_pins([B, C]) detects B's existing
         label and reuses it for C, leaving A's connection intact.
 
+        ``style`` controls how each consecutive pin pair is connected:
+          * ``"label"`` (default) — every fresh pin gets a stub + label
+            (current behaviour).
+          * ``"wire"`` — try to draw a real wire between each consecutive
+            unconnected pair; hard-fail if any pair cannot be routed.
+          * ``"auto"`` — try wire first, fall back to label per-pin on failure.
+
+        ``max_len`` (mm) and ``max_bends`` cap candidate wire paths.
+        ``power_nets`` extends the built-in default-to-label list (VBUS, GND,
+        rails like +3V3, etc.). See ``schematic_router.py``.
+
         Returns dict with keys:
-            success, net_used, connected, already_connected, failed, message
+            success, net_used, connected, already_connected, failed, message,
+            wired_pairs, routing_failures, style.
         """
         if not WIRE_MANAGER_AVAILABLE:
             return {"success": False, "message": "WireManager/PinLocator not available"}
         if not pins:
             return {"success": False, "message": "pins list is empty"}
+        if style not in ("label", "wire", "auto"):
+            return {
+                "success": False,
+                "message": f"invalid style '{style}' (expected label|wire|auto)",
+            }
 
         # Phase 1: discover current net on each pin (single file-read per pin)
         existing: Dict[str, Optional[str]] = {}
@@ -601,7 +622,139 @@ class ConnectionManager:
                 }
             resolved_net = human_nets[0] if human_nets else next(iter(found_nets))
 
-        # Phase 3: apply label to each pin that needs it
+        # Phase 2.5: optional wire-pair routing (style=wire|auto, non-power nets)
+        wired_pin_set: set = set()
+        wired_pairs: List[Dict[str, Any]] = []
+        routing_failures: List[Dict[str, Any]] = []
+
+        try_wire = style in ("wire", "auto")
+        if try_wire:
+            from commands.schematic_router import (
+                Obstacles,
+                SchematicRouter,
+                collect_obstacles,
+                is_power_net,
+            )
+            from commands.wire_manager import WireManager
+
+            if resolved_net and is_power_net(resolved_net, power_nets):
+                # Power nets default to labels; in "wire" mode this is a hard fail.
+                if style == "wire":
+                    return {
+                        "success": False,
+                        "net_used": resolved_net,
+                        "message": (
+                            f"net '{resolved_net}' is a power/ground rail; "
+                            "use style='label' or 'auto' for power nets."
+                        ),
+                    }
+            else:
+                # Build the obstacle map ONCE per call. We exclude all listed
+                # pins so a pin we are intentionally connecting (target endpoint)
+                # never trips the "pin lies on candidate wire" check.
+                exclude = {(p.get("ref", ""), str(p.get("pin", ""))) for p in pins}
+                obstacles = collect_obstacles(schematic_path, exclude_pins=exclude)
+
+                for i in range(len(pins) - 1):
+                    a = pins[i]
+                    b = pins[i + 1]
+                    a_ref, a_pin = a.get("ref", ""), a.get("pin", "")
+                    b_ref, b_pin = b.get("ref", ""), b.get("pin", "")
+                    if not (a_ref and a_pin and b_ref and b_pin):
+                        continue
+                    a_key = f"{a_ref}/{a_pin}"
+                    b_key = f"{b_ref}/{b_pin}"
+                    a_net = existing.get(a_key)
+                    b_net = existing.get(b_key)
+
+                    # Skip if either side is already on a non-target net (will
+                    # be reported in the per-pin label loop below).
+                    if (a_net and a_net != resolved_net) or (
+                        b_net and b_net != resolved_net
+                    ):
+                        if style == "wire":
+                            routing_failures.append(
+                                {
+                                    "pair": [a_key, b_key],
+                                    "reason": "pin already on a different net",
+                                }
+                            )
+                        continue
+                    # Phase 1 only attempts wires when both pins are fresh.
+                    if a_net is not None or b_net is not None:
+                        if style == "wire":
+                            routing_failures.append(
+                                {
+                                    "pair": [a_key, b_key],
+                                    "reason": "pin already on target net (phase 1 needs both fresh)",
+                                }
+                            )
+                        continue
+
+                    result = SchematicRouter.route_pair(
+                        schematic_path,
+                        a_ref,
+                        a_pin,
+                        b_ref,
+                        b_pin,
+                        target_net=resolved_net,
+                        max_len=max_len,
+                        max_bends=max_bends,
+                        obstacles=obstacles,
+                    )
+                    if result.success:
+                        # Apply the wire segments. Re-collect obstacles after
+                        # so subsequent pairs see the new wire as an obstacle.
+                        for (start, end) in result.segments:
+                            if not WireManager.add_wire(
+                                schematic_path, list(start), list(end)
+                            ):
+                                routing_failures.append(
+                                    {
+                                        "pair": [a_key, b_key],
+                                        "reason": "WireManager.add_wire returned False",
+                                    }
+                                )
+                                break
+                        else:
+                            wired_pin_set.add(a_key)
+                            wired_pin_set.add(b_key)
+                            wired_pairs.append(
+                                {
+                                    "a": a_key,
+                                    "b": b_key,
+                                    "style": result.style,
+                                    "segments": [
+                                        [list(s), list(e)] for (s, e) in result.segments
+                                    ],
+                                }
+                            )
+                            obstacles = collect_obstacles(
+                                schematic_path, exclude_pins=exclude
+                            )
+                    else:
+                        if style == "wire":
+                            routing_failures.append(
+                                {"pair": [a_key, b_key], "reason": result.reason}
+                            )
+                        # auto: silently fall through to label fallback
+
+        # In strict "wire" mode, any routing failure aborts before adding labels.
+        if style == "wire" and routing_failures:
+            return {
+                "success": False,
+                "net_used": resolved_net,
+                "wired_pairs": wired_pairs,
+                "routing_failures": routing_failures,
+                "style": style,
+                "message": (
+                    f"connect_pins(style=wire) to '{resolved_net}': "
+                    f"{len(wired_pairs)} pair(s) wired, "
+                    f"{len(routing_failures)} pair(s) failed."
+                ),
+            }
+
+        # Phase 3: per-pin label loop for everything not already wired
         connected: List[str] = []
         already_connected: List[str] = []
         failed: List[Dict] = []
@@ -613,6 +766,10 @@ class ConnectionManager:
                 continue
 
             key = f"{ref}/{pin}"
+            if key in wired_pin_set:
+                connected.append(key)
+                continue
+
             current = existing.get(key)
 
             if current == resolved_net:
@@ -638,6 +795,8 @@ class ConnectionManager:
                 failed.append({"pin": key, "reason": result.get("message", "unknown")})
 
         parts: List[str] = []
+        if wired_pairs:
+            parts.append(f"{len(wired_pairs)} pair(s) wired")
         if connected:
             parts.append(f"{len(connected)} connected")
         if already_connected:
@@ -645,17 +804,22 @@ class ConnectionManager:
         if failed:
             parts.append(f"{len(failed)} failed")
 
-        return {
+        result_dict: Dict[str, Any] = {
             "success": len(failed) == 0,
             "net_used": resolved_net,
             "connected": connected,
             "already_connected": already_connected,
             "failed": failed,
+            "style": style,
             "message": (
-                f"connect_pins to '{resolved_net}': "
+                f"connect_pins(style={style}) to '{resolved_net}': "
                 + (", ".join(parts) if parts else "nothing to do")
             ),
         }
+        if try_wire:
+            result_dict["wired_pairs"] = wired_pairs
+            result_dict["routing_failures"] = routing_failures
+        return result_dict
 
     @staticmethod
     def generate_netlist(

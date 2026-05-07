@@ -2262,13 +2262,25 @@ class KiCADInterface:
             schematic_path = params.get("schematicPath")
             pins = params.get("pins", [])
             net_name = params.get("netName")
+            style = params.get("style", "label")
+            max_len = params.get("maxLen", 80.0)
+            max_bends = params.get("maxBends", 4)
+            power_nets = params.get("powerNets")
 
             if not schematic_path:
                 return {"success": False, "message": "Missing required parameter: schematicPath"}
             if not pins:
                 return {"success": False, "message": "pins must be a non-empty list"}
 
-            result = ConnectionManager.connect_pins(Path(schematic_path), pins, net_name)
+            result = ConnectionManager.connect_pins(
+                Path(schematic_path),
+                pins,
+                net_name,
+                style=style,
+                max_len=max_len,
+                max_bends=max_bends,
+                power_nets=power_nets,
+            )
 
             # Mirror PCB pad assignments for every newly connected pin
             if self.board and result.get("net_used"):

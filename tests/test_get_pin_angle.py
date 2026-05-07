@@ -104,13 +104,28 @@ def _write_sch(tmp_path: Path, rotation: float, mirror: str | None) -> Path:
 
 
 def _expected_stub_angle(pin_num: str, rotation: float, mirror: str | None) -> float:
-    """Geometrically expected outward angle: extend in library coords by +length
-    along library angle, transform to world, take atan2 of displacement."""
+    """Geometrically expected OUTWARD stub angle.
+
+    The KiCad library convention is that ``(pin ... (at x y angle) ...)`` has
+    ``angle`` pointing FROM the connecting end INTO the symbol body — i.e.
+    *inward*. The outward stub direction is therefore ``angle + 180`` in lib
+    space. We extend the pin one length-unit along that outward direction,
+    transform pin and outward point to world coordinates via
+    ``WireDragger.pin_world_xy``, and compute the angle suitable for the
+    standard stub formula::
+
+        stub.x = pin.x + d * cos(θ)
+        stub.y = pin.y - d * sin(θ)        # screen Y-down
+
+    so callers can drop θ straight in.
+    """
     pin = PIN_DEFS[pin_num]
     px, py = pin["x"], pin["y"]
-    lib_angle_rad = math.radians(pin["angle"])
-    ox = px + pin["length"] * math.cos(lib_angle_rad)
-    oy = py + pin["length"] * math.sin(lib_angle_rad)
+    # Lib OUTWARD direction = (lib_angle + 180); we take a step of +length
+    # along that direction in lib space.
+    out_lib_rad = math.radians((pin["angle"] + 180) % 360)
+    ox = px + pin["length"] * math.cos(out_lib_rad)
+    oy = py + pin["length"] * math.sin(out_lib_rad)
 
     mirror_x = mirror == "x"
     mirror_y = mirror == "y"
@@ -122,13 +137,13 @@ def _expected_stub_angle(pin_num: str, rotation: float, mirror: str | None) -> f
         ox, oy, SYMBOL_X, SYMBOL_Y, rotation, mirror_x, mirror_y
     )
 
-    deg = math.degrees(math.atan2(wy_out - wy_pin, wx_out - wx_pin)) % 360.0
+    # Convert the screen-frame world displacement into stub-formula angle:
+    #   dx = cos(θ),  dy_screen = -sin(θ)   ⇒   θ = atan2(-dy_screen, dx)
+    dx = wx_out - wx_pin
+    dy_screen = wy_out - wy_pin
+    deg = math.degrees(math.atan2(-dy_screen, dx)) % 360.0
     # Snap to 0/90/180/270 (axis-aligned pins; FP noise tolerance)
-    snapped = round(deg / 90.0) * 90.0 % 360.0
-    if abs(((deg - snapped) + 540) % 360 - 180) < 1e-6:
-        # within tolerance
-        return snapped
-    return snapped
+    return round(deg / 90.0) * 90.0 % 360.0
 
 
 # ---------------------------------------------------------------------------
