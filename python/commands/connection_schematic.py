@@ -655,6 +655,27 @@ class ConnectionManager:
                 exclude = {(p.get("ref", ""), str(p.get("pin", ""))) for p in pins}
                 obstacles = collect_obstacles(schematic_path, exclude_pins=exclude)
 
+                # Phase 4 — pre-locate every pin in the call. The router uses
+                # these as `extra_own_endpoints` to classify wires connected
+                # to any of our pins as same-net (so a freshly-laid wire from
+                # an earlier pair is recognised on the next pair without a
+                # label).
+                pin_endpoints: Dict[str, Tuple[float, float]] = {}
+                _locator_for_endpoints = ConnectionManager.get_pin_locator()
+                if _locator_for_endpoints is not None:
+                    for p in pins:
+                        ref, pin = p.get("ref", ""), p.get("pin", "")
+                        if not (ref and pin):
+                            continue
+                        loc = _locator_for_endpoints.get_pin_location(
+                            schematic_path, ref, pin
+                        )
+                        if loc:
+                            pin_endpoints[f"{ref}/{pin}"] = (
+                                float(loc[0]),
+                                float(loc[1]),
+                            )
+
                 for i in range(len(pins) - 1):
                     a = pins[i]
                     b = pins[i + 1]
@@ -680,16 +701,17 @@ class ConnectionManager:
                                 }
                             )
                         continue
-                    # Phase 1 only attempts wires when both pins are fresh.
-                    if a_net is not None or b_net is not None:
-                        if style == "wire":
-                            routing_failures.append(
-                                {
-                                    "pair": [a_key, b_key],
-                                    "reason": "pin already on target net (phase 1 needs both fresh)",
-                                }
-                            )
+                    # If both pins are already on target_net, the pair is a
+                    # no-op (handled in the per-pin label loop as
+                    # already_connected).
+                    if a_net == resolved_net and b_net == resolved_net:
                         continue
+
+                    extras = tuple(
+                        pt
+                        for key, pt in pin_endpoints.items()
+                        if key not in (a_key, b_key)
+                    )
 
                     result = SchematicRouter.route_pair(
                         schematic_path,
@@ -701,6 +723,7 @@ class ConnectionManager:
                         max_len=max_len,
                         max_bends=max_bends,
                         obstacles=obstacles,
+                        extra_own_endpoints=extras,
                     )
                     if result.success:
                         # Apply the wire segments. Re-collect obstacles after

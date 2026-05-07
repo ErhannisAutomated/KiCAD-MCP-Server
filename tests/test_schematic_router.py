@@ -39,6 +39,7 @@ from commands.schematic_router import (  # noqa: E402
     _angle_to_dir,
     _astar_search,
     _cell_to_world,
+    _classify_wires_by_net,
     _collinear_and_facing,
     _l_shape_candidates,
     _on_grid,
@@ -400,6 +401,66 @@ class TestAStarSearch:
         # Last step must come from (5, -1)
         assert cells[-2] == (5, -1)
         assert cells[-1] == (5, 0)
+
+
+# ===========================================================================
+# Phase-4 wire-net classifier
+# ===========================================================================
+
+
+@pytest.mark.unit
+class TestClassifyWiresByNet:
+    def test_label_marks_connected_component(self):
+        # Wires 0 and 1 share an endpoint and are labeled SIG via wire 0's
+        # left endpoint. Wire 2 is disconnected and unlabeled.
+        obs = Obstacles(
+            other_pins=[],
+            other_labels=[((0.0, 50.0), "SIG")],
+            other_wires=[
+                ((0.0, 50.0), (10.0, 50.0)),
+                ((10.0, 50.0), (20.0, 50.0)),
+                ((50.0, 50.0), (60.0, 50.0)),
+            ],
+        )
+        same = _classify_wires_by_net(obs, "SIG")
+        assert same == {0, 1}
+
+    def test_own_endpoint_marks_component_without_label(self):
+        # No label, but our own pin endpoint touches wire 0 — still classified.
+        obs = Obstacles(
+            other_pins=[],
+            other_labels=[],
+            other_wires=[
+                ((0.0, 50.0), (10.0, 50.0)),
+                ((10.0, 50.0), (20.0, 50.0)),
+                ((50.0, 50.0), (60.0, 50.0)),
+            ],
+        )
+        same = _classify_wires_by_net(
+            obs, "SIG", own_pin_endpoints=[(0.0, 50.0)]
+        )
+        assert same == {0, 1}
+
+    def test_different_net_label_returns_empty(self):
+        obs = Obstacles(
+            other_pins=[],
+            other_labels=[((0.0, 50.0), "OTHER")],
+            other_wires=[((0.0, 50.0), (10.0, 50.0))],
+        )
+        assert _classify_wires_by_net(obs, "SIG") == set()
+
+    def test_t_junction_propagates_classification(self):
+        # Wire 0 horizontal y=50; wire 1's endpoint lands on wire 0's interior.
+        # SIG label is on wire 1's far endpoint — both wires must classify.
+        obs = Obstacles(
+            other_pins=[],
+            other_labels=[((5.0, 60.0), "SIG")],
+            other_wires=[
+                ((0.0, 50.0), (10.0, 50.0)),  # horizontal
+                ((5.0, 50.0), (5.0, 60.0)),  # vertical, T-juncts on wire 0
+            ],
+        )
+        assert _classify_wires_by_net(obs, "SIG") == {0, 1}
 
 
 # ===========================================================================
@@ -954,6 +1015,60 @@ class TestConnectPinsStyle:
         assert text.count("(wire") == 3
         # No SIG label was added — the U-shape covered the whole net.
         assert '"SIG"' not in text
+
+    def test_phase4_tees_into_existing_same_net_wire(self, tmp_path):
+        # Pre-existing R1↔R2 wire labeled SIG at the R1 endpoint; R3 placed
+        # above the wire pointing down. connect_pins([R3, R1]) should tee R3
+        # into the existing wire mid-segment via multi-goal A*, NOT route
+        # all the way to R1.pin2.
+        from commands.connection_schematic import ConnectionManager
+
+        sch_text = textwrap.dedent("""\
+            (kicad_sch (version 20250114) (generator "test")
+              %s
+              (symbol (lib_id "Device:R") (at 101.6 101.6 90) (unit 1)
+                (property "Reference" "R1" (at 101.6 101.6 0))
+                (property "Value" "10k" (at 101.6 101.6 0))
+                (instances (project "test" (path "/" (reference "R1") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 125.73 101.6 90) (unit 1)
+                (property "Reference" "R2" (at 125.73 101.6 0))
+                (property "Value" "10k" (at 125.73 101.6 0))
+                (instances (project "test" (path "/" (reference "R2") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 113.03 116.84 0) (unit 1)
+                (property "Reference" "R3" (at 113.03 116.84 0))
+                (property "Value" "1k" (at 113.03 116.84 0))
+                (instances (project "test" (path "/" (reference "R3") (unit 1))))
+              )
+              (wire (pts (xy 105.41 101.6) (xy 121.92 101.6)) (stroke (width 0) (type default)))
+              (label "SIG" (at 105.41 101.6 0))
+              (sheet_instances (path "/" (page "1")))
+            )
+        """) % R_LIB
+        sch = _write(tmp_path, "tee.kicad_sch", sch_text)
+        result = ConnectionManager.connect_pins(
+            sch,
+            [{"ref": "R3", "pin": "1"}, {"ref": "R1", "pin": "2"}],
+            net_name="SIG",
+            style="auto",
+        )
+        assert result["success"], result.get("message")
+        # The pair should have been routed (R1.pin2 already on SIG, R3.pin1 fresh).
+        assert len(result["wired_pairs"]) == 1
+        wp = result["wired_pairs"][0]
+        # Style is astar-tee when A* terminates at a same-net cell instead of p2.
+        assert wp["style"] == "astar-tee", f"got style={wp['style']}"
+        # The new wire should END at a point on the existing R1-R2 wire
+        # (y=101.6, x in [105.41, 121.92]). Specifically the cheapest tee
+        # is straight down from R3.pin1 (113.03, 113.03) to (113.03, 101.6).
+        last_seg = wp["segments"][-1]
+        end_x, end_y = last_seg[1]
+        assert math.isclose(end_y, 101.6, abs_tol=1e-3)
+        assert 105.41 - 1e-3 <= end_x <= 121.92 + 1e-3
+        # And the file now contains both the original and the new wire.
+        text = sch.read_text()
+        assert text.count("(wire") >= 2
 
     def test_label_default_unchanged(self, tmp_path):
         # Default style is "label" — no routing attempt, behaviour identical to before.

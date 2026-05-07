@@ -1,44 +1,44 @@
 # Schematic Autorouter — Design Plan
 
-Status: **Phase 3 SHIPPED (2026-05-07).**
-- A* on the 1.27 mm grid is now the fourth and final candidate generator.
-  `route_pair` tries straight → L → U → A*, returning the first that
-  passes `check_spurious_connections`, `max_len`, and `max_bends`.
-  `RouteResult.style` ∈ {"straight", "L", "U", "astar"}.
-- New 5th rule in `check_spurious_connections`: a candidate may not pass
-  through the interior of an unrelated symbol's body bbox. Bboxes that
-  contain an own pin endpoint are exempt. This rule applies to *every*
-  shape, not just A*; it caught Phase 1/2 cases where a straight wire
-  visually ran through a third symbol but didn't trip any electrical rule.
-- `Obstacles` gained `other_bboxes: List[(bbox, ref)]`, populated by
-  `_collect_bboxes` reusing `_compute_symbol_bbox_direct` from
-  `schematic_analysis`.
-- A* details: direction-aware nodes (state = (cell, last_dir)); cost
-  model `straight=1, corner=5, crossing=3` (crossing is unused in this
-  iteration — see "Deferred" below); first-step direction forced to d1's
-  outward angle; goal accepts only when arriving from the cell at
-  `goal + DIR[d2]` so the wire enters along d2's outward direction.
-  Search bounds = bbox of (p1, p2) + 25-cell margin.
-- Off-grid pin pairs (`p2 - p1` not a multiple of 1.27 mm) skip A* and
-  return the last shape-rejection reason.
-- Tests: `tests/test_schematic_router.py` (97 cases). New: `TestGridHelpers`,
-  `TestAStarSearch`, `test_astar_routes_around_obstacle_resistor`,
-  `test_astar_skipped_when_pins_off_relative_grid`.
-- **Restart the MCP server** to pick up Phase 3.
+Status: **Phase 4 (same-net tee detection) SHIPPED (2026-05-07).**
+- New helper `_classify_wires_by_net(obstacles, target_net,
+  own_pin_endpoints=...)` walks the wire-adjacency graph (with T-junction
+  detection) and returns the set of wire indices that already belong to
+  *target_net*. A wire is on target_net if its component contains either
+  a target_net label or one of the caller's own pin endpoints.
+- `check_spurious_connections` now takes `same_net_wire_indices`; rules
+  3 and 4 (T-junctions and collinear overlaps) skip these wires because
+  joining the same net is the *intended* outcome, not a spurious short.
+- `_build_grid_obstacles` skips forbidden-edge addition for same-net
+  wires so A* can step along/across them when useful.
+- `_astar_search` gained `extra_goal_cells: Set[Cell]`. Reaching any of
+  these terminates the search with no direction constraint, so the new
+  wire produces a clean tee into the existing same-net geometry.
+- `route_pair` reorders attempts when same-net wires exist: A* runs
+  *first* with same-net cells as extra goals; shapes serve as fallback.
+  When no same-net wires exist, shapes run first (current behaviour).
+  `RouteResult.style` adds "astar-tee" for tee terminations.
+- `connect_pins` no longer skips pairs where one pin is already on
+  target_net and the other is fresh — those now flow into route_pair,
+  which finds the appropriate tee. All pin endpoints in the call are
+  passed as `extra_own_endpoints` so a freshly-laid wire from an earlier
+  pair is recognised as same-net on the next pair without a label.
+- Tests: `tests/test_schematic_router.py` (102 cases). New:
+  `TestClassifyWiresByNet` (4), `test_phase4_tees_into_existing_same_net_wire`.
+- **Restart the MCP server** to pick up Phase 4.
 
-**Deferred to Phase 4:**
-- Same-net wire detection (currently any existing wire blocks the cells
-  along it). Phase 4 should walk the wire/label graph to determine net
-  membership and allow A* to tee into existing same-net wires.
-- Crossing-with-penalty: currently `_build_grid_obstacles` blocks edges
-  collinear with any existing wire but doesn't apply a per-step penalty
-  for perpendicular crossings; the cost model has `crossing=3` reserved
-  for when this lands.
-- Multi-terminal Steiner tree (`route_pairs` with N>2 pins).
+**Still deferred:**
+- Per-step crossing penalty (`cost_model.crossing=3` reserved but unused);
+  perpendicular crossings of unrelated-net wires currently incur no extra
+  cost beyond the normal step.
+- Multi-terminal Steiner tree (route 3+ pins on one net at once with
+  optimal joins). Currently we do N-1 sequential pair routings with
+  same-net awareness, which is good but not Steiner-optimal.
+- Agent feedback loop with `viaPoints` for manual hints.
 
 Phase 1 (shipped 2026-05-06): straight-line + spurious-connection guard +
 `connect_pins(style=...)`. Phase 2 (shipped 2026-05-07): L and U shapes.
-See git history for details.
+Phase 3 (shipped 2026-05-07): A* + symbol-body guard. See git history.
 
 > **Pre-req that broke during Phase 1 work:** `PinLocator.get_pin_angle` had a
 > rotation-sign bug that was masked by rgb_switches being 100% rot=0. The
@@ -243,10 +243,21 @@ The router itself should be its own module — `python/commands/schematic_router
   d1; goal accepts only via the cell at `p2 + DIR[d2]`.
 - Off-grid pin pairs short-circuit to the last shape-rejection reason.
 
-**Phase 4 — agent feedback loop** (~few hours):
-- `connect_pins` returns enough diagnostic info for the agent to retry with
-  hints (e.g. "force this segment through point (X, Y)" or "use a label
-  instead").
+**Phase 4 — same-net tee detection** ✅ DONE 2026-05-07:
+- Wire-adjacency walker classifies existing wires as same-net via either
+  a target_net label or an own-pin-endpoint match.
+- Rules 3 (T-junction) and 4 (collinear overlap) skip same-net wires.
+- A* gained multi-goal termination (`extra_goal_cells`) so the new wire
+  can end at any cell on a same-net wire/label.
+- `route_pair` runs A* first when same-net wires exist, shapes first
+  otherwise. Style "astar-tee" indicates a tee termination.
+- `connect_pins` no longer skips pairs where one pin is already on the
+  target net.
+
+**Phase 5+ (planned, agent-feedback loop, originally Phase 4):**
+- `connect_pins` returns enough diagnostic info for the agent to retry
+  with hints (e.g. "force this segment through point (X, Y)" or "use a
+  label instead").
 - Optional `viaPoints` param to manually thread paths.
 
 Phases 1 and 2 are usable on their own — most simple test boards (like

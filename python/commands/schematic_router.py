@@ -1,10 +1,15 @@
 """
-Schematic Router — Phase 3.
+Schematic Router — Phase 4.
 
 Draws real wires (polylines) between pin endpoints when geometry is friendly,
 falling back to net labels via the caller when it isn't. ``route_pair`` tries
 straight (0 bends), L-shape (1 bend), U-shape (2 bend), and finally A* on a
 1.27 mm grid with symbol-bbox + unrelated-net-wire obstacles.
+
+Phase 4 adds same-net detection: existing wires/labels that already belong
+to ``target_net`` are NOT obstacles, and A* may tee into them as a valid
+termination (multi-goal). Same-net classification is by label match plus
+"connected to one of the caller's own pins".
 
 The spurious-connection guard is the single most important correctness check
 and is applied for every Phase.
@@ -361,6 +366,7 @@ def _build_grid_obstacles(
     snap: float = _GRID,
     pad_cells: int = 25,
     own_refs: Tuple[str, str] = ("", ""),
+    same_net_wire_indices: Optional[Set[int]] = None,
 ) -> Tuple[GridObstacles, Tuple[int, int], Tuple[int, int]]:
     """Build a `GridObstacles` covering the bbox of (p1, p2) plus *pad_cells*
     of margin in each direction.
@@ -433,11 +439,14 @@ def _build_grid_obstacles(
         if min_x <= cell[0] <= max_x and min_y <= cell[1] <= max_y:
             grid.blocked_cells.add(cell)
 
-    # 4) Existing wires — every grid edge that overlaps an unrelated wire is
-    # forbidden (collinear overlap would short two nets together). We do not
-    # currently distinguish same-net from other-net wires here (Phase 4 work);
-    # all existing wires are treated as obstacles for new wires.
-    for ((wx1, wy1), (wx2, wy2)) in obstacles.other_wires:
+    # 4) Existing wires — every grid edge that overlaps an *unrelated* wire is
+    # forbidden (collinear overlap would short two nets together). Same-net
+    # wires (Phase 4) skip this rule because tee/overlap with them is the
+    # desired join behaviour.
+    same_net_set = same_net_wire_indices or set()
+    for idx, ((wx1, wy1), (wx2, wy2)) in enumerate(obstacles.other_wires):
+        if idx in same_net_set:
+            continue
         wp1 = _world_to_cell((wx1, wy1), origin, snap)
         wp2 = _world_to_cell((wx2, wy2), origin, snap)
         if wp1 == wp2:
@@ -465,6 +474,54 @@ def _build_grid_obstacles(
     return grid, (min_x, min_y), (max_x, max_y)
 
 
+def _same_net_cells_in_bounds(
+    obstacles: Obstacles,
+    same_net_indices: Set[int],
+    target_net: str,
+    *,
+    origin: Point,
+    snap: float,
+    bounds_min: Tuple[int, int],
+    bounds_max: Tuple[int, int],
+) -> Set[Tuple[int, int]]:
+    """Compute the set of grid cells covered by same-net wires/labels.
+
+    Used by A* as ``extra_goal_cells``: when the search reaches one of these
+    cells, it terminates with a tee-style join into the existing same-net
+    geometry. Out-of-bounds cells are dropped.
+    """
+    out: Set[Tuple[int, int]] = set()
+
+    def _add_if_in_bounds(cell: Tuple[int, int]) -> None:
+        if (
+            bounds_min[0] <= cell[0] <= bounds_max[0]
+            and bounds_min[1] <= cell[1] <= bounds_max[1]
+        ):
+            out.add(cell)
+
+    for idx in same_net_indices:
+        a, b = obstacles.other_wires[idx]
+        a_cell = _world_to_cell(a, origin, snap)
+        b_cell = _world_to_cell(b, origin, snap)
+        if a_cell == b_cell:
+            _add_if_in_bounds(a_cell)
+            continue
+        if a_cell[0] == b_cell[0]:  # vertical
+            lo, hi = min(a_cell[1], b_cell[1]), max(a_cell[1], b_cell[1])
+            for iy in range(lo, hi + 1):
+                _add_if_in_bounds((a_cell[0], iy))
+        elif a_cell[1] == b_cell[1]:  # horizontal
+            lo, hi = min(a_cell[0], b_cell[0]), max(a_cell[0], b_cell[0])
+            for ix in range(lo, hi + 1):
+                _add_if_in_bounds((ix, a_cell[1]))
+        # diagonal (extremely unusual in KiCad): skip
+    # Same-net labels are also valid termination cells.
+    for (lpos, lname) in obstacles.other_labels:
+        if lname == target_net:
+            _add_if_in_bounds(_world_to_cell(lpos, origin, snap))
+    return out
+
+
 def _astar_search(
     start: Tuple[int, int],
     initial_dir: int,
@@ -476,6 +533,7 @@ def _astar_search(
     *,
     cost_model: CostModel,
     max_steps: int,
+    extra_goal_cells: Optional[Set[Tuple[int, int]]] = None,
 ) -> Optional[List[Tuple[int, int]]]:
     """A* on a 4-neighbour grid with corner penalty.
 
@@ -484,11 +542,23 @@ def _astar_search(
     *goal* from cell goal+DIR_VECTORS[final_dir], i.e. the predecessor of
     *goal* lies in the *final_dir* outward direction.
 
+    *extra_goal_cells* (Phase 4) are alternative termination cells — typically
+    cells already covered by a same-net wire/label. Reaching any of them
+    terminates the search (no direction constraint); the resulting path tees
+    into the existing same-net geometry.
+
     Returns the cell path (start, ..., goal) or None if unreachable within
     *max_steps* total grid steps.
     """
     if start == goal:
         return [start]
+
+    extra_goals: Set[Tuple[int, int]] = (
+        set(extra_goal_cells) if extra_goal_cells else set()
+    )
+    # The start cell must never be a "tee target" — we'd produce a zero-length
+    # path, and start is already on the same-net set in that scenario.
+    extra_goals.discard(start)
 
     target_last_dir = _opposite_dir(final_dir)
     fdx, fdy = _DIR_VECTORS[final_dir]
@@ -531,6 +601,10 @@ def _astar_search(
     if first_step == goal and initial_dir == target_last_dir:
         return [start, goal]
 
+    # If the first step lands us on a tee target, terminate there.
+    if first_step in extra_goals:
+        return [start, first_step]
+
     max_g = max_steps * (cost_model.straight + cost_model.corner)
 
     while open_heap:
@@ -541,7 +615,9 @@ def _astar_search(
         if popped_g > g_score.get(state, math.inf) + EPS:
             continue
 
-        if cell == goal and last_dir == target_last_dir:
+        is_pin_goal = cell == goal and last_dir == target_last_dir
+        is_tee_goal = cell in extra_goals
+        if is_pin_goal or is_tee_goal:
             # reconstruct path
             cells = [cell]
             cur = state
@@ -565,14 +641,15 @@ def _astar_search(
                 and bounds_min[1] <= nb[1] <= bounds_max[1]
             ):
                 continue
-            # Allow stepping ONTO the goal cell (own pin) even if it is
-            # technically inside its host symbol's bbox.
-            if nb in grid.blocked_cells and nb != goal:
+            # Allow stepping ONTO the goal cell or any tee target even if it
+            # is technically inside a (typically own) symbol's bbox.
+            if nb in grid.blocked_cells and nb != goal and nb not in extra_goals:
                 continue
 
             # Stepping onto goal is only allowed when arriving from the
-            # required predecessor cell in the required direction.
-            if nb == goal:
+            # required predecessor cell in the required direction. Tee
+            # targets accept any approach direction.
+            if nb == goal and nb not in extra_goals:
                 if cell != required_predecessor or new_dir != target_last_dir:
                     continue
 
@@ -798,6 +875,105 @@ def collect_obstacles(
 
 
 # ---------------------------------------------------------------------------
+# Same-net wire classification (Phase 4)
+# ---------------------------------------------------------------------------
+
+
+def _classify_wires_by_net(
+    obstacles: Obstacles,
+    target_net: str,
+    *,
+    own_pin_endpoints: Sequence[Point] = (),
+) -> Set[int]:
+    """Return indices into ``obstacles.other_wires`` that belong to *target_net*.
+
+    A wire is on target_net if its connected component contains either:
+      - a label whose text equals *target_net*, or
+      - any point in *own_pin_endpoints* (the caller's pins are by definition
+        on target_net, so any wire already connected to one of them is too).
+
+    Adjacency includes T-junctions: a wire endpoint lying on another wire's
+    interior counts as a shared point.
+    """
+    wires = obstacles.other_wires
+    if not wires:
+        return set()
+
+    def _key(pt: Point) -> Tuple[int, int]:
+        # 10-micron resolution — well below KiCad's smallest snap.
+        return (round(pt[0] * 100), round(pt[1] * 100))
+
+    pt_to_wires: Dict[Tuple[int, int], Set[int]] = {}
+    for i, (a, b) in enumerate(wires):
+        pt_to_wires.setdefault(_key(a), set()).add(i)
+        pt_to_wires.setdefault(_key(b), set()).add(i)
+
+    # T-junctions: include endpoints landing on another wire's interior.
+    seen_keys = list(pt_to_wires.keys())
+    for i, (a, b) in enumerate(wires):
+        ka, kb = _key(a), _key(b)
+        for ek in seen_keys:
+            if ek == ka or ek == kb:
+                continue
+            ex = ek[0] / 100.0
+            ey = ek[1] / 100.0
+            if _point_on_segment(ex, ey, a, b, strict=True):
+                pt_to_wires[ek].add(i)
+
+    # Union-find over wire indices.
+    parent = list(range(len(wires)))
+
+    def find(x: int) -> int:
+        while parent[x] != x:
+            parent[x] = parent[parent[x]]
+            x = parent[x]
+        return x
+
+    def union(x: int, y: int) -> None:
+        rx, ry = find(x), find(y)
+        if rx != ry:
+            parent[rx] = ry
+
+    for wire_set in pt_to_wires.values():
+        wlist = list(wire_set)
+        for j in range(1, len(wlist)):
+            union(wlist[0], wlist[j])
+
+    same_net: Set[int] = set()
+
+    def _mark_component(seed: int) -> None:
+        root = find(seed)
+        for j in range(len(wires)):
+            if find(j) == root:
+                same_net.add(j)
+
+    def _wire_touches(pt: Point, a: Point, b: Point) -> bool:
+        if _approx(pt[0], a[0]) and _approx(pt[1], a[1]):
+            return True
+        if _approx(pt[0], b[0]) and _approx(pt[1], b[1]):
+            return True
+        return _point_on_segment(pt[0], pt[1], a, b, strict=False)
+
+    # Mark by target_net label coincidence.
+    for (lpos, lname) in obstacles.other_labels:
+        if lname != target_net:
+            continue
+        for i, (a, b) in enumerate(wires):
+            if _wire_touches(lpos, a, b):
+                _mark_component(i)
+                break
+
+    # Mark by own_pin_endpoint coincidence.
+    for ep in own_pin_endpoints:
+        for i, (a, b) in enumerate(wires):
+            if _wire_touches(ep, a, b):
+                _mark_component(i)
+                break
+
+    return same_net
+
+
+# ---------------------------------------------------------------------------
 # Spurious-connection guard
 # ---------------------------------------------------------------------------
 
@@ -848,6 +1024,7 @@ def check_spurious_connections(
     target_net: str,
     *,
     own_endpoints: Sequence[Point] = (),
+    same_net_wire_indices: Optional[Set[int]] = None,
 ) -> Optional[str]:
     """Return None if *segments* are safe to add; else a short reason string.
 
@@ -855,6 +1032,11 @@ def check_spurious_connections(
     are exempt from the "no pin on segment" rule (a wire MUST touch them).
     Bboxes containing an own_endpoint are treated as own and exempt from
     the body-crossing rule.
+
+    *same_net_wire_indices* (Phase 4) marks indices into
+    ``obstacles.other_wires`` that already belong to *target_net*. Tee
+    junctions and collinear overlaps with these wires are intended (we ARE
+    joining the same net), not spurious, so rules 3 and 4 skip them.
     """
 
     def _is_own(pt: Point) -> bool:
@@ -866,6 +1048,8 @@ def check_spurious_connections(
             if bx1 - EPS <= ex <= bx2 + EPS and by1 - EPS <= ey <= by2 + EPS:
                 return True
         return False
+
+    same_net_wires = same_net_wire_indices or set()
 
     for seg in segments:
         a, b = seg
@@ -888,7 +1072,9 @@ def check_spurious_connections(
 
         # 3. No existing wire endpoint may lie strictly on our segment interior
         #    (that would create a T-junction with an unrelated net).
-        for (we1, we2) in obstacles.other_wires:
+        for idx, (we1, we2) in enumerate(obstacles.other_wires):
+            if idx in same_net_wires:
+                continue  # tee with same-net is intended, not spurious
             for we in (we1, we2):
                 if _is_own(we):
                     continue
@@ -900,7 +1086,9 @@ def check_spurious_connections(
 
         # 4. No collinear overlap with an existing wire (would visually merge / electrically
         #    collide with another net).
-        for ow in obstacles.other_wires:
+        for idx, ow in enumerate(obstacles.other_wires):
+            if idx in same_net_wires:
+                continue
             if _segments_collinear_overlap(seg, ow):
                 return "candidate wire collinearly overlaps an existing wire"
 
@@ -921,8 +1109,9 @@ def check_spurious_connections(
 
 
 class SchematicRouter:
-    """Phase-3 router: straight, L-shape, U-shape, and A* candidates with the
-    spurious-connection guard applied to every shape."""
+    """Phase-4 router: straight, L-shape, U-shape, and A* candidates with the
+    spurious-connection guard applied to every shape; same-net wires/labels
+    can be tee'd into via multi-goal A*."""
 
     @staticmethod
     def route_pair(
@@ -937,6 +1126,7 @@ class SchematicRouter:
         max_bends: int = 4,
         obstacles: Optional[Obstacles] = None,
         cost_model: Optional[CostModel] = None,
+        extra_own_endpoints: Sequence[Point] = (),
     ) -> RouteResult:
         """Try to route a polyline between two pins.
 
@@ -970,40 +1160,67 @@ class SchematicRouter:
             )
 
         own_endpoints = (p1, p2)
+        # Phase 4 — figure out which existing wires already belong to
+        # target_net. Pass own pin endpoints (the two we're connecting plus
+        # any extras the caller provided, e.g. other pins in the same
+        # connect_pins call) so a wire dropped between previous pairs is
+        # recognised even without a label.
+        all_own_endpoints = (p1, p2, *extra_own_endpoints)
+        same_net_wires = _classify_wires_by_net(
+            obstacles, target_net, own_pin_endpoints=all_own_endpoints
+        )
+
         last_reject: str = ""
 
-        # (style_label, candidate_paths). Each path is a List[Segment].
-        attempts: List[Tuple[str, List[List[Segment]]]] = []
-        if _collinear_and_facing(p1, a1, p2, a2):
-            attempts.append(("straight", [[(p1, p2)]]))
-        attempts.append(("L", _l_shape_candidates(p1, a1, p2, a2)))
-        attempts.append(("U", _u_shape_candidates(p1, a1, p2, a2)))
+        def _try_shapes() -> Optional[RouteResult]:
+            """Try straight / L / U candidates in order; return success or None."""
+            nonlocal last_reject
+            attempts: List[Tuple[str, List[List[Segment]]]] = []
+            if _collinear_and_facing(p1, a1, p2, a2):
+                attempts.append(("straight", [[(p1, p2)]]))
+            attempts.append(("L", _l_shape_candidates(p1, a1, p2, a2)))
+            attempts.append(("U", _u_shape_candidates(p1, a1, p2, a2)))
+            for style_label, candidates in attempts:
+                for path in candidates:
+                    if not path:
+                        continue
+                    if (len(path) - 1) > max_bends:
+                        last_reject = "over_max_bends"
+                        continue
+                    if _path_length(path) > max_len + EPS:
+                        last_reject = "over_max_len"
+                        continue
+                    bad = check_spurious_connections(
+                        path,
+                        obstacles,
+                        target_net,
+                        own_endpoints=own_endpoints,
+                        same_net_wire_indices=same_net_wires,
+                    )
+                    if bad is None:
+                        return RouteResult(True, path, "", style=style_label)
+                    last_reject = f"spurious:{bad}"
+            return None
 
-        for style_label, candidates in attempts:
-            for path in candidates:
-                if not path:
-                    continue
-                if (len(path) - 1) > max_bends:
-                    last_reject = "over_max_bends"
-                    continue
-                if _path_length(path) > max_len + EPS:
-                    last_reject = "over_max_len"
-                    continue
-                bad = check_spurious_connections(
-                    path, obstacles, target_net, own_endpoints=own_endpoints
-                )
-                if bad is None:
-                    return RouteResult(True, path, "", style=style_label)
-                last_reject = f"spurious:{bad}"
+        # When there are no same-net opportunities, shapes give a clean direct
+        # route. When same-net wires exist, A* may find a much shorter tee
+        # than any shape; try A* first in that case so we don't accidentally
+        # accept a shape that just runs along an existing wire.
+        if not same_net_wires:
+            shape_result = _try_shapes()
+            if shape_result is not None:
+                return shape_result
 
-        # Phase 3 — A* fallback. Requires both pins on the same 1.27 mm grid
-        # relative to p1; if not, defer to label fallback. Prefer the
-        # last shape-rejection reason if we have one — it is more actionable
-        # than "off_grid_pins".
+        # A* fallback. Requires both pins on the same 1.27 mm grid relative
+        # to p1; if not, defer to label fallback (or shape fallback when
+        # same_net_wires is set and we haven't tried shapes yet).
         if not _on_grid(p2, origin=p1):
-            return RouteResult(
-                False, [], last_reject or "no_candidate_path"
-            )
+            if same_net_wires:
+                # Hadn't tried shapes yet — try them as a last resort.
+                shape_result = _try_shapes()
+                if shape_result is not None:
+                    return shape_result
+            return RouteResult(False, [], last_reject or "no_candidate_path")
 
         cm = cost_model or CostModel()
         max_steps = int(math.floor(max_len / _GRID))
@@ -1015,30 +1232,57 @@ class SchematicRouter:
             obstacles,
             origin=p1,
             own_refs=(ref1, ref2),
+            same_net_wire_indices=same_net_wires,
         )
+        # Phase 4 — same-net cells are valid tee targets. Drop the goal
+        # cell from this set so direction enforcement at p2 still applies.
+        goal_cell = _world_to_cell(p2, origin=p1)
+        extra_goals = _same_net_cells_in_bounds(
+            obstacles, same_net_wires, target_net,
+            origin=p1, snap=_GRID, bounds_min=bmin, bounds_max=bmax,
+        )
+        extra_goals.discard(goal_cell)
+        # The start cell can't be a tee target.
+        extra_goals.discard((0, 0))
+
         cells = _astar_search(
             start=(0, 0),
             initial_dir=_angle_to_dir(a1),
-            goal=_world_to_cell(p2, origin=p1),
+            goal=goal_cell,
             final_dir=_angle_to_dir(a2),
             grid=grid_obs,
             bounds_min=bmin,
             bounds_max=bmax,
             cost_model=cm,
             max_steps=max_steps,
+            extra_goal_cells=extra_goals,
         )
         if cells is None:
-            return RouteResult(
-                False, [], last_reject or "astar_no_path"
-            )
-        segments = _cells_to_segments(cells, p1, p2, origin=p1)
+            if same_net_wires:
+                # We skipped shapes earlier to give A* first try; fall back now.
+                shape_result = _try_shapes()
+                if shape_result is not None:
+                    return shape_result
+            return RouteResult(False, [], last_reject or "astar_no_path")
+        # If A* terminated at a tee target instead of p2, the last cell isn't
+        # p2's grid cell. _cells_to_segments substitutes p2 for the final
+        # endpoint — for tee termination we want the actual cell location, so
+        # build the final point from cell coords.
+        terminated_at_goal = cells[-1] == goal_cell
+        end_world = p2 if terminated_at_goal else _cell_to_world(cells[-1], p1, _GRID)
+        segments = _cells_to_segments(cells, p1, end_world, origin=p1)
         if (len(segments) - 1) > max_bends:
             return RouteResult(False, [], "over_max_bends")
         if _path_length(segments) > max_len + EPS:
             return RouteResult(False, [], "over_max_len")
         bad = check_spurious_connections(
-            segments, obstacles, target_net, own_endpoints=own_endpoints
+            segments,
+            obstacles,
+            target_net,
+            own_endpoints=own_endpoints,
+            same_net_wire_indices=same_net_wires,
         )
         if bad is not None:
             return RouteResult(False, [], f"spurious:{bad}")
-        return RouteResult(True, segments, "", style="astar")
+        style = "astar-tee" if not terminated_at_goal else "astar"
+        return RouteResult(True, segments, "", style=style)
