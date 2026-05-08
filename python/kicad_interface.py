@@ -4363,18 +4363,21 @@ class KiCADInterface:
             schematic_path = params.get("schematicPath")
             board_path = params.get("boardPath")
 
-            # Determine board to work with
-            board = None
+            # Determine board to work with.  Use self.board throughout — it's
+            # the in-memory state shared with _handle_place_component (used by
+            # auto-import below).  If boardPath was provided, reload self.board
+            # from it; otherwise fall back to whatever board is already loaded.
             if board_path:
-                board = pcbnew.LoadBoard(board_path)
+                self.board = pcbnew.LoadBoard(board_path)
+                self._update_command_handlers()
             elif self.board:
-                board = self.board
-                board_path = board.GetFileName() if not board_path else board_path
+                board_path = self.board.GetFileName() if not board_path else board_path
             else:
                 return {
                     "success": False,
                     "message": "No board loaded. Use open_project first or provide boardPath.",
                 }
+            board = self.board
 
             if not board_path:
                 board_path = board.GetFileName()
@@ -4410,10 +4413,9 @@ class KiCADInterface:
                 import_summary = self._auto_import_footprints_from_schematic(
                     board, schematic_path, board_path
                 )
-                n_placed = len(import_summary.get("placed", []))
-                if n_placed:
-                    logger.info(f"Auto-imported {n_placed} footprints; saving board")
-                    board.Save(board_path)
+                # Auto-import places footprints into self.board in-memory via
+                # _handle_place_component (which doesn't save).  We reuse
+                # self.board (= local `board`) below and save at the end.
                 if import_summary.get("errors"):
                     logger.warning(f"Auto-import errors: {import_summary['errors']}")
 
