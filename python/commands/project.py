@@ -206,7 +206,8 @@ class ProjectCommands:
 
             # --- Schematic save ---
             # Schematic ops write to disk immediately, so this is a round-trip
-            # confirmation rather than a flush of in-memory state.
+            # confirmation rather than a flush of in-memory state.  kicad-skip
+            # exposes write(fpath); the older sch.to_file() name does not exist.
             if schematic_path:
                 schematic_path = os.path.abspath(os.path.expanduser(schematic_path))
                 if os.path.exists(schematic_path):
@@ -214,7 +215,7 @@ class ProjectCommands:
                         import skip  # type: ignore
 
                         sch = skip.Schematic(schematic_path)
-                        sch.to_file()
+                        sch.write(schematic_path)
                         saved.append(schematic_path)
                     except Exception as sch_err:
                         warnings.append(f"Schematic save failed: {sch_err}")
