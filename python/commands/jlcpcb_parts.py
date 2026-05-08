@@ -206,6 +206,33 @@ class JLCPCBPartsManager:
         ("Sensor", "Sensors"),
     ]
 
+    # ASCII → Unicode unit aliases for query rewriting.
+    # FTS5's unicode61 tokenizer treats e.g. "150Ω" as a single token, so
+    # users typing "150ohms" or "150 ohm" never match — the data has no
+    # ASCII alias.  Rewrite the query so unit-bearing values land on the
+    # tokens that actually exist in the index.
+    _QUERY_UNIT_SUBS: List[Tuple[str, str]] = [
+        # Resistance: handle prefix + unit, then bare unit, longer first so
+        # "kohms" doesn't get partially substituted before "ohms".
+        (r"(\d+(?:\.\d+)?)\s*[Mm]ohms?\b", r"\1MΩ"),
+        (r"(\d+(?:\.\d+)?)\s*[Kk]ohms?\b", r"\1kΩ"),
+        (r"(\d+(?:\.\d+)?)\s*ohms?\b", r"\1Ω"),
+        # Capacitance / inductance prefixes.
+        (r"(\d+(?:\.\d+)?)\s*[Uu][Ff]\b", r"\1μF"),
+        (r"(\d+(?:\.\d+)?)\s*[Uu][Hh]\b", r"\1μH"),
+    ]
+
+    @classmethod
+    def _normalize_query_units(cls, query: str) -> str:
+        """Rewrite ASCII unit suffixes in a search query to the Unicode forms
+        that appear in JLC descriptions, so e.g. "150ohms 0603" becomes
+        "150Ω 0603" (which actually matches the indexed tokens)."""
+        import re as _re
+        out = query
+        for pattern, repl in cls._QUERY_UNIT_SUBS:
+            out = _re.sub(pattern, repl, out)
+        return out
+
     @classmethod
     def _derive_category_from_description(cls, description: str) -> Tuple[str, str]:
         """Pattern-match a free-text description into (category, subcategory).
@@ -435,10 +462,14 @@ class JLCPCBPartsManager:
 
         if query:
             # Use FTS for text search
+            # First rewrite ASCII unit suffixes ("150ohms" → "150Ω") so the
+            # query lands on tokens that actually exist in the index.
+            normalized_query = self._normalize_query_units(query)
             # Add prefix wildcard to each term for partial matching
             # (e.g., "BQ25895" becomes "BQ25895*" so FTS matches "BQ25895RTWR")
             fts_query = " ".join(
-                f"{term}*" if not term.endswith("*") else term for term in query.strip().split()
+                f"{term}*" if not term.endswith("*") else term
+                for term in normalized_query.strip().split()
             )
             sql_parts.append("""
                 AND lcsc IN (

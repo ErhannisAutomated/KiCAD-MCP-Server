@@ -109,6 +109,64 @@ class TestImportPopulatesCategory:
         }
 
 
+@pytest.mark.unit
+class TestQueryUnitNormalization:
+    def test_ohms_to_omega(self) -> None:
+        from commands.jlcpcb_parts import JLCPCBPartsManager
+        n = JLCPCBPartsManager._normalize_query_units
+        assert n("150ohms 0603") == "150Ω 0603"
+        assert n("150 ohms") == "150Ω"
+        assert n("150 ohm") == "150Ω"
+
+    def test_metric_prefixes(self) -> None:
+        from commands.jlcpcb_parts import JLCPCBPartsManager
+        n = JLCPCBPartsManager._normalize_query_units
+        assert n("1kohm") == "1kΩ"
+        assert n("4.7Kohms") == "4.7kΩ"
+        assert n("2.2Mohm") == "2.2MΩ"
+
+    def test_capacitance_inductance(self) -> None:
+        from commands.jlcpcb_parts import JLCPCBPartsManager
+        n = JLCPCBPartsManager._normalize_query_units
+        assert n("10uF 16V") == "10μF 16V"
+        assert n("100uH 0805") == "100μH 0805"
+
+    def test_no_unit_passthrough(self) -> None:
+        from commands.jlcpcb_parts import JLCPCBPartsManager
+        n = JLCPCBPartsManager._normalize_query_units
+        assert n("BQ25895 IC") == "BQ25895 IC"
+        assert n("0603 Resistor") == "0603 Resistor"
+
+    def test_search_finds_omega_data_via_ascii_query(self, tmp_path: Path) -> None:
+        from commands.jlcpcb_parts import JLCPCBPartsManager
+        mgr = JLCPCBPartsManager(db_path=str(tmp_path / "test.db"))
+        mgr.import_jlcsearch_parts([
+            {"lcsc": 1, "description": "150Ω 75V 0603 Thick Film Resistor",
+             "is_basic": True, "stock": 1000},
+            {"lcsc": 2, "description": "10kΩ 0805 Resistor",
+             "is_basic": False, "stock": 1000},
+        ])
+        # ASCII query must hit Unicode data (in_stock filter on by default,
+        # so the fixtures set stock>0).
+        results = mgr.search_parts(query="150ohms 0603")
+        assert len(results) == 1
+        assert results[0]["lcsc"] == "C1"
+        results = mgr.search_parts(query="10kohm")
+        assert len(results) == 1
+        assert results[0]["lcsc"] == "C2"
+
+    def test_search_baseline_with_omega_query_still_works(self, tmp_path: Path) -> None:
+        """Sanity: queries already using Ω must continue to work."""
+        from commands.jlcpcb_parts import JLCPCBPartsManager
+        mgr = JLCPCBPartsManager(db_path=str(tmp_path / "test.db"))
+        mgr.import_jlcsearch_parts([
+            {"lcsc": 1, "description": "150Ω 75V 0603 Thick Film Resistor",
+             "is_basic": True, "stock": 1000},
+        ])
+        results = mgr.search_parts(query="150Ω 0603")
+        assert len(results) == 1
+
+
 @pytest.mark.integration
 class TestBackfillCategories:
     def test_backfill_only_touches_empty_category(self, tmp_path: Path) -> None:
