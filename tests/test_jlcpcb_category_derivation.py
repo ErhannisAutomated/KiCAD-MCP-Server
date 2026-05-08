@@ -125,11 +125,18 @@ class TestQueryUnitNormalization:
         assert n("4.7Kohms") == "4.7kΩ"
         assert n("2.2Mohm") == "2.2MΩ"
 
-    def test_capacitance_inductance(self) -> None:
+    def test_capacitance_inductance_collapse_space(self) -> None:
+        """Catalog stores 10uF as ASCII (verified empirically: ~210K hits for
+        '%uF%', zero for '%μF%' or '%µF%'). So we don't rewrite uF/uH/nF/pF
+        to Greek mu — that would break matches. Just collapse value+unit
+        spacing so '10 uF' lands on the same token as '10uF'."""
         from commands.jlcpcb_parts import JLCPCBPartsManager
         n = JLCPCBPartsManager._normalize_query_units
-        assert n("10uF 16V") == "10μF 16V"
-        assert n("100uH 0805") == "100μH 0805"
+        assert n("10uF 16V") == "10uF 16V"   # already glued, unchanged
+        assert n("10 uF") == "10uF"          # space collapsed
+        assert n("100 uH") == "100uH"
+        assert n("470 nF") == "470nF"
+        assert n("22 pF") == "22pF"
 
     def test_no_unit_passthrough(self) -> None:
         from commands.jlcpcb_parts import JLCPCBPartsManager
