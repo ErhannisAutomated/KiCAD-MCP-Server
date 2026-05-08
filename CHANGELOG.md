@@ -4,6 +4,61 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-08)
+
+- **`add_schematic_component` wrote malformed `(instances …)` blocks** — every placed component
+  had `(project "project") (path "/")` literal placeholders, so KiCad couldn't match the open
+  project to the placement-time reference and showed all annotations as `R?`/`SW?`/etc. Fixed:
+  project name derived from the schematic stem, root sheet UUID from the first `(uuid …)` in the
+  file. `python/scripts/repair_instance_blocks.py` patches existing schematics in place.
+
+- **`list_schematic_nets` swapped pin 1 ↔ pin 2 on rotated symbols** — `_find_pins_on_net` had an
+  inline coord transform that omitted the math-CCW → screen-CCW angle negation, mirroring pin
+  positions and assigning wires to the wrong pin number for rotation=90/270 (e.g. resistors).
+  Wires landed on the right pixels; only the reported pin number was wrong. Fix: delegate to the
+  canonical `WireDragger.pin_world_xy`.
+
+- **Symbol bbox shifted off-position for asymmetric symbols on every rotation** — `_transform_local_point`
+  used non-negated math-CCW rotation; `_compute_pin_positions_direct` had the same bug AND was
+  missing the y-flip from lib y-up to schematic y-down entirely. Symmetric bodies (R, C) hid the
+  bug because min/max over symmetric points is invariant. Asymmetric symbols (USB_B_Micro,
+  LED_RGBK at rot=90/270, op-amps, MCUs) had bboxes shifted by up to 2.54 mm — the autorouter's
+  body-crossing detection (`_collect_bboxes` → `_compute_symbol_bbox_direct`) could miss real
+  crossings or fire on empty regions. Both helpers now delegate to `WireDragger.pin_world_xy`.
+
+- **`sync_schematic_to_board` autoImport reported success but didn't persist** — handler kept a
+  local `board = pcbnew.LoadBoard(board_path)` while auto-import placed footprints into a
+  separate `self.board` (no save). The final `board.Save()` clobbered disk with the stale empty
+  state. Fix: consolidate around `self.board` throughout — when `boardPath` is provided,
+  `self.board` is reloaded from it (and command handlers refreshed) so all subsequent operations
+  share state.
+
+- **`export_bom` schema missing `schematicPath`** — Python handler accepted it, but the TS
+  `server.tool()` schema didn't expose it or forward it through `callKicadScript`. Effect: BOM
+  exports always missed schematic-only properties (LCSC, MPN, custom datasheet) even with the
+  schematic alongside the PCB. Added the param to the Zod schema, expanded the description, and
+  forwarded the value.
+
+- **`save_project` schematic save crashed** — called the non-existent `sch.to_file()`; kicad-skip
+  exposes `sch.write(fpath)`. Every save_project call against a project with a schematic emitted
+  a "Schematic save failed: 'Schematic' object has no attribute 'to_file'" warning. No data loss
+  (every individual schematic edit auto-saves), but the explicit save was effectively broken.
+
+- **JLCPCB `category` column was always empty after import** — jlcsearch's `/components/list.json`
+  endpoint doesn't return per-row category, and `import_jlcsearch_parts` did
+  `part.get("category", "")` → empty string. Filters like `search_jlcpcb_parts(category="Resistors")`
+  matched zero rows. Fix: `_derive_category_from_description` keyword-sweeps the description into
+  one of ~20 categories (Resistors, Capacitors, Inductors / Ferrite Beads, Diodes / Schottky,
+  ICs / Microcontrollers, etc., specific outranks generic). ~87% coverage on a 50K random sample.
+  `import_jlcsearch_parts` derives when upstream is empty; new `backfill_categories` method
+  patches pre-existing rows; CLI at `python/scripts/backfill_jlcpcb_categories.py`.
+
+- **JLCPCB FTS missed ASCII unit queries** — descriptions use Unicode unit symbols (`Ω`, `μF`)
+  and FTS5's unicode61 tokenizer keeps `150Ω` as a single token (lowercased to `150ω`). Queries
+  like `150ohms 0603` or `1kohm` matched zero rows because no ASCII alias exists in the index.
+  Fix: `_normalize_query_units` rewrites unit suffixes in the search query before FTS, so
+  `150ohms 0603` → `150Ω 0603`, `1kohm` → `1kΩ`, `10uF` → `10μF`.
+
 ### Tool Enhancements (this branch: fixes/improvements_2)
 
 - **`search_jlcpcb_parts` order_by parameter** — New `order_by` parameter on `search_jlcpcb_parts`,
