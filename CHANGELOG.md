@@ -4,6 +4,18 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-08)
+
+- **`get_board_2d_view` now crops to the board outline and renders per-layer
+  colors by default.** Previously the tool plotted the whole A4 page
+  monochromatically, leaving the board itself as ~20% of the canvas — text was
+  barely legible at 1400×1000 px. New default (`cropToBoard=true`,
+  `colored=true`) plots each layer to its own SVG, sets the viewBox to the
+  board's edge bbox + 5% margin, recolors per layer (F.Cu red, B.Cu blue,
+  Edge.Cuts tan, F.SilkS white) and composites to PNG/JPG/SVG. Pass
+  `cropToBoard=false, colored=false` for the legacy whole-page monochrome
+  plot. Response shape unchanged (still `imageData` + `format`); no API break.
+
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-08)
 
 - **`add_schematic_component` wrote malformed `(instances …)` blocks** — every placed component

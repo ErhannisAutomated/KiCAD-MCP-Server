@@ -362,20 +362,44 @@ export function registerBoardTools(server: McpServer, callKicadScript: CommandFu
   // ------------------------------------------------------
   server.tool(
     "get_board_2d_view",
-    "Render a 2D image of the current PCB board and return it as PNG, JPG or SVG.",
+    "Render a 2D image of the current PCB board and return it as PNG, JPG or SVG. By default the image is cropped to the board outline (+5% margin) with per-layer colors (F.Cu red, B.Cu blue, Edge.Cuts tan, F.SilkS white) for legibility. Pass cropToBoard=false and colored=false for the legacy whole-page monochrome plot.",
     {
-      layers: z.array(z.string()).optional().describe("Optional array of layer names to include"),
-      width: z.number().optional().describe("Optional width of the image in pixels"),
-      height: z.number().optional().describe("Optional height of the image in pixels"),
-      format: z.enum(["png", "jpg", "svg"]).optional().describe("Image format"),
+      layers: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Optional array of layer names to include. When omitted, colored mode uses F.Cu, B.Cu, Edge.Cuts, F.SilkS.",
+        ),
+      width: z
+        .number()
+        .optional()
+        .describe(
+          "Pixel width. When cropToBoard is true the larger of width/height becomes the long-axis size; aspect ratio is preserved.",
+        ),
+      height: z.number().optional().describe("Pixel height (see width re: aspect handling)."),
+      format: z.enum(["png", "jpg", "svg"]).optional().describe("Image format (default png)."),
+      cropToBoard: z
+        .boolean()
+        .optional()
+        .describe("Crop the SVG viewBox to the board edge bbox + margin (default true)."),
+      colored: z.boolean().optional().describe("Per-layer recolor for legibility (default true)."),
+      margin: z
+        .number()
+        .optional()
+        .describe(
+          "Bbox margin as a fraction of the long axis when cropping (default 0.05 = 5%).",
+        ),
     },
-    async ({ layers, width, height, format }) => {
+    async ({ layers, width, height, format, cropToBoard, colored, margin }) => {
       logger.debug("Getting 2D board view");
       const result = await callKicadScript("get_board_2d_view", {
         layers,
         width,
         height,
         format,
+        cropToBoard,
+        colored,
+        margin,
       });
 
       return {
