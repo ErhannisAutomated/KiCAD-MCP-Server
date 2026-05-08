@@ -23,9 +23,33 @@ class PinLocator:
 
     def __init__(self) -> None:
         """Initialize pin locator with empty cache"""
-        self.pin_definition_cache = {}  # Cache: "lib_id:symbol_name" -> pin_data
+        self.pin_definition_cache = {}  # Cache: "path:lib_id" -> pin_data
         self._schematic_cache: Dict[str, object] = {}  # Cache: path -> loaded Schematic
         self._sexp_cache: Dict[str, Any] = {}  # Cache: path -> parsed sexpdata (mirror-aware)
+        # Per-path mtime watch; entries cleared when the file changes on disk.
+        # Without this, ConnectionManager's class-level singleton holds stale state
+        # across writes done outside the MCP request that populated the cache
+        # (e.g. DynamicSymbolLoader.add_component called from a script while the
+        # server is running, or a second tool that wrote via a different code path).
+        self._mtime_cache: Dict[str, float] = {}
+
+    def _invalidate_if_changed(self, schematic_path: Path) -> None:
+        """Drop cached state for ``schematic_path`` if its mtime advanced."""
+        path_key = str(schematic_path)
+        try:
+            mtime = schematic_path.stat().st_mtime
+        except OSError:
+            return  # missing file → leave caches alone, the open() will surface the error
+        prev = self._mtime_cache.get(path_key)
+        if prev is not None and mtime <= prev:
+            return
+        # File changed (or first time we've seen it post-write): clear all path-keyed entries.
+        self._schematic_cache.pop(path_key, None)
+        self._sexp_cache.pop(path_key, None)
+        prefix = f"{path_key}:"
+        for k in [k for k in self.pin_definition_cache if k.startswith(prefix)]:
+            self.pin_definition_cache.pop(k, None)
+        self._mtime_cache[path_key] = mtime
 
     @staticmethod
     def parse_symbol_definition(symbol_def: list) -> Dict[str, Dict]:
@@ -103,6 +127,7 @@ class PinLocator:
         Returns:
             Dictionary mapping pin number -> pin data
         """
+        self._invalidate_if_changed(schematic_path)
         # Check cache
         cache_key = f"{schematic_path}:{lib_id}"
         if cache_key in self.pin_definition_cache:
@@ -206,6 +231,7 @@ class PinLocator:
     def _get_lib_id(self, schematic_path: Path, symbol_reference: str) -> Optional[str]:
         """Helper: return the lib_id string for a placed symbol"""
         try:
+            self._invalidate_if_changed(schematic_path)
             sch_key = str(schematic_path)
             if sch_key not in self._schematic_cache:
                 self._schematic_cache[sch_key] = Schematic(sch_key)
@@ -230,6 +256,7 @@ class PinLocator:
         import sexpdata as _sexpdata
         from commands.wire_dragger import WireDragger
 
+        self._invalidate_if_changed(schematic_path)
         sch_key = str(schematic_path)
         try:
             if sch_key not in self._sexp_cache:
@@ -333,6 +360,7 @@ class PinLocator:
         try:
             # Load schematic with kicad-skip to get symbol instance
             # Use cache to avoid reloading the file for every pin lookup
+            self._invalidate_if_changed(schematic_path)
             sch_key = str(schematic_path)
             if sch_key not in self._schematic_cache:
                 self._schematic_cache[sch_key] = Schematic(sch_key)
@@ -431,6 +459,7 @@ class PinLocator:
         """
         try:
             # Load schematic (use cache)
+            self._invalidate_if_changed(schematic_path)
             sch_key = str(schematic_path)
             if sch_key not in self._schematic_cache:
                 self._schematic_cache[sch_key] = Schematic(sch_key)
