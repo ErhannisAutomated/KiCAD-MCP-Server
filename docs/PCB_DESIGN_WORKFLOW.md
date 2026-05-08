@@ -86,6 +86,42 @@ Run an electrical rule check.
 
 **Tools:** `annotate_schematic`, `run_erc`
 
+### Assign Part Metadata (Footprint + LCSC)
+
+This step is mandatory before `sync_schematic_to_board` and easy to skip.
+The components added in *Place Components* carry only a symbol — no footprint
+and no manufacturer/distributor information. Two properties on each symbol
+need to be filled in:
+
+- **`Footprint`** — `Library:Name` reference (e.g. `Resistor_SMD:R_0603_1608Metric`).
+  Required: `sync_schematic_to_board` silently *skips* any component whose
+  `Footprint` property is empty, leaving you with an empty PCB even though
+  the sync call reports "success".
+- **`LCSC`** — JLCPCB part number (e.g. `C25804`). Required for `export_bom`
+  to populate the LCSC column; otherwise every row in the BOM has a blank
+  LCSC field. This is the field JLCPCB SMT assembly reads to know what to
+  populate each footprint with.
+
+```
+Set Footprint on R1, R2, R3 to Resistor_SMD:R_0603_1608Metric.
+Set LCSC on R1, R2, R3 to C25804.
+```
+
+**Tools:** `set_schematic_component_property` (one prop on one component),
+`edit_schematic_component` (multiple props in one call). Use
+`search_jlcpcb_parts` first to find an LCSC part that matches each
+component's value + footprint + library type (Basic = no SMT setup fee).
+
+Verify before sync:
+
+```
+List components in the schematic with their footprints and LCSC numbers.
+```
+
+`list_schematic_components` returns each symbol's properties — confirm both
+fields are present on every non-power component. (Power flags, mounting
+holes, and decorative symbols don't need either.)
+
 ### Preview the Schematic
 
 ```
