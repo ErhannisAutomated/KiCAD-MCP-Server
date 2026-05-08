@@ -192,21 +192,33 @@ export function registerExportTools(server: McpServer, callKicadScript: CommandF
   // ------------------------------------------------------
   server.tool(
     "export_bom",
-    "Export a Bill of Materials (BOM) from the PCB in CSV, XML, HTML or JSON format.",
+    "Export a Bill of Materials (BOM) in CSV, XML, HTML or JSON format. Pass schematicPath to include custom properties such as LCSC part numbers (those live on schematic symbols and are not synced to the PCB).",
     {
       outputPath: z.string().describe("Path to save the BOM file"),
       format: z.enum(["CSV", "XML", "HTML", "JSON"]).describe("BOM file format"),
-      groupByValue: z.boolean().optional().describe("Whether to group components by value"),
+      schematicPath: z
+        .string()
+        .optional()
+        .describe(
+          "Path to the .kicad_sch file. Required to include custom properties (LCSC, datasheet, etc.) in the BOM.",
+        ),
+      groupByValue: z
+        .boolean()
+        .optional()
+        .describe(
+          "Group components with the same value+footprint; references become a semicolon-separated list (default true)",
+        ),
       includeAttributes: z
         .array(z.string())
         .optional()
-        .describe("Optional array of additional attributes to include"),
+        .describe('Additional property names to include as columns, e.g. ["LCSC"]'),
     },
-    async ({ outputPath, format, groupByValue, includeAttributes }) => {
+    async ({ outputPath, format, schematicPath, groupByValue, includeAttributes }) => {
       logger.debug(`Exporting BOM to: ${outputPath}`);
       const result = await callKicadScript("export_bom", {
         outputPath,
         format,
+        schematicPath,
         groupByValue,
         includeAttributes,
       });
