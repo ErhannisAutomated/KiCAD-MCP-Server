@@ -4,6 +4,88 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### New MCP Tool (this branch: fixes/improvements_2, 2026-05-09)
+
+- **`add_schematic_sheet`** — instantiates a hierarchical sheet block on a
+  parent .kicad_sch that references a child .kicad_sch file. Until now
+  the hierarchical-schematic story had a hole: `add_sheet_pin` adds a pin
+  to an existing sheet block, `add_schematic_hierarchical_label` adds a
+  label to a sub-sheet, and `create_schematic` creates an empty
+  .kicad_sch — but no tool placed the actual sheet rectangle on the
+  parent. Doing it required hand-editing the .kicad_sch. The new tool
+  takes parent path, sheet name, child filename, position, optional
+  size/page/uuid; computes the parent's project name + root UUID; emits
+  the full S-expression with the per-page `(instances …)` entry;
+  refuses duplicates by name. Implementation in
+  `commands/sheet_manager.py`. Tests in `tests/test_sheet_manager.py`
+  (5 unit + 1 kicad-cli round-trip).
+
+### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-09)
+
+- **`get_schematic_view` now crops to placed-content bbox + drops the
+  page frame by default.** Mirror of the recent `get_board_2d_view`
+  treatment — previously the SVG was the whole A4 page including title
+  block, leaving the schematic as a tiny island in a sea of whitespace.
+  New defaults (`cropToContent=true`, `margin=0.05`) compute the bbox
+  of placed symbols / wires / labels / sheet blocks (sheets contribute
+  their full rectangle, not just the top-left anchor) and pass
+  `--exclude-drawing-sheet` to kicad-cli so the page frame doesn't
+  render outside the crop. Pass `cropToContent=false` for the legacy
+  full-page render. Also fixed: kicad-cli on a hierarchical design
+  writes one SVG per sheet (`<stem>.svg` for top, `<stem>-<sub>.svg`
+  for each child); the handler now picks the bare-stem file by name
+  instead of `glob.glob[0]` which was returning a child arbitrarily.
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-09)
+
+- **`connect_pins(style="auto")` left orphaned wired chains on a floating
+  ghost sub-net.** The autorouter wires consecutive pin pairs and
+  Phase 5 added one auto-label at the first wired pair. If the
+  autorouter formed two disjoint chains (cluster 1 wires, middle pair
+  fails to label-fallback, cluster 2 wires), only cluster 1 got a
+  label — cluster 2's pins were reported as "connected" but in reality
+  sat on an unlabeled sub-net which KiCad auto-named `Net-(Cn-Pad1)`,
+  silently fragmenting the named net. Surfaced when partitioning the
+  power_module flat schematic into hierarchical sheets — three cap-pair
+  orphan chains had to be patched manually. Fix: Phase 5 iterates every
+  wired pair, classifies whether its endpoints are reachable from a
+  target_net label via the wire graph, and labels each orphaned chain
+  (re-computing reachability after each label so we don't
+  double-label). Result dict gains
+  `auto_label_positions: List[List[float]]`; legacy
+  `auto_label_position` preserved as the first entry. Test:
+  `test_auto_labels_each_orphaned_chain`.
+
+- **Autorouter allowed perpendicular wire crossings.**
+  `check_spurious_connections` had 5 rules — pin / label / T-junction /
+  collinear overlap / symbol body — but no rule against two unrelated
+  wires crossing at right angles. Such crossings are electrically valid
+  in KiCad (no junction → no connection) but visually confusing, and
+  they made the buck-boost layout unreadable. Added rule 6 plus helper
+  `_segments_strictly_cross` (orthogonal pairs intersecting strictly
+  inside both segments; T-junctions and shared endpoints return False
+  so other rules don't double-fire). Same-net crossings still allowed
+  (the same-net relaxation set already covered tee/joins). Tests:
+  `TestSegmentsStrictlyCross` (6 cases),
+  `TestCheckSpuriousRule6_WireCrossing` (4 cases); the previously-
+  inverted `test_wire_crossing_perpendicular_allowed` was renamed
+  and flipped to `…_rejected_by_rule_6`.
+
+- **`PinLocator` cached schematic state without invalidation.**
+  `ConnectionManager._pin_locator` is a class-level singleton; the
+  underlying `PinLocator` instance held three caches keyed by file
+  path (`_schematic_cache`, `_sexp_cache`, `pin_definition_cache`)
+  that were populated on first access and never invalidated. A
+  subsequent write through a different code path (e.g.
+  `DynamicSymbolLoader.add_component` from a script while the server
+  is running) left the locator looking at the old component list —
+  `connect_pins` then reported "N failed" for every pin on a
+  freshly-added component while `add_schematic_net_label` (reads
+  fresh) worked. Fix: `_invalidate_if_changed(schematic_path)` stats
+  the file at every public entry point and clears all path-keyed
+  cache entries when mtime advances. Tests:
+  `tests/test_pin_locator_cache_invalidation.py` (positive + negative).
+
 ### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-08)
 
 - **`get_board_2d_view` now crops to the board outline and renders per-layer

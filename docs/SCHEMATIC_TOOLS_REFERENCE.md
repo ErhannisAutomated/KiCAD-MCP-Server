@@ -302,7 +302,8 @@ Connect two or more component pins to the same net. Replaces N individual `conne
 | `failed`                 | List of `{pin, reason}` for pins that could not be wired (e.g. on a different net)                                                                              |
 | `wired_pairs`            | Per-pair routing detail (`auto`/`wire` only): `{a, b, style, segments}`. `style` is the route shape: `straight`, `L`, `U`, `astar`, or `astar-tee`.            |
 | `routing_failures`       | Per-pair failures (`auto`/`wire` only): `{pair, reason}`. In `wire` mode any failure aborts the whole call before labels are placed.                            |
-| `auto_label_position`    | `[x, y]` of the single auto-label placed to name the wired fragment (omitted if no wire was laid or an existing same-net label already covers the new wire).    |
+| `auto_label_position`    | `[x, y]` of the FIRST auto-label placed to name a wired fragment (legacy field; omitted if no wire was laid or an existing same-net label already covered every wired chain). |
+| `auto_label_positions`   | `List[[x, y]]` — one entry per wired chain that needed an auto-label. Multiple chains arise when consecutive pin pairs route into disjoint clusters (e.g. cluster 1 wires, the gap fails, cluster 2 wires). Each chain gets its own label so KiCad doesn't auto-name an orphaned sub-net.                |
 
 **Wire-routing algorithm** (`style="auto"` or `"wire"`): for each consecutive pin pair,
 
@@ -311,9 +312,9 @@ Connect two or more component pins to the same net. Replaces N individual `conne
 3. Try two-bend U-shapes (H-V-H or V-H-V bridges) when both pins face the same axis.
 4. Fall back to A\* on the 1.27 mm grid with bbox-and-wire obstacle avoidance, direction-aware corner cost, and same-net tee detection (the new wire may terminate on an existing same-net wire's interior).
 
-A 5-rule spurious-connection guard runs on every candidate path: rejects any segment that lands on an unrelated pin, an unrelated-net label, an unrelated-net wire endpoint (T-junction), collinearly overlaps an unrelated wire, or passes through the body bounding box of an unrelated symbol. Same-net wires/T-junctions are allowed (they're intended joins).
+A 6-rule spurious-connection guard runs on every candidate path: rejects any segment that lands on an unrelated pin, an unrelated-net label, an unrelated-net wire endpoint (T-junction), collinearly overlaps an unrelated wire, passes through the body bounding box of an unrelated symbol, or perpendicularly crosses an unrelated wire. Same-net wires/T-junctions/crossings are allowed (they're intended joins).
 
-**Auto-label**: when wires were laid and the resulting fragment isn't already reachable from an existing `netName` label via wire connectivity, `connect_pins` adds exactly one label at a wire endpoint to name the net. Without this, KiCad would auto-name unlabeled wire fragments (`Net-(R1-Pad2)` etc.) and multi-call usage would silently fragment named nets.
+**Auto-label**: when wires were laid, `connect_pins` ensures every wired chain carries the target-net label. After Phase 5 each just-laid wired pair is checked individually: if its segment endpoints are reachable from an existing `netName` label via the wire/T-junction graph, no new label is needed. Otherwise an auto-label is placed at the pair's first segment endpoint, and the reachability set is recomputed so subsequent pairs sharing that chain don't get double-labeled. Without this per-chain pass, two disjoint chains would leave one of them on a floating sub-net which KiCad auto-names `Net-(Cn-Pad1)`, silently fragmenting the named net.
 
 **Usage Notes:**
 
@@ -521,12 +522,38 @@ Export schematic to PDF format using kicad-cli.
 
 Return a rasterized image of the schematic (PNG by default, or SVG). Uses kicad-cli to export SVG, then converts to PNG via cairosvg. Use this for visual feedback after placing or wiring components.
 
-| Parameter     | Type   | Required | Description                                  |
-| ------------- | ------ | -------- | -------------------------------------------- |
-| schematicPath | string | Yes      | Path to the .kicad_sch file                  |
-| format        | enum   | No       | Output format ("png" or "svg", default: png) |
-| width         | number | No       | Image width in pixels (default: 1200)        |
-| height        | number | No       | Image height in pixels (default: 900)        |
+By default the output is cropped to the bounding box of placed content (symbols, wires, labels, sheet rectangles) and the A4 drawing sheet is excluded — so the schematic fills the image instead of floating in whitespace. For hierarchical designs, kicad-cli writes one SVG per sheet and the handler picks the bare-stem one (the top-level) — the children are reachable by passing their `.kicad_sch` paths directly.
+
+| Parameter      | Type    | Required | Description                                                                                                                       |
+| -------------- | ------- | -------- | --------------------------------------------------------------------------------------------------------------------------------- |
+| schematicPath  | string  | Yes      | Path to the .kicad_sch file                                                                                                        |
+| format         | enum    | No       | Output format (`"png"` or `"svg"`, default: `png`)                                                                                 |
+| width          | number  | No       | Image width in pixels (default: 1200)                                                                                              |
+| height         | number  | No       | Image height in pixels (default: 900)                                                                                              |
+| cropToContent  | boolean | No       | Crop the SVG viewBox to the bounding box of placed content and exclude the page frame. Default `true`. Set `false` for the legacy whole-page render. |
+| margin         | number  | No       | Fractional margin around the cropped bbox (default `0.05` = 5%). Ignored when `cropToContent` is `false`.                          |
+
+### add_schematic_sheet
+
+Place a hierarchical sheet block on a parent .kicad_sch that references a child .kicad_sch file. The sheet block is the visible rectangle on the parent that represents the sub-sheet; sheet pins (added via `add_sheet_pin`) live on this rectangle and pair with hierarchical labels (added via `add_schematic_hierarchical_label`) inside the child. If the child schematic does not yet exist, create it first via `create_schematic`.
+
+| Parameter      | Type    | Required | Description                                                                                                                                                       |
+| -------------- | ------- | -------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| schematicPath  | string  | Yes      | Path to the PARENT .kicad_sch                                                                                                                                     |
+| sheetName      | string  | Yes      | Visible label on the sheet rectangle (e.g. `"BMS"`, `"Charger"`)                                                                                                  |
+| sheetFile      | string  | Yes      | Child filename. Resolved by KiCad relative to the parent's directory — typical input is a bare filename like `"bms.kicad_sch"`.                                   |
+| position       | array   | Yes      | Top-left corner `[x, y]` in mm                                                                                                                                    |
+| size           | array   | No       | `[width, height]` in mm. Default `[25.4, 25.4]`.                                                                                                                  |
+| page           | string  | No       | Page number for this sheet's instances entry. Defaults to next available (root sheet is page 1).                                                                  |
+| sheetUuid      | string  | No       | Override the generated UUID. Default: random.                                                                                                                     |
+
+**Response fields:** `success`, `message`, `sheet_uuid`, `page`, `project`, `root_uuid`.
+
+**Usage Notes:**
+
+- Refuses to add a second sheet with the same name on the same parent — silent duplicates would cause confusion.
+- Project name in the new sheet's `(instances …)` block is derived from the parent's stem, so it matches what `DynamicSymbolLoader` writes for placed symbols (the per-project annotation lookup key).
+- For inter-sheet connectivity, pair this with `add_sheet_pin` on the parent's sheet block and `add_schematic_hierarchical_label` inside the child. As an alternative, promoting cross-sheet net labels to `global_label` lets KiCad join them by name across all sheets without sheet pins (simpler, but loses the hierarchy diagram).
 
 ### generate_netlist
 
