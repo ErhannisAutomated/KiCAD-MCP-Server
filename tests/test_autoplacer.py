@@ -250,3 +250,34 @@ class TestRoundTrip:
             sess = load_session(sch)
             apply_to_schematic(sess, target_path=None, strip_connections=True)
             assert '(label "SIG"' not in sch.read_text()
+
+
+@pytest.mark.unit
+class TestRewire:
+    def test_rewire_uses_connect_pins_auto(self):
+        """rewire_session should drive ConnectionManager.connect_pins
+        with style='auto', which adds wires when feasible and labels
+        otherwise.  Two close pins on the same net should end up with
+        at least one wire and at least one label.
+        """
+        from commands.autoplacer import (
+            apply_to_schematic,
+            load_session,
+            rewire_session,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = _make_two_r_with_net(Path(tmp), net_label_at_r1_pin1=True)
+            sess = load_session(sch)
+            # Make sure the net was discovered.
+            assert "SIG" in sess.nets
+            # Strip existing labels/wires (apply default), then rewire.
+            apply_to_schematic(sess, target_path=None, strip_connections=True)
+            result = rewire_session(sess, sch)
+            assert result["method"] == "connect_pins(auto)"
+            assert result["nets_rewired"] >= 1
+            # connect_pins(auto) on close horizontal resistors should
+            # produce at least one wire OR at least one label — the
+            # net must end up with the SIG name reachable from R1/2 + R2/1.
+            text = sch.read_text()
+            assert '"SIG"' in text, "SIG label missing after rewire"

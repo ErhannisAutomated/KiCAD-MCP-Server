@@ -887,70 +887,71 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
 
 
 def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
-    """For each pin: add a 2.54 mm wire stub outward from the pin
-    body and a net label at the stub's far end.  KiCad joins by
-    label name so connectivity is correct without any longer-range
-    wires being routed.
+    """Re-route each net through ``connect_pins(style="auto")``: the
+    autorouter draws real wires between same-net pins where it can
+    fit (≤ max_len, ≤ max_bends, no obstacle crossings) and falls
+    back to label-with-stub on each pin otherwise.
 
-    We bypass connect_pins(style="auto") here: connect_pins resolves
-    pin world coords through PinLocator, which has a known multi-unit
-    bug (it returns the first placed instance's coord for all pins of
-    a multi-unit symbol).  The placer's model already knows each
-    unit's actual position, so we write labels and stubs directly.
+    Per-net call: every pin participates in one ``connect_pins`` call
+    so the autorouter sees the whole net at once and can chain pins
+    end-to-end.  Multi-unit pins (e.g. Q1/3 on a dual-FET) resolve via
+    PinLocator's per-unit lookup — the model's per-unit components
+    are written by ``apply_to_schematic`` before this is called, so
+    PinLocator finds each unit's instance at its correct ``(at)``.
 
-    Trade-off: no longer-range autorouter wires between same-net
-    pins.  The labels-with-stubs pattern is what existing schematics
-    already use; once PinLocator learns multi-unit, we can switch
-    back to connect_pins(auto) and get real inter-pin wires.
+    Returns aggregated counters across all per-net calls.
     """
-    from commands.wire_manager import WireManager
+    from commands.connection_schematic import ConnectionManager
 
-    STUB_LEN = 2.54  # mm — one grid step, matches existing label-stub style
-    label_count = 0
-    stub_count = 0
+    pins_per_net: Dict[str, List[Dict[str, str]]] = {}
     skipped = 0
     for name, net in sess.nets.items():
-        seen_positions: set = set()
         for comp_key, pn in net.pins:
             comp = sess.components.get(comp_key)
             if comp is None:
                 skipped += 1
                 continue
-            wp = comp.world_pin_xy(pn)
-            if wp is None:
-                skipped += 1
-                continue
-            outward = comp.world_pin_outward_angle(pn) or 0.0
-            # Stub end = pin endpoint + STUB_LEN in the outward direction.
-            # Y is screen Y-down so sin is negated.
-            rad = math.radians(outward)
-            stub_end = (
-                round(wp[0] + STUB_LEN * math.cos(rad), 2),
-                round(wp[1] - STUB_LEN * math.sin(rad), 2),
+            pins_per_net.setdefault(name, []).append({"ref": comp.ref, "pin": pn})
+
+    nets_rewired = 0
+    pairs_wired = 0
+    pairs_failed = 0
+    pins_connected = 0
+    per_net: List[Dict[str, Any]] = []
+    for name, pin_dicts in pins_per_net.items():
+        if not pin_dicts:
+            continue
+        # connect_pins requires at least 2 pins to do anything; for a
+        # 1-pin "net" (e.g. an isolated label) just add a label so the
+        # name doesn't get lost when the schematic is reloaded.
+        if len(pin_dicts) < 2:
+            result = ConnectionManager.connect_pins(
+                schematic_path, pin_dicts, net_name=name, style="label",
             )
-            # Dedupe by stub-end position (stacked pins on the same
-            # coord — e.g. FDS9926A drains 7/8 — collapse to one stub).
-            if stub_end in seen_positions:
-                continue
-            seen_positions.add(stub_end)
-            # Add the 2.54 mm wire stub from the pin endpoint to the
-            # stub end.
-            if WireManager.add_wire(schematic_path, list(wp), list(stub_end)):
-                stub_count += 1
-            # Add the label at the stub end with orientation matching
-            # the outward direction (label reads away from the body).
-            orient = int(round(outward)) % 360
-            if WireManager.add_label(
-                schematic_path, name, list(stub_end),
-                label_type="label", orientation=orient,
-            ):
-                label_count += 1
+        else:
+            result = ConnectionManager.connect_pins(
+                schematic_path, pin_dicts, net_name=name, style="auto",
+            )
+        nets_rewired += 1
+        pairs_wired += len(result.get("wired_pairs", []) or [])
+        pairs_failed += len(result.get("routing_failures", []) or [])
+        pins_connected += len(result.get("connected", []) or [])
+        per_net.append({
+            "net": name,
+            "n_pins": len(pin_dicts),
+            "connected": len(result.get("connected", []) or []),
+            "wired_pairs": len(result.get("wired_pairs", []) or []),
+            "failed_pairs": len(result.get("routing_failures", []) or []),
+            "success": result.get("success", False),
+        })
     return {
-        "labels_added": label_count,
-        "stubs_added": stub_count,
+        "nets_rewired": nets_rewired,
+        "pairs_wired": pairs_wired,
+        "pairs_failed": pairs_failed,
+        "pins_connected": pins_connected,
         "pins_skipped": skipped,
-        "nets_rewired": len(sess.nets),
-        "method": "direct-label-with-stub",
+        "method": "connect_pins(auto)",
+        "per_net": per_net,
     }
 
 

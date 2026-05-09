@@ -19,16 +19,12 @@ All notable changes to the KiCAD MCP Server project are documented here.
   Implementation in `commands/autoplacer.py`.  9 tests in
   `tests/test_autoplacer.py`.  Restart MCP server to pick up.
 
-  Caveat: the `apply` step's re-routing currently uses
-  label-with-stub per pin rather than the autorouter, because
-  `connect_pins` resolves pin world coords through PinLocator and
-  PinLocator has a known multi-unit bug (returns the first-placed
-  unit's coord for all pins, regardless of which unit owns the pin).
-  Once PinLocator is taught about multi-unit, `rewire_session` can
-  switch back to `connect_pins(style="auto")` and gain real
-  inter-pin wires for free.  The label-stub form is still
-  electrically correct (KiCad joins by label name) and matches the
-  pattern existing schematics use.
+  As of 2026-05-10 the `apply` step's re-routing uses
+  `connect_pins(style="auto")` per net, so the autorouter draws real
+  inter-pin wires when feasible and falls back to label-with-stub on
+  each pin otherwise.  This is gated on the multi-unit PinLocator fix
+  below — without that, pin coords for unit-2 pins on multi-unit
+  symbols resolved to unit-1's location.
 
 - **`add_schematic_sheet`** — instantiates a hierarchical sheet block on a
   parent .kicad_sch that references a child .kicad_sch file. Until now
@@ -73,6 +69,30 @@ All notable changes to the KiCAD MCP Server project are documented here.
   writes one SVG per sheet (`<stem>.svg` for top, `<stem>-<sub>.svg`
   for each child); the handler now picks the bare-stem file by name
   instead of `glob.glob[0]` which was returning a child arbitrarily.
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-10)
+
+- **`PinLocator` multi-unit pin lookup returned wrong coords.** When a
+  schematic placed two units of the same multi-unit symbol (e.g.
+  `Q1 unit 1` + `Q1 unit 2` of a dual N-FET), `get_pin_location`
+  found the first placed instance by reference and transformed every
+  pin number against ITS `(at)` — even pins owned by a different
+  unit's sub-symbol.  Result: queries for unit-2 pins returned
+  unit-1's world coord, breaking `connect_pins(style="auto")`,
+  `get_schematic_pin_locations`, and any other tool that resolves
+  pins through PinLocator.  Fix: parse the lib_symbols sub-symbol
+  naming `<base>_<unit>_<convert>` (new
+  `PinLocator.parse_pins_per_unit` + cached `get_pins_per_unit`),
+  enumerate every placed instance by reference (new
+  `_find_placed_instances` returns x/y/rotation/mirror/lib_id/unit),
+  match each requested pin to its owning unit, and transform against
+  THAT instance's `(at)`.  `get_pin_angle` and `get_all_symbol_pins`
+  use the same path.  Tests in `tests/test_pin_locator_multi_unit.py`
+  (4 cases: unit-1 sanity, unit-2 unique coord, get_all_symbol_pins
+  unit-aware, rotation differs per unit).  Knock-on: autoplacer's
+  `rewire_session` switched back from "labels+stubs only" to
+  `connect_pins(style="auto")` per net, so it draws real inter-pin
+  wires when feasible.  Restart MCP server to pick up.
 
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-09)
 

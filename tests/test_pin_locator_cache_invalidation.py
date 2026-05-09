@@ -17,6 +17,11 @@ through MCP add_schematic_net_label.
 Fix: PinLocator now stat()s schematic_path at every public entry point
 and clears all path-keyed cache entries when mtime advances. Verified
 end-to-end here.
+
+(The PR for multi-unit pin lookup moved get_pin_location off of the
+kicad-skip _schematic_cache and onto _sexp_cache — both are still
+mtime-invalidated, but the assertions below were updated to follow
+where the live code now caches.)
 """
 import os
 import shutil
@@ -58,7 +63,6 @@ class TestPinLocatorCacheInvalidation:
             assert primed is not None, "Template should already have _TEMPLATE_R"
 
             sch_key = str(sch_path)
-            assert sch_key in locator._schematic_cache
             assert sch_key in locator._sexp_cache
             assert any(
                 k.startswith(f"{sch_key}:") for k in locator.pin_definition_cache
@@ -96,12 +100,10 @@ class TestPinLocatorCacheInvalidation:
             assert primed is not None
 
             sch_key = str(sch_path)
-            cached_schematic = locator._schematic_cache.get(sch_key)
             cached_sexp = locator._sexp_cache.get(sch_key)
-            assert cached_schematic is not None
             assert cached_sexp is not None
 
-            # Subsequent call without modification: same objects must be re-used.
+            # Subsequent call without modification: same parsed sexp must
+            # be re-used (no re-read, no re-parse).
             locator.get_pin_location(sch_path, "_TEMPLATE_R", "1")
-            assert locator._schematic_cache.get(sch_key) is cached_schematic
             assert locator._sexp_cache.get(sch_key) is cached_sexp
