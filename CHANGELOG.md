@@ -82,6 +82,26 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-10)
 
+- **`WireManager.add_wire` didn't split a new wire at existing wire
+  endpoints on its interior.** The existing logic split *existing*
+  wires at the new wire's endpoints, but the symmetric case — a new
+  wire passing through an existing endpoint — wasn't handled.  The
+  new wire stayed one long segment passing over the existing endpoint
+  with no T-junction marker.  KiCad's wire-graph then treated the
+  wires as crossing-not-joining (visually "touching but not
+  connected"), and sync_junctions never saw ≥3 endpoints at the
+  crossing point so it didn't add a junction either.  Repro on
+  `projects/autoplacer_test` D_BUS: pair-1's bus corner at
+  (152.4, 90.17) was on the interior of pair-2's vertical run.  Fix:
+  in `add_wire`, after splitting existing wires at the new endpoints,
+  collect every existing wire/pin endpoint that falls strictly on the
+  new segment's interior and emit the new wire as multiple segments
+  meeting at those points — sync_junctions then sees ≥3 endpoints
+  there and adds the junction.  New helpers
+  `_existing_endpoints_on_segment` and `_segments_split_at`.  Test:
+  `tests/test_wire_junction_changes.py::TestSyncJunctionsIntegration::
+  test_new_wire_through_existing_endpoint_splits_at_endpoint`.
+
 - **`add_schematic_net_label` only added a wire stub for connector
   refs.** Every other pin got a bare label at the pin endpoint —
   KiCad ERC then reported "Label not connected to anything" because

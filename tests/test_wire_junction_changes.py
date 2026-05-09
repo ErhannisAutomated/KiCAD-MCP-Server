@@ -1055,6 +1055,48 @@ class TestSyncJunctionsIntegration:
         junctions = _find_elements(data, "junction")
         assert junctions == [], f"Expected junction removed, got {len(junctions)}"
 
+    def test_new_wire_through_existing_endpoint_splits_at_endpoint(self, sch: Any) -> None:
+        """When a NEW wire passes through the endpoint of an existing
+        wire, the new wire should be split at that point so a T-junction
+        forms.  Repro: pair-1 wires Q1/8→Q1/6 with a U-shape ending at
+        Q1/6 = pair-2's start, then pair-2 lays a long vertical run
+        from Q1/6 past pair-1's bus-corner toward another pin.  The
+        bus-corner sits mid-segment of the new wire — without splitting
+        it the corner is just touched, not connected.
+        """
+        from commands.wire_manager import WireManager
+
+        # Existing L-shape: horizontal (0,5)→(10,5), vertical (10,5)→(10,10).
+        # The corner is at (10,5) — endpoint of both segments.
+        WireManager.add_wire(sch, [0, 5], [10, 5])
+        WireManager.add_wire(sch, [10, 5], [10, 10])
+
+        # New wire from (10, 10) all the way down to (10, 0).  Passes
+        # through (10, 5) — the existing corner.  Without the fix the
+        # new wire is one segment from (10,10) to (10,0); with the fix
+        # it's split into (10,10)→(10,5) and (10,5)→(10,0).
+        WireManager.add_wire(sch, [10, 10], [10, 0])
+
+        data = _parse_sch(sch)
+        wires = _find_elements(data, "wire")
+        # The new wire must be split at (10, 5); with the existing two
+        # plus the two new halves we should see ≥ 4 wire records.
+        assert len(wires) >= 4, (
+            f"Expected ≥ 4 wires after split, got {len(wires)} — "
+            f"new wire probably wasn't split at existing endpoint"
+        )
+        # And a junction must be present at (10, 5) where 3 endpoints meet.
+        junctions = _find_elements(data, "junction")
+        junction_pts = []
+        for j in junctions:
+            for sub in j[1:]:
+                if isinstance(sub, list) and sub[0] == Symbol("at"):
+                    junction_pts.append((float(sub[1]), float(sub[2])))
+                    break
+        assert (10.0, 5.0) in junction_pts, (
+            f"Expected junction at (10, 5); got junctions at {junction_pts}"
+        )
+
     def test_polyline_t_junction_auto_inserted(self, sch: Any) -> None:
         """Polyline whose endpoint hits a wire midpoint auto-inserts a junction."""
         from commands.wire_manager import WireManager

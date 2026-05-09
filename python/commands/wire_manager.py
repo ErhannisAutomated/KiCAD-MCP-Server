@@ -168,10 +168,15 @@ class WireManager:
                 if splits:
                     logger.info(f"Broke {splits} wire(s) at new wire endpoint {pt}")
 
-            # Create wire S-expression
-            # Format: (wire (pts (xy x1 y1) (xy x2 y2)) (stroke (width N) (type default)) (uuid ...))
-            wire_sexp = WireManager._make_wire_sexp(
-                start_point, end_point, stroke_width, stroke_type
+            # Reverse case: split the NEW wire at any existing wire endpoint
+            # (or pin endpoint) that falls strictly on its interior.  Without
+            # this the new wire stays one long segment passing through
+            # another wire's endpoint, KiCad's connection graph misses the
+            # T-junction, and visually two wires "touch but don't connect"
+            # (sync_junctions only sees ≥3 endpoints, so a wire-passes-
+            # through-endpoint case never gets a junction marker added).
+            split_points = WireManager._existing_endpoints_on_segment(
+                sch_data, start_point, end_point
             )
 
             # Find insertion point (before sheet_instances)
@@ -185,8 +190,25 @@ class WireManager:
                 logger.error("No sheet_instances section found in schematic")
                 return False
 
-            # Insert wire before sheet_instances
-            sch_data.insert(sheet_instances_index, wire_sexp)
+            # Build the wire as one or more segments, splitting at every
+            # existing-endpoint we found on the interior.  Segments share
+            # endpoints with the existing endpoints so sync_junctions then
+            # sees ≥3 wire endpoints and adds a junction.
+            new_segments = WireManager._segments_split_at(
+                start_point, end_point, split_points,
+            )
+            if len(new_segments) > 1:
+                logger.info(
+                    f"Split new wire {start_point}→{end_point} at "
+                    f"{len(split_points)} existing-endpoint(s) "
+                    f"into {len(new_segments)} segments"
+                )
+            for seg_a, seg_b in new_segments:
+                wire_sexp = WireManager._make_wire_sexp(
+                    seg_a, seg_b, stroke_width, stroke_type,
+                )
+                sch_data.insert(sheet_instances_index, wire_sexp)
+                sheet_instances_index += 1
             logger.info(f"Injected wire from {start_point} to {end_point}")
 
             WireManager.sync_junctions(sch_data)
@@ -458,6 +480,71 @@ class WireManager:
                     continue
             i += 1
         return splits
+
+    @staticmethod
+    def _existing_endpoints_on_segment(
+        sch_data: list, start: List[float], end: List[float]
+    ) -> List[Tuple[float, float]]:
+        """Return existing wire endpoints (and pin endpoints) that fall
+        STRICTLY on the interior of the segment ``start → end``.  Used
+        to split a new wire at every existing endpoint it would otherwise
+        pass through silently.
+
+        Endpoints exactly at ``start`` or ``end`` are excluded — they
+        already coincide with the new wire's own endpoints.
+        """
+        sx, sy = float(start[0]), float(start[1])
+        ex, ey = float(end[0]), float(end[1])
+        seen: set = set()
+        for ep in WireManager._collect_wire_endpoints(sch_data):
+            px, py = ep
+            if (
+                WireManager._point_strictly_on_wire(px, py, sx, sy, ex, ey)
+                and (round(px * _IU_PER_MM), round(py * _IU_PER_MM)) not in seen
+            ):
+                seen.add((round(px * _IU_PER_MM), round(py * _IU_PER_MM)))
+        # Also consider pin endpoints — a new wire that runs through a
+        # pin endpoint should split there so the pin lands on a wire
+        # vertex rather than a wire interior.
+        for ep in WireManager._collect_pin_positions(sch_data):
+            px, py = ep
+            if (
+                WireManager._point_strictly_on_wire(px, py, sx, sy, ex, ey)
+                and (round(px * _IU_PER_MM), round(py * _IU_PER_MM)) not in seen
+            ):
+                seen.add((round(px * _IU_PER_MM), round(py * _IU_PER_MM)))
+        return [(iu_x / _IU_PER_MM, iu_y / _IU_PER_MM) for iu_x, iu_y in seen]
+
+    @staticmethod
+    def _segments_split_at(
+        start: List[float], end: List[float], split_points: List[Tuple[float, float]]
+    ) -> List[Tuple[List[float], List[float]]]:
+        """Build the segment list for a new wire ``start → end`` split at
+        every point in ``split_points`` (which must lie on its interior).
+        Returns a list of (a, b) pairs in order from start to end.  When
+        ``split_points`` is empty the result is a single segment.
+        """
+        if not split_points:
+            return [(list(start), list(end))]
+        sx, sy = float(start[0]), float(start[1])
+        ex, ey = float(end[0]), float(end[1])
+        # Order split points by their position along the segment.
+        dx = ex - sx
+        dy = ey - sy
+        length2 = dx * dx + dy * dy
+        if length2 == 0:
+            return [(list(start), list(end))]
+        ordered = sorted(
+            split_points,
+            key=lambda p: ((p[0] - sx) * dx + (p[1] - sy) * dy) / length2,
+        )
+        segments: List[Tuple[List[float], List[float]]] = []
+        prev: List[float] = [sx, sy]
+        for sp in ordered:
+            segments.append((prev, [sp[0], sp[1]]))
+            prev = [sp[0], sp[1]]
+        segments.append((prev, [ex, ey]))
+        return segments
 
     @staticmethod
     def _collect_wire_endpoints(sch_data: list) -> List[Tuple[float, float]]:

@@ -2169,7 +2169,7 @@ class KiCADInterface:
                 )
                 if auto_stub_added:
                     response["auto_wire_stub"] = True
-                    response["message"] += " (wire stub auto-added for connector pin)"
+                    response["message"] += " (wire stub auto-added)"
                 if orientation_param is None and orientation != 0:
                     response["auto_orientation"] = True
                     response["message"] += f" (orientation auto-set to {orientation}°)"
