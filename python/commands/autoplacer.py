@@ -374,9 +374,6 @@ def load_session(schematic_path: Path) -> Session:
                     ref = sub[2]
         if not (lib_id and ref):
             continue
-        # Skip power flag pseudosymbols.
-        if ref.startswith("#"):
-            continue
         # Pin per-unit pin set + bbox from lib_symbols.
         lib_node = _find_lib_symbol(sexp, lib_id)
         if lib_node is None:
@@ -385,9 +382,16 @@ def load_session(schematic_path: Path) -> Session:
         pins_per_unit = _pins_per_unit(lib_node)
         unit_pins = pins_per_unit.get(unit) or pins_per_unit.get(1, {})
         bbox_w, bbox_h = _bbox_from_lib(lib_node)
-        # Connectors (J*) are pinned by default — user-facing edges
-        # placed deliberately.
-        is_pinned = ref.upper().startswith("J")
+        # Pinned heuristics:
+        #   - Connectors (J*): user-facing edges placed deliberately.
+        #   - Power flag pseudosymbols (#FLG*): they sit on a specific
+        #     net by position, so we must keep them in the model
+        #     (otherwise rewire strips their labels and they go
+        #     dangling) but also mustn't move them.
+        is_pinned = (
+            ref.upper().startswith("J")
+            or ref.startswith("#")
+        )
         comp = Component(
             ref=ref, unit=unit, lib_id=lib_id,
             x=x, y=y, rotation=rot,
@@ -733,9 +737,11 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
     sexp = sexpdata.loads(text)
 
     # Replace each placed-symbol's (at) AND each property's (at) so
-    # the Reference / Value text labels follow the symbol body.  Match
-    # by (ref, unit) so multi-unit symbols update each placed instance
-    # to its own model position.
+    # the Reference / Value text labels follow the symbol body —
+    # including the per-property offset rotating around the symbol
+    # anchor when the symbol's rotation changes.  Match by (ref, unit)
+    # so multi-unit symbols update each placed instance to its own
+    # model position.
     n_updated = 0
     for top in sexp:
         if not (isinstance(top, list) and len(top) > 1 and top[0] == Symbol("symbol")):
@@ -763,8 +769,10 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
         if comp is None:
             continue
         new_x, new_y, new_rot = comp.x, comp.y, comp.rotation
-        dx = new_x - old_x
-        dy = new_y - old_y
+        delta_rot = ((new_rot - old_rot + 540) % 360) - 180  # signed shortest
+        rad = math.radians(delta_rot)
+        cos_d = math.cos(rad)
+        sin_d = math.sin(rad)
         # Update the symbol's primary (at).
         for sub in top[1:]:
             if isinstance(sub, list) and sub and sub[0] == Symbol("at"):
@@ -775,20 +783,31 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
                 else:
                     sub.append(new_rot)
                 break
-        # Translate every property's (at) by the same delta so the
-        # Reference / Value text labels move WITH the symbol.  Property
-        # text orientation isn't auto-rotated to match the symbol — that
-        # would require recomputing whether the text fits beside the
-        # rotated body.  Leaving it as-is means text might overlap a
-        # rotated symbol; that's a follow-on improvement.
+        # For every property's (at), rotate its offset around the OLD
+        # symbol anchor by delta_rot, then translate to the NEW anchor,
+        # AND rotate the property's own text orientation by delta_rot.
+        # Screen coords are Y-down so KiCad's CCW rotation maps to the
+        # math-CW formula:
+        #     new_dx = old_dx*cos(Δ) + old_dy*sin(Δ)
+        #     new_dy = -old_dx*sin(Δ) + old_dy*cos(Δ)
         for sub in top[1:]:
             if not (isinstance(sub, list) and len(sub) >= 3 and sub[0] == Symbol("property")):
                 continue
             for sp in sub[2:]:
                 if isinstance(sp, list) and sp and sp[0] == Symbol("at") and len(sp) >= 3:
                     try:
-                        sp[1] = float(sp[1]) + dx
-                        sp[2] = float(sp[2]) + dy
+                        old_px, old_py = float(sp[1]), float(sp[2])
+                        ox = old_px - old_x
+                        oy = old_py - old_y
+                        nox = ox * cos_d + oy * sin_d
+                        noy = -ox * sin_d + oy * cos_d
+                        sp[1] = new_x + nox
+                        sp[2] = new_y + noy
+                        if len(sp) >= 4:
+                            try:
+                                sp[3] = (float(sp[3]) + delta_rot) % 360
+                            except (TypeError, ValueError):
+                                pass
                     except (TypeError, ValueError):
                         pass
                     break
@@ -808,6 +827,38 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
             new_sexp.append(item)
         sexp = new_sexp
 
+    # If writing to a different file (a preview / test render rather
+    # than the original), rewrite each placed-symbol's
+    # (instances (project … (path …))) to point to the new file's stem
+    # and root UUID — so KiCad can resolve annotations when the file
+    # is opened standalone.  When writing back to the source we leave
+    # the hierarchical paths alone so the parent project still works.
+    if dst.resolve() != src.resolve():
+        # Need the destination's root uuid — find the first (uuid …) in
+        # the (about-to-be-written) sexp.
+        dst_uuid = None
+        for item in sexp:
+            if isinstance(item, list) and len(item) >= 2 and item[0] == Symbol("uuid"):
+                dst_uuid = str(item[1]) if not isinstance(item[1], Symbol) else str(item[1])
+                break
+        dst_stem = dst.stem
+        if dst_uuid:
+            for top in sexp:
+                if not (isinstance(top, list) and len(top) > 1 and top[0] == Symbol("symbol")):
+                    continue
+                for sub in top[1:]:
+                    if not (isinstance(sub, list) and sub and sub[0] == Symbol("instances")):
+                        continue
+                    for proj in sub[1:]:
+                        if not (isinstance(proj, list) and proj and proj[0] == Symbol("project")):
+                            continue
+                        # (project "name" (path "…" …))
+                        if len(proj) >= 2:
+                            proj[1] = dst_stem
+                        for pp in proj[2:]:
+                            if isinstance(pp, list) and pp and pp[0] == Symbol("path") and len(pp) >= 2:
+                                pp[1] = f"/{dst_uuid}"
+
     dst.write_text(sexpdata.dumps(sexp))
     return {
         "wrote": str(dst),
@@ -818,46 +869,65 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
 
 
 def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
-    """For each net with ≥2 pins, call connect_pins(style="auto") on the
-    just-written schematic so wires + labels are laid out in the new
-    positions.  Returns a summary of how each net resolved.
+    """Place a net label at every pin's NEW world coordinate so that
+    after the placer moves things, all original electrical connections
+    are restored (just in label-only form for now).
+
+    We bypass connect_pins(style="auto") here: connect_pins resolves
+    pin world coords through PinLocator, which has a known multi-unit
+    bug (it returns the first placed instance's coord for all pins of
+    a multi-unit symbol).  The placer's model already knows each
+    unit's actual position — we just write a label at each pin's
+    Component.world_pin_xy().
+
+    Trade-off: no autorouter wires.  Connectivity is correct (every
+    pin on net N gets a "N" label at its endpoint, KiCad joins them
+    by name) but visually less polished than the autorouter would
+    produce.  Once PinLocator is taught about multi-unit, this can
+    switch back to connect_pins(auto) and gain real wires for free.
     """
-    from commands.connection_schematic import ConnectionManager
+    from commands.wire_manager import WireManager
 
-    results: Dict[str, Dict[str, Any]] = {}
-
-    def _bare_ref(comp_key: str) -> str:
-        """Strip the unit suffix that the placer model uses internally
-        — connect_pins expects bare reference designators (the unit
-        is implicit in pin number on multi-unit symbols)."""
-        i = comp_key.rfind("__u")
-        return comp_key[:i] if i >= 0 else comp_key
-
+    label_count = 0
+    skipped = 0
     for name, net in sess.nets.items():
-        if len(net.pins) < 2:
-            if len(net.pins) == 1:
-                from commands.wire_manager import WireManager
-                comp_key, pn = net.pins[0]
-                comp = sess.components.get(comp_key)
-                if comp:
-                    wp = comp.world_pin_xy(pn)
-                    if wp:
-                        WireManager.add_label(schematic_path, name, list(wp))
-            continue
-        pins_arg = [{"ref": _bare_ref(k), "pin": p} for k, p in net.pins]
-        try:
-            res = ConnectionManager.connect_pins(
-                schematic_path, pins_arg, net_name=name, style="auto"
+        seen_positions: set = set()
+        for comp_key, pn in net.pins:
+            comp = sess.components.get(comp_key)
+            if comp is None:
+                skipped += 1
+                continue
+            wp = comp.world_pin_xy(pn)
+            if wp is None:
+                skipped += 1
+                continue
+            # Snap to grid so labels coincide cleanly (avoid sub-mm
+            # discrepancies that confuse KiCad's net merger).
+            key = (round(wp[0], 2), round(wp[1], 2))
+            if key in seen_positions:
+                # Two pins of the same component (e.g. stacked drains
+                # 7+8) → one label is enough.
+                continue
+            seen_positions.add(key)
+            # Use the pin's outward angle for label orientation so it
+            # reads away from the component body.
+            try:
+                outward = comp.world_pin_outward_angle(pn)
+                orient = int(round(outward)) % 360 if outward is not None else 0
+            except Exception:
+                orient = 0
+            ok = WireManager.add_label(
+                schematic_path, name, list(key),
+                label_type="label", orientation=orient,
             )
-            results[name] = {
-                "success": res.get("success", False),
-                "wired_pairs": len(res.get("wired_pairs", [])),
-                "labels": len(res.get("auto_label_positions", [])),
-                "failed": len(res.get("failed", [])),
-            }
-        except Exception as e:
-            results[name] = {"success": False, "error": str(e)}
-    return {"nets_rewired": len(results), "details": results}
+            if ok:
+                label_count += 1
+    return {
+        "labels_added": label_count,
+        "pins_skipped": skipped,
+        "nets_rewired": len(sess.nets),
+        "method": "direct-label",
+    }
 
 
 # ----------------------------------------------------------------------
