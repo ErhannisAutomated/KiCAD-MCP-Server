@@ -1,7 +1,7 @@
 import logging
 import os
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from skip import Schematic
 
@@ -782,67 +782,85 @@ class ConnectionManager:
                 ),
             }
 
-        # Phase 5 — auto-label: if any pair was wired, ensure the resulting
-        # connected wire fragment carries `resolved_net` as a label. KiCad
-        # otherwise auto-names unlabeled wires (Net-(R1-Pad2) etc.), which
-        # silently fragments named nets across multiple connect_pins calls.
+        # Phase 5 — auto-label: ensure EVERY just-laid wire chain carries
+        # a `resolved_net` label.  Each wired pair gets checked individually:
+        # if its segments are reachable (via wire/T-junction connectivity)
+        # from an existing target_net label, no new label is needed for that
+        # pair.  Otherwise we add a label at the end of the pair's first
+        # segment and re-compute the reachability set so subsequent pairs in
+        # the same chain see the new label.
         #
-        # We skip the auto-label only when the just-laid wires are already
-        # reachable from an existing `resolved_net` label via wire/T-junction
-        # connectivity — e.g. the route tee'd into existing labeled geometry.
-        # We use schematic_router._classify_wires_by_net with no
-        # own_pin_endpoints so it relies purely on label connectivity.
-        auto_label_added: Optional[List[float]] = None
+        # Why per-pair, not just one global label: if the autorouter formed
+        # two disjoint chains (e.g. wired pair P0↔P1 in one corner of the
+        # sheet and pair P2↔P3 in another), labeling only the first would
+        # leave the second on an unlabeled "ghost" sub-net.  KiCad would
+        # auto-name it `Net-(C2-Pad1)` etc., silently fragmenting the named
+        # net.  This was the root cause of three orphaned cap chains
+        # (C27↔C28 BAT+, C25↔C26 BB_VCC, C29↔C30 V12_OUT) discovered when
+        # the power_module flat schematic was partitioned across sheets.
+        auto_labels_added: List[List[float]] = []
         if wired_pairs and resolved_net:
             from commands.schematic_router import (
                 _classify_wires_by_net,
                 collect_obstacles as _re_collect_obs,
             )
 
-            post_obs = _re_collect_obs(schematic_path, exclude_pins=exclude)
-            label_reachable = _classify_wires_by_net(
-                post_obs, resolved_net, own_pin_endpoints=()
-            )
-
             def _key(p):
                 return (round(p[0] * 100), round(p[1] * 100))
 
-            reachable_endpoints = set()
-            for idx in label_reachable:
-                wa, wb = post_obs.other_wires[idx]
-                reachable_endpoints.add(_key(wa))
-                reachable_endpoints.add(_key(wb))
-            # Same-net label positions themselves are also reachable (for
-            # endpoint-coincident labels — most common case).
-            for (lpos, lname) in post_obs.other_labels:
-                if lname == resolved_net:
-                    reachable_endpoints.add(_key(lpos))
+            def _label_reachable_endpoints() -> Set[Tuple[int, int]]:
+                """Endpoints currently reachable from a `resolved_net` label
+                via wire/T-junction connectivity.  Re-computed each time we
+                add a label so subsequent iterations benefit."""
+                post_obs = _re_collect_obs(schematic_path, exclude_pins=exclude)
+                label_reachable = _classify_wires_by_net(
+                    post_obs, resolved_net, own_pin_endpoints=()
+                )
+                endpoints: Set[Tuple[int, int]] = set()
+                for idx in label_reachable:
+                    wa, wb = post_obs.other_wires[idx]
+                    endpoints.add(_key(wa))
+                    endpoints.add(_key(wb))
+                for (lpos, lname) in post_obs.other_labels:
+                    if lname == resolved_net:
+                        endpoints.add(_key(lpos))
+                return endpoints
 
-            needs_label = True
+            reachable_endpoints = _label_reachable_endpoints()
+
             for wp in wired_pairs:
+                pair_reachable = False
                 for (a, b) in wp["segments"]:
                     for endpoint in (a, b):
                         if _key(endpoint) in reachable_endpoints:
-                            needs_label = False
+                            pair_reachable = True
                             break
-                    if not needs_label:
+                    if pair_reachable:
                         break
-                if not needs_label:
-                    break
 
-            if needs_label:
-                # Place at the end of the first segment of the first wired
-                # pair. For multi-segment paths this is a corner (clean spot).
-                # For straight single-segment paths it falls on the second
-                # pin's endpoint; not pretty, but always a wire endpoint so
-                # detection works on the next call.
-                segs = wired_pairs[0]["segments"]
-                if segs:
-                    label_pos = list(segs[0][1])
-                    if WireManager.add_label(
-                        schematic_path, resolved_net, label_pos, label_type="label"
-                    ):
-                        auto_label_added = label_pos
+                if pair_reachable:
+                    continue
+
+                # Orphaned chain — label its first segment's far end.  For
+                # multi-segment routes this is a corner (clean spot); for
+                # straight routes it lands on the second pin's endpoint
+                # (less pretty but always a wire endpoint, which is what
+                # subsequent calls need to detect this label).
+                segs = wp["segments"]
+                if not segs:
+                    continue
+                label_pos = list(segs[0][1])
+                if WireManager.add_label(
+                    schematic_path, resolved_net, label_pos, label_type="label"
+                ):
+                    auto_labels_added.append(label_pos)
+                    # Refresh the reachable set so other pairs that share
+                    # this just-labeled chain are now considered reachable.
+                    reachable_endpoints = _label_reachable_endpoints()
+
+        # Backwards-compat key — first auto-label only.  The full list is
+        # exposed via auto_labels_added.
+        auto_label_added = auto_labels_added[0] if auto_labels_added else None
 
         # Phase 3: per-pin label loop for everything not already wired
         connected: List[str] = []
@@ -911,6 +929,8 @@ class ConnectionManager:
             result_dict["routing_failures"] = routing_failures
             if auto_label_added is not None:
                 result_dict["auto_label_position"] = auto_label_added
+            if auto_labels_added:
+                result_dict["auto_label_positions"] = auto_labels_added
         return result_dict
 
     @staticmethod

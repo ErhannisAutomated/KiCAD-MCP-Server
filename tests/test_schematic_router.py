@@ -1314,3 +1314,97 @@ class TestConnectPinsStyle:
         # No wire-only routing happened; both pins got their own stub+label.
         text = sch.read_text()
         assert text.count("(label") >= 2
+
+    def test_auto_labels_each_orphaned_chain(self, tmp_path):
+        """Regression for the orphan-chain bug discovered when partitioning
+        the power_module flat schematic into hierarchical sheets.
+
+        Setup: two resistor clusters far apart.  Each cluster's pair is a
+        clean straight-line route (close together, facing each other).
+        The middle pair (cluster 1's right end → cluster 2's left end)
+        is intentionally too far to route within max_len, so the
+        autorouter wires *only* the two cluster pairs and leaves the
+        gap unbridged.
+
+        Bug behaviour (pre-fix): Phase 5 auto-labels the FIRST wired
+        chain only.  The second cluster's wired pair is left without a
+        label, so its pins end up on a floating "ghost" sub-net even
+        though connect_pins reports them as 'connected'.  KiCad
+        auto-names the ghost net `Net-(R3-Pad1)` etc., silently
+        fragmenting the named net the caller asked for.
+
+        Fixed behaviour: Phase 5 iterates over every wired pair and adds
+        an auto-label per orphaned chain.  All four pins resolve to
+        target_net via wire/label connectivity.
+        """
+        from commands.connection_schematic import ConnectionManager
+
+        # 4 horizontal resistors in two clusters at y=100 and y=200.
+        # Each cluster: R{n} at (100, y) rot=90 + R{n+1} at (115, y) rot=90.
+        # Pin 1 is at sym_x + 3.81, pin 2 at sym_x - 3.81.
+        # We connect the OUTER pins of each cluster pair so each cluster
+        # routes as a single straight wire across ~7.4 mm.
+        schematic = textwrap.dedent(f"""\
+            (kicad_sch (version 20250114) (generator "test")
+              {R_LIB}
+              (symbol (lib_id "Device:R") (at 100 100 90) (unit 1)
+                (property "Reference" "R1" (at 100 100 0))
+                (property "Value" "10k" (at 100 100 0))
+                (instances (project "test" (path "/" (reference "R1") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 115 100 90) (unit 1)
+                (property "Reference" "R2" (at 115 100 0))
+                (property "Value" "10k" (at 115 100 0))
+                (instances (project "test" (path "/" (reference "R2") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 100 200 90) (unit 1)
+                (property "Reference" "R3" (at 100 200 0))
+                (property "Value" "10k" (at 100 200 0))
+                (instances (project "test" (path "/" (reference "R3") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 115 200 90) (unit 1)
+                (property "Reference" "R4" (at 115 200 0))
+                (property "Value" "10k" (at 115 200 0))
+                (instances (project "test" (path "/" (reference "R4") (unit 1))))
+              )
+              (sheet_instances (path "/" (page "1")))
+            )
+        """)
+        sch = _write(tmp_path, "orphan.kicad_sch", schematic)
+
+        # max_len=30 ensures the middle pair (~100 mm) cannot route.
+        # Pin selection: R1.2 (right of R1) ↔ R2.1 (left of R2) face each
+        # other and route as a straight line within each cluster.
+        result = ConnectionManager.connect_pins(
+            sch,
+            [
+                {"ref": "R1", "pin": "2"},
+                {"ref": "R2", "pin": "1"},
+                {"ref": "R3", "pin": "2"},
+                {"ref": "R4", "pin": "1"},
+            ],
+            net_name="SIG",
+            style="auto",
+            max_len=30.0,
+        )
+        assert result["success"], result.get("message")
+
+        # Two cluster pairs got wired; the middle pair was unreachable.
+        assert len(result["wired_pairs"]) == 2, (
+            f"expected 2 wired pairs, got {len(result['wired_pairs'])}: "
+            f"{result['wired_pairs']}"
+        )
+
+        # Phase 5 must label EACH of the two chains.
+        assert len(result.get("auto_label_positions", [])) == 2, (
+            "auto_label_positions should have one entry per orphaned chain"
+        )
+
+        # The whole point: every pin must end up on SIG via the label
+        # graph (either a label at its own pin, or a wire chain to a label).
+        for ref, pin in [("R1", "2"), ("R2", "1"), ("R3", "2"), ("R4", "1")]:
+            net = ConnectionManager.get_pin_net(sch, ref, pin)
+            assert net == "SIG", (
+                f"{ref}/{pin} ended up on net {net!r}, expected 'SIG' — "
+                "orphan-chain bug has regressed"
+            )
