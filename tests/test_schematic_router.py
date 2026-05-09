@@ -1171,6 +1171,77 @@ class TestConnectPinsStyle:
         text = sch.read_text()
         assert text.count("(wire") >= 2
 
+    def test_astar_tee_doesnt_terminate_on_wire_already_at_p1(self, tmp_path):
+        """When p1 of a route coincides with the endpoint of an existing
+        same-net wire, A* used to "tee" after one cell — it walked from
+        cell (0,0) onto cell (0,-1) which was on the wire and considered
+        itself done.  The new run-out leg toward p2 never got emitted.
+
+        Repro: connect_pins(auto, [Q1/8, Q1/6, R3/2]) on autoplacer_test
+        where pair-1 (Q1/8→Q1/6) drew a U-shape ending AT Q1/6, then
+        pair-2 (Q1/6→R3/2) saw the wire ending at its own start cell
+        and terminated on it after one step.
+
+        Fix: cells reachable from p1 via the same-net wire graph are
+        excluded from extra_goal_cells.
+        """
+        from commands.schematic_router import SchematicRouter
+
+        # R1 left vertical, R2 right vertical, both with pin 1 on top.
+        # R3 placed FAR to the right.  Pre-existing wire goes from
+        # above R2 down to R2's pin 1 endpoint exactly.  Routing from
+        # R2.pin1 → R3.pin1 should reach R3, not "tee" onto the
+        # pre-existing wire that's already at R2.pin1.
+        sch_text = textwrap.dedent("""\
+            (kicad_sch (version 20250114) (generator "test")
+              %s
+              (symbol (lib_id "Device:R") (at 101.6 110.49 0) (unit 1)
+                (property "Reference" "R1" (at 101.6 110.49 0))
+                (property "Value" "10k" (at 101.6 110.49 0))
+                (instances (project "test" (path "/" (reference "R1") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 125.73 110.49 0) (unit 1)
+                (property "Reference" "R2" (at 125.73 110.49 0))
+                (property "Value" "10k" (at 125.73 110.49 0))
+                (instances (project "test" (path "/" (reference "R2") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 160.02 110.49 0) (unit 1)
+                (property "Reference" "R3" (at 160.02 110.49 0))
+                (property "Value" "1k" (at 160.02 110.49 0))
+                (instances (project "test" (path "/" (reference "R3") (unit 1))))
+              )
+              (wire (pts (xy 101.6 106.68) (xy 125.73 106.68)) (stroke (width 0) (type default)))
+              (wire (pts (xy 101.6 106.68) (xy 101.6 100.33)) (stroke (width 0) (type default)))
+              (wire (pts (xy 125.73 106.68) (xy 125.73 100.33)) (stroke (width 0) (type default)))
+              (wire (pts (xy 125.73 100.33) (xy 125.73 106.68)) (stroke (width 0) (type default)))
+              (label "BUS" (at 101.6 106.68 0))
+              (sheet_instances (path "/" (page "1")))
+            )
+        """) % R_LIB
+        sch = _write(tmp_path, "tee_runout.kicad_sch", sch_text)
+
+        # R3 pin 1 is at (160.02, 100.33-3.81)? No — Device:R rot=0 puts
+        # pin 1 at lib (0, +3.81) → screen y - 3.81.  So R3 pin 1 is at
+        # (160.02, 110.49 - 3.81) = (160.02, 106.68).  R2 pin 1 at
+        # (125.73, 106.68).  Existing wires include (125.73, 100.33)→
+        # (125.73, 106.68): that's the wire ending AT R2.pin1.
+        result = SchematicRouter.route_pair(
+            sch, "R2", "1", "R3", "1", target_net="BUS",
+        )
+        assert result.success, f"routing failed: {result.reject_reason}"
+        # The route must reach R3.pin1.  If it terminated on the
+        # pre-existing wire (the bug), the last segment would end at
+        # (125.73, ~105.41) — i.e. one grid step from R2.pin1, never
+        # leaving the column.  After the fix it must extend over to
+        # x=160.02.
+        last_seg = result.segments[-1]
+        end_x, end_y = last_seg[1]
+        assert math.isclose(end_x, 160.02, abs_tol=1e-2), (
+            f"route ended at x={end_x}, expected 160.02 — likely tee'd "
+            f"onto the wire already touching p1 instead of running out to R3"
+        )
+        assert math.isclose(end_y, 106.68, abs_tol=1e-2), end_y
+
     def test_phase5_auto_label_skipped_when_tee_into_existing_labeled_net(
         self, tmp_path
     ):

@@ -82,6 +82,35 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-10)
 
+- **`add_schematic_net_label` only added a wire stub for connector
+  refs.** Every other pin got a bare label at the pin endpoint —
+  KiCad ERC then reported "Label not connected to anything" because
+  it couldn't see the pin↔label connection without a wire segment
+  between them.  Surfaced 2026-05-10 on `projects/autoplacer_test`
+  while verifying the multi-unit fix (5 of 6 ERC errors were this).
+  Fix: always emit the 2.54mm outward stub and put the label at the
+  stub's far end (the logic that already existed for `J*` refs,
+  applied to every snap-to-pin call).  Falls back to bare-label-at-
+  pin only when `get_pin_angle` returns None.  Tests in
+  `tests/test_net_label_pin_snapping.py` (3 cases: stub position+wire
+  call, stub respects pin angle, fallback when angle unknown).
+
+- **`connect_pins(style="auto")` astar-tee terminated after one cell
+  when its start pin was already on a same-net wire.** Repro on a
+  3-pin connect_pins call where pair-1's wire ends at pair-2's
+  starting pin: A* walked from cell (0,0) onto cell (0,-1), saw it
+  was on a same-net "tee target", and stopped — the run-out leg to
+  the third pin never got emitted.  Caller saw `success: true` with
+  a 1.27mm stub instead of a real route.  Surfaced 2026-05-10 on
+  `projects/autoplacer_test` D_BUS (Q1/8 + Q1/6 + R3/2): pair-1
+  ended at Q1/6 = pair-2's p1, pair-2 stub'd in place.  Fix: in
+  `_route_pair_with_astar`, BFS the same-net wire graph from p1 and
+  exclude every reachable cell from `extra_goal_cells` — the router
+  can't "tee" onto a wire that's already connected to its own
+  start.  New helper `_wire_reachable_cells_from_start`.  Test in
+  `tests/test_schematic_router.py::TestConnectPinsStyle::
+  test_astar_tee_doesnt_terminate_on_wire_already_at_p1`.
+
 - **`PinLocator` multi-unit pin lookup returned wrong coords.** When a
   schematic placed two units of the same multi-unit symbol (e.g.
   `Q1 unit 1` + `Q1 unit 2` of a dual N-FET), `get_pin_location`

@@ -2061,30 +2061,35 @@ class KiCADInterface:
                     Path(schematic_path), component_ref, str(pin_number)
                 )
 
-                # Connector pins (J* reference prefix) need a wire stub or the label
-                # won't make an electrical connection (ERC "not connected" false positive).
-                # Use the pin's outward angle to extend the stub 2.54mm away from the body.
-                is_connector = component_ref.upper().startswith("J")
-                if is_connector:
+                # Add a 2.54mm wire stub from the pin endpoint outward and
+                # place the label at the stub's far end.  Without a stub
+                # KiCad's ERC reports "Label not connected to anything" —
+                # the pin and label are co-located but KiCad needs a wire
+                # segment between them to register the electrical
+                # connection (also matters for kicad-cli netlist export).
+                # Originally only connectors got this treatment; the
+                # rationale didn't actually depend on connector-ness, just
+                # on whether the pin had any wire at all.
+                if angle is not None:
                     import math
 
-                    if angle is not None:
-                        stub_len = 2.54
-                        rad = math.radians(angle)
-                        stub_end = [
-                            round(pin_loc[0] + stub_len * math.cos(rad), 4),
-                            round(pin_loc[1] - stub_len * math.sin(rad), 4),
-                        ]
-                        WM.add_wire(Path(schematic_path), pin_loc, stub_end)
-                        position = stub_end
-                        auto_stub_added = True
-                        logger.info(
-                            f"Added auto wire stub for connector {component_ref}/{pin_number}: "
-                            f"{pin_loc} → {stub_end} (angle={angle}°)"
-                        )
-                    else:
-                        position = pin_loc
+                    stub_len = 2.54
+                    rad = math.radians(angle)
+                    stub_end = [
+                        round(pin_loc[0] + stub_len * math.cos(rad), 4),
+                        round(pin_loc[1] - stub_len * math.sin(rad), 4),
+                    ]
+                    WM.add_wire(Path(schematic_path), pin_loc, stub_end)
+                    position = stub_end
+                    auto_stub_added = True
+                    logger.info(
+                        f"Added auto wire stub for {component_ref}/{pin_number}: "
+                        f"{pin_loc} → {stub_end} (angle={angle}°)"
+                    )
                 else:
+                    # Fallback: no pin angle available (multi-unit edge cases
+                    # or unsupported lib symbol).  Place the label at the
+                    # pin endpoint with no stub — better than refusing.
                     position = pin_loc
 
                 # Auto-orientation: when the caller didn't pass orientation

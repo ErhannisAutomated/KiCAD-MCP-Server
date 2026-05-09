@@ -508,6 +508,59 @@ def _build_grid_obstacles(
     return grid, (min_x, min_y), (max_x, max_y)
 
 
+def _wire_reachable_cells_from_start(
+    obstacles: Obstacles,
+    same_net_indices: Set[int],
+    *,
+    origin: Point,
+    snap: float,
+    bounds_min: Tuple[int, int],
+    bounds_max: Tuple[int, int],
+) -> Set[Tuple[int, int]]:
+    """Cells reachable from start cell (0, 0) (= p1) by walking the
+    same-net wire graph: collect every wire that touches any cell in
+    the current frontier and union its cells in.  Used to filter
+    `extra_goal_cells` so A* doesn't "tee" onto a wire that's already
+    connected to p1.  Out-of-bounds cells are still walked through but
+    not returned.
+    """
+    def _wire_cells(idx: int) -> Set[Tuple[int, int]]:
+        a, b = obstacles.other_wires[idx]
+        a_cell = _world_to_cell(a, origin, snap)
+        b_cell = _world_to_cell(b, origin, snap)
+        cells: Set[Tuple[int, int]] = set()
+        if a_cell == b_cell:
+            cells.add(a_cell)
+        elif a_cell[0] == b_cell[0]:
+            lo, hi = min(a_cell[1], b_cell[1]), max(a_cell[1], b_cell[1])
+            cells.update((a_cell[0], iy) for iy in range(lo, hi + 1))
+        elif a_cell[1] == b_cell[1]:
+            lo, hi = min(a_cell[0], b_cell[0]), max(a_cell[0], b_cell[0])
+            cells.update((ix, a_cell[1]) for ix in range(lo, hi + 1))
+        return cells
+
+    wire_cell_sets = [_wire_cells(i) for i in same_net_indices]
+    reachable: Set[Tuple[int, int]] = {(0, 0)}
+    changed = True
+    while changed:
+        changed = False
+        for wcs in wire_cell_sets:
+            if wcs and (wcs & reachable) and not (wcs <= reachable):
+                reachable |= wcs
+                changed = True
+
+    in_bounds: Set[Tuple[int, int]] = set()
+    for cell in reachable:
+        if cell == (0, 0):
+            continue
+        if (
+            bounds_min[0] <= cell[0] <= bounds_max[0]
+            and bounds_min[1] <= cell[1] <= bounds_max[1]
+        ):
+            in_bounds.add(cell)
+    return in_bounds
+
+
 def _same_net_cells_in_bounds(
     obstacles: Obstacles,
     same_net_indices: Set[int],
@@ -1288,6 +1341,19 @@ class SchematicRouter:
             origin=p1, snap=_GRID, bounds_min=bmin, bounds_max=bmax,
         )
         extra_goals.discard(goal_cell)
+        # Drop cells already wire-reachable from p1: tee'ing onto a
+        # same-net wire that's already connected to p1 doesn't add
+        # connectivity, and it lets A* "succeed" after one step by
+        # walking onto the very wire whose endpoint coincides with
+        # p1.  Bug repro: connect_pins(auto, [A, B, C]) where A→B
+        # wired in pair 1 ends at B; pair 2 (B→C) finds B's wire is
+        # adjacent to its start cell and terminates there, never
+        # reaching C.
+        reachable = _wire_reachable_cells_from_start(
+            obstacles, same_net_wires,
+            origin=p1, snap=_GRID, bounds_min=bmin, bounds_max=bmax,
+        )
+        extra_goals -= reachable
         # The start cell can't be a tee target.
         extra_goals.discard((0, 0))
 
