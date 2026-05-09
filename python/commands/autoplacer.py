@@ -507,10 +507,34 @@ def _component_pair_force(c1: Component, c2: Component, k: float) -> Tuple[float
 
 
 def _attractive_force(c1: Component, c2: Component, k: float) -> Tuple[float, float]:
-    """Linear spring-like attraction along c1→c2."""
+    """Linear spring-like attraction along c1→c2 (component centres).
+    Used as the fallback when pin numbers aren't available — see
+    `_attractive_force_pinwise` for the version the iterator uses.
+    """
     dx = c2.x - c1.x
     dy = c2.y - c1.y
     return k * dx, k * dy
+
+
+def _attractive_force_pinwise(
+    c1: Component, pin1: str, c2: Component, pin2: str, k: float
+) -> Tuple[float, float]:
+    """Attraction force pulling c1's specific pin toward c2's specific
+    pin (rather than centre-to-centre).  Without this, decoupling
+    capacitors on a big IC's perimeter pile on the IC's *centre* —
+    every cap's centre wants to overlap U1's centre because that's the
+    nearest point.  Pin-aware attraction places adjacent pins near
+    each other, so the components naturally line up edge-to-edge with
+    connections short and visible.
+
+    Returns the force on c1 (b's reaction is the negation, applied
+    by the caller).
+    """
+    p1 = c1.world_pin_xy(pin1)
+    p2 = c2.world_pin_xy(pin2)
+    if p1 is None or p2 is None:
+        return _attractive_force(c1, c2, k)
+    return k * (p2[0] - p1[0]), k * (p2[1] - p1[1])
 
 
 def _boundary_force(c: Component, p: Params) -> Tuple[float, float]:
@@ -630,22 +654,27 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
             torques[c.key] = _torque_for_pin_orientation(c, sess)
 
         # Attraction along each net edge — every pair of pins on the
-        # same net gets a spring force.  Pin lists are keyed on the
-        # synthetic comp_key (ref + unit) so multi-unit components
-        # appear as distinct nodes here.
+        # same net gets a spring force.  Pin-aware: the force is
+        # between the SPECIFIC pins on the net, not between component
+        # centres.  This is what lets caps clip onto the EDGE of a
+        # large IC (where its pins are) instead of piling on top of
+        # the IC's centre.  Multi-unit components show up as distinct
+        # nodes via the synthetic comp_key (ref + unit).
         for net in sess.nets.values():
             pin_list = net.pins
             if len(pin_list) < 2:
                 continue
-            for i, (key_a, _) in enumerate(pin_list):
-                for key_b, _ in pin_list[i + 1 :]:
+            for i, (key_a, pin_a) in enumerate(pin_list):
+                for key_b, pin_b in pin_list[i + 1 :]:
                     if key_a == key_b:
                         continue
                     a = sess.components.get(key_a)
                     b = sess.components.get(key_b)
                     if a is None or b is None:
                         continue
-                    afx, afy = _attractive_force(a, b, p.attraction_k)
+                    afx, afy = _attractive_force_pinwise(
+                        a, pin_a, b, pin_b, p.attraction_k,
+                    )
                     forces[key_a] = (forces[key_a][0] + afx, forces[key_a][1] + afy)
                     forces[key_b] = (forces[key_b][0] - afx, forces[key_b][1] - afy)
 
@@ -690,31 +719,101 @@ _GRID = 1.27
 
 def snap_positions(sess: Session) -> None:
     """Snap each component's (x, y) to nearest 1.27 mm grid; rotation
-    to nearest 90°.  Resolves bbox-aware overlaps by pushing the later
-    component along x."""
+    to nearest 90°.
+
+    Then run a multi-pass nudge sweep:
+      * **Bbox-overlap pass**: for every (a, b) pair, if their bboxes
+        overlap, nudge the (mobile) one right.  Repeat until a full
+        pass produces no movement — re-checks are needed because a
+        nudge from pair (i, j) can land j on top of a previously-OK
+        pair (k, j) where k < i.  Single-pass would miss this.
+      * **Pin-coord safety pass**: scan every pin's world coord; if two
+        components' pins coincide, nudge one component right.  This
+        is the last line of defence against net merges — connect_pins
+        wires same-net pins together, and if two different-net pins
+        sit at the same coord the wires merge those nets.  Bbox-only
+        resolution can miss this: two components with their bboxes
+        clearing could still have one of each's pins overlapping
+        because pins are offset from the centre.
+    """
     for c in sess.components.values():
         c.x = round(c.x / _GRID) * _GRID
         c.y = round(c.y / _GRID) * _GRID
         c.rotation = round(c.rotation / 90) * 90 % 360
 
-    # bbox-aware overlap resolution: scan in deterministic order.
     keys = sorted(sess.components.keys())
-    for i, ki in enumerate(keys):
-        for kj in keys[i + 1 :]:
-            a = sess.components[ki]
-            b = sess.components[kj]
-            if a.ref == b.ref:
-                continue  # same-ref multi-unit — exempt
-            min_dx = (a.bbox_w + b.bbox_w) / 2 + _GRID
-            min_dy = (a.bbox_h + b.bbox_h) / 2 + _GRID
-            tries = 0
-            while (
-                abs(a.x - b.x) < min_dx
-                and abs(a.y - b.y) < min_dy
-                and tries < 30
-            ):
-                b.x += _GRID * 4  # nudge right
-                tries += 1
+    MAX_PASSES = 8
+
+    def _pick_target(a: "Component", b: "Component") -> Optional["Component"]:
+        if a.pinned and b.pinned:
+            return None
+        return b if not b.pinned else a
+
+    # Bbox-overlap pass — repeat until stable.
+    for _ in range(MAX_PASSES):
+        moved = False
+        for i, ki in enumerate(keys):
+            for kj in keys[i + 1 :]:
+                a = sess.components[ki]
+                b = sess.components[kj]
+                if a.ref == b.ref:
+                    continue  # same-ref multi-unit — exempt
+                target = _pick_target(a, b)
+                if target is None:
+                    continue
+                min_dx = (a.bbox_w + b.bbox_w) / 2 + _GRID
+                min_dy = (a.bbox_h + b.bbox_h) / 2 + _GRID
+                tries = 0
+                while (
+                    abs(a.x - b.x) < min_dx
+                    and abs(a.y - b.y) < min_dy
+                    and tries < 30
+                ):
+                    target.x += _GRID * 4  # nudge right
+                    tries += 1
+                if tries > 0:
+                    moved = True
+        if not moved:
+            break
+
+    # Pin-coord-collision safety pass — same multi-pass shape so a
+    # nudge that creates a *new* coincident pair gets resolved next.
+    def _pin_world_iu(c: "Component", pn: str) -> Optional[Tuple[int, int]]:
+        wp = c.world_pin_xy(pn)
+        if wp is None:
+            return None
+        return (round(wp[0] * 1000), round(wp[1] * 1000))
+
+    for _ in range(MAX_PASSES):
+        moved = False
+        # Group pin-world-coords by (x_um, y_um).
+        pin_coords: Dict[Tuple[int, int], List[Tuple[str, str]]] = {}
+        for c in sess.components.values():
+            for pn in c.pins:
+                key_iu = _pin_world_iu(c, pn)
+                if key_iu is None:
+                    continue
+                pin_coords.setdefault(key_iu, []).append((c.key, pn))
+        for occupants in pin_coords.values():
+            unique_refs = {sess.components[k].ref for k, _ in occupants}
+            if len(unique_refs) <= 1:
+                # Either single occupant, or multiple pins of the SAME
+                # symbol unit (e.g. duplicate-pad pins on FDS9926A) —
+                # no net-merge risk.
+                continue
+            # Multiple distinct refs at the same pin coord.  Nudge
+            # one of them — pick the alphabetically-last non-pinned
+            # ref so the deterministic order matches the bbox pass.
+            non_pinned = [
+                k for k, _ in occupants if not sess.components[k].pinned
+            ]
+            if not non_pinned:
+                continue
+            target_key = sorted(non_pinned)[-1]
+            sess.components[target_key].x += _GRID * 4
+            moved = True
+        if not moved:
+            break
 
 
 _STRIPPED_TYPES = {"wire", "label", "global_label", "hierarchical_label", "junction", "no_connect"}

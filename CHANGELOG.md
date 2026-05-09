@@ -72,6 +72,36 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-10)
 
+- **Autoplacer: pin-aware attraction + multi-pass snap with pin-collision
+  safety check.** Three related improvements that change how the
+  placer thinks about connected components:
+
+  1. *Pin-aware attraction*: the attractive force on a net edge now
+     pulls the SPECIFIC pins on each end together (via
+     `_attractive_force_pinwise`), not the component centres.  Without
+     this, decoupling caps on a large IC's perimeter pile on the IC's
+     centre.  With it, components naturally line up edge-to-edge with
+     connections short and visible — verified on the BMS sheet where
+     the run-time wires went from ~17 to ~23 (out of 19 named nets,
+     so multi-pin nets are now mostly fully wired).
+  2. *Multi-pass `snap_positions`*: the bbox-overlap nudge sweep now
+     runs until a full pass produces no movement (vs single-pass
+     before).  Single-pass missed chain reactions where pair (i, j)
+     nudged j into a new overlap with k where k < i — k had already
+     been processed, so the overlap was never resolved.
+  3. *Pin-coord-collision safety pass*: after bbox resolution, scan
+     every pin's world coord and nudge any component whose pin lands
+     on another component's pin.  This is the last line of defence
+     against net merges: connect_pins(auto) wires same-net pins
+     together, and if two different-net pins sit at the same coord
+     the wires merge those nets.  Verified on the BMS sheet where the
+     pre-fix polish run produced spurious BAT+/CELL1_TOP and
+     REGOUT/VC2 net merges; post-fix produces 0 merges.
+
+  Tests in `tests/test_autoplacer.py`: `test_pinwise_attraction_*`,
+  `test_pin_coord_collision_resolved`,
+  `test_multipass_resolves_chained_overlaps`.
+
 - **Autoplacer `snap_positions` exempts same-ref multi-unit pairs from
   overlap resolution.** Without this exemption, two units of the same
   multi-unit symbol (e.g. Q1 unit 1 + Q1 unit 2) could trip the

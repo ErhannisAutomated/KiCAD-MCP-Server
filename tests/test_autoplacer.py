@@ -184,6 +184,47 @@ class TestForceMath:
         fx, fy = _attractive_force(a, b, k=1.0)
         assert fx > 0, f"expected +x attraction, got fx={fx}"
 
+    def test_pinwise_attraction_uses_pin_coords_not_centres(self):
+        """Pin-aware attraction: a's pin1 toward b's pin1, even when
+        the components' centres are aligned but the pins offset.
+        """
+        from commands.autoplacer import _attractive_force_pinwise, Component, Pin
+
+        # A at (100, 100), pin "1" at lib offset (0, +3.81) → world (100, 96.19).
+        a = Component(
+            "A", 1, "Device:R", x=100, y=100, rotation=0,
+            mirror_x=False, mirror_y=False,
+            pins={"1": Pin(number="1", name="~", local_x=0, local_y=3.81, lib_angle=270)},
+        )
+        # B at (100, 100) (same centre as A), but pin "1" at lib (0, -3.81)
+        # → world (100, 103.81).  Centre-to-centre attraction would
+        # produce (0, 0) force; pin-aware attraction should pull a's
+        # pin1 (96.19) DOWN toward b's pin1 (103.81), so fy > 0.
+        b = Component(
+            "B", 1, "Device:R", x=100, y=100, rotation=0,
+            mirror_x=False, mirror_y=False,
+            pins={"1": Pin(number="1", name="~", local_x=0, local_y=-3.81, lib_angle=90)},
+        )
+        fx, fy = _attractive_force_pinwise(a, "1", b, "1", k=1.0)
+        # Pin coordinates differ only in y by +7.62 (a.pin at 96.19,
+        # b.pin at 103.81 in screen coords), so attraction is +y.
+        assert abs(fx) < 1e-6, fx
+        assert fy > 0, f"expected +y pinwise attraction, got fy={fy}"
+
+    def test_pinwise_attraction_falls_back_when_pins_unknown(self):
+        """If a pin number isn't in the component's pin map, fall back
+        to centre-to-centre attraction so the model still has *some*
+        connection on incomplete data."""
+        from commands.autoplacer import _attractive_force_pinwise, Component
+
+        a = Component("A", 1, "Device:R", x=100, y=100, rotation=0,
+                      mirror_x=False, mirror_y=False)  # no pins
+        b = Component("B", 1, "Device:R", x=110, y=100, rotation=0,
+                      mirror_x=False, mirror_y=False)  # no pins
+        fx, fy = _attractive_force_pinwise(a, "1", b, "1", k=1.0)
+        # Falls back to centre-to-centre: +x direction since b is to the right of a.
+        assert fx > 0, fx
+
 
 @pytest.mark.unit
 class TestIterate:
@@ -250,6 +291,95 @@ class TestRoundTrip:
             sess = load_session(sch)
             apply_to_schematic(sess, target_path=None, strip_connections=True)
             assert '(label "SIG"' not in sch.read_text()
+
+
+@pytest.mark.unit
+class TestSnapPositions:
+    def test_pin_coord_collision_resolved(self):
+        """Two single-unit resistors placed so their bboxes clear but
+        a single pin coord coincides — snap_positions's pin-coord
+        safety pass must nudge one component until the pins separate.
+
+        Without this, connect_pins(auto) on different nets would route
+        wires that share an endpoint and merge the nets in KiCad's
+        wire graph (the C1/TH1 → BAT+/CELL1_TOP merge bug).
+        """
+        from commands.autoplacer import Component, Pin, Session, snap_positions
+
+        # Two horizontal resistors with pin 1 on the right side (after
+        # 270° rotation).  Position them so their bboxes barely don't
+        # overlap (centres far apart) but pin coords coincide.
+        #   R1 at (100, 100) rot=270 → pin1 lib (0, +3.81) → world (103.81, 100)
+        #   R2 at (107.62, 100) rot=90 → pin1 lib (0, +3.81) → world (103.81, 100)
+        # bboxes (12.7×12.7) clear (dx=7.62 < min_dx=13.97 — actually do overlap by bbox)
+        # The point: snap should keep nudging R2 until both bbox AND
+        # pin coincidences clear.
+        sess = Session(schematic_path=Path("/tmp/synthetic.kicad_sch"))
+
+        def _resistor(ref: str, x: float, y: float, rot: float) -> Component:
+            return Component(
+                ref=ref, unit=1, lib_id="Device:R", x=x, y=y, rotation=rot,
+                mirror_x=False, mirror_y=False,
+                pins={
+                    "1": Pin(number="1", name="~", local_x=0, local_y=3.81, lib_angle=270),
+                    "2": Pin(number="2", name="~", local_x=0, local_y=-3.81, lib_angle=90),
+                },
+                bbox_w=12.7, bbox_h=12.7,
+            )
+
+        sess.components["R1__u1"] = _resistor("R1", 100.0, 100.0, 270)
+        sess.components["R2__u1"] = _resistor("R2", 107.62, 100.0, 90)
+
+        # Sanity: with the rotations as set, both components' pin "1"
+        # land at the same world coord.
+        wp1 = sess.components["R1__u1"].world_pin_xy("1")
+        wp2 = sess.components["R2__u1"].world_pin_xy("1")
+        assert (
+            abs(wp1[0] - wp2[0]) < 0.01 and abs(wp1[1] - wp2[1]) < 0.01
+        ), f"setup invariant: pin1s should coincide, got {wp1} vs {wp2}"
+
+        snap_positions(sess)
+
+        # After snap, no two pins from different components may share a coord.
+        wp1 = sess.components["R1__u1"].world_pin_xy("1")
+        wp2 = sess.components["R2__u1"].world_pin_xy("1")
+        assert not (abs(wp1[0] - wp2[0]) < 0.01 and abs(wp1[1] - wp2[1]) < 0.01), (
+            f"R1/1 and R2/1 still coincident at {wp1} after snap"
+        )
+
+    def test_multipass_resolves_chained_overlaps(self):
+        """If pair (a, b) nudges b right and the new b position now
+        overlaps with a previously-OK pair (c, b) where c < a in the
+        scan order, single-pass snap misses it.  Multi-pass should
+        catch the chain reaction on the second pass.
+        """
+        from commands.autoplacer import Component, Session, snap_positions
+
+        sess = Session(schematic_path=Path("/tmp/synthetic.kicad_sch"))
+        # Three resistors lined up.  C is to the right of A; B starts
+        # left of A.  Pair (A, B) nudges B right past C; pair (C, B)
+        # is then a new overlap that single-pass snap would miss
+        # because C was processed before A.
+        for ref, x in (("A", 100.0), ("B", 95.0), ("C", 110.0)):
+            sess.components[f"{ref}__u1"] = Component(
+                ref=ref, unit=1, lib_id="Device:R", x=x, y=100.0, rotation=0,
+                mirror_x=False, mirror_y=False,
+                bbox_w=12.7, bbox_h=12.7,
+            )
+        snap_positions(sess)
+        # Final positions: A, B, C all on grid and no pair overlaps.
+        for ki in sess.components:
+            for kj in sess.components:
+                if ki >= kj:
+                    continue
+                a, b = sess.components[ki], sess.components[kj]
+                if a.ref == b.ref:
+                    continue
+                min_dx = (a.bbox_w + b.bbox_w) / 2 + 1.27
+                min_dy = (a.bbox_h + b.bbox_h) / 2 + 1.27
+                assert (
+                    abs(a.x - b.x) >= min_dx or abs(a.y - b.y) >= min_dy
+                ), f"residual overlap {ki}↔{kj}: ({a.x}, {a.y}) vs ({b.x}, {b.y})"
 
 
 @pytest.mark.unit
