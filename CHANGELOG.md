@@ -70,6 +70,16 @@ All notable changes to the KiCAD MCP Server project are documented here.
   for each child); the handler now picks the bare-stem file by name
   instead of `glob.glob[0]` which was returning a child arbitrarily.
 
+### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-10)
+
+- **Autoplacer `snap_positions` exempts same-ref multi-unit pairs from
+  overlap resolution.** Without this exemption, two units of the same
+  multi-unit symbol (e.g. Q1 unit 1 + Q1 unit 2) could trip the
+  bbox-aware overlap resolution and get nudged apart even though
+  they're meant to occupy distinct lib coordinates by design.  Now the
+  resolver `continue`s on `a.ref == b.ref`, leaving the per-unit
+  components where the iteration force model placed them.
+
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-10)
 
 - **`PinLocator` multi-unit pin lookup returned wrong coords.** When a

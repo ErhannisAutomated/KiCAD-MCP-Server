@@ -703,6 +703,8 @@ def snap_positions(sess: Session) -> None:
         for kj in keys[i + 1 :]:
             a = sess.components[ki]
             b = sess.components[kj]
+            if a.ref == b.ref:
+                continue  # same-ref multi-unit — exempt
             min_dx = (a.bbox_w + b.bbox_w) / 2 + _GRID
             min_dy = (a.bbox_h + b.bbox_h) / 2 + _GRID
             tries = 0
