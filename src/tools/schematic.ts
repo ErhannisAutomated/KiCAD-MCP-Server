@@ -2132,4 +2132,81 @@ edit_schematic_component and set its value to an empty string.`,
       };
     },
   );
+
+  // Place a hierarchical sheet block on the parent schematic
+  server.tool(
+    "add_schematic_sheet",
+    "Place a hierarchical sheet block on a parent .kicad_sch that references " +
+      "a child .kicad_sch file. The sheet block is the visible rectangle on " +
+      "the parent that represents the sub-sheet; sheet pins (added via " +
+      "add_sheet_pin) live on this rectangle and pair with hierarchical " +
+      "labels (added via add_schematic_hierarchical_label) inside the child. " +
+      "If the child schematic file does not yet exist, create it first via " +
+      "create_schematic. The Sheetfile property is written verbatim and is " +
+      "resolved by KiCad relative to the parent's directory — typical input " +
+      "is a bare filename when both files share a folder.",
+    {
+      schematicPath: z.string().describe("Path to the PARENT .kicad_sch file"),
+      sheetName: z
+        .string()
+        .describe(
+          "Sheet name (visible label on the sheet rectangle, e.g. 'BMS', 'Charger')",
+        ),
+      sheetFile: z
+        .string()
+        .describe(
+          "Child schematic filename (e.g. 'bms.kicad_sch'). Resolved relative to the parent's directory.",
+        ),
+      position: z
+        .array(z.number())
+        .length(2)
+        .describe("Top-left corner of the sheet rectangle [x, y] in mm"),
+      size: z
+        .array(z.number())
+        .length(2)
+        .optional()
+        .describe("Sheet rectangle size [width, height] in mm. Default 25.4 × 25.4."),
+      page: z
+        .string()
+        .optional()
+        .describe(
+          "Page number (string) for this sheet's instances entry. Defaults to next available.",
+        ),
+      sheetUuid: z
+        .string()
+        .optional()
+        .describe("Override the generated UUID (rarely needed; default: random)."),
+    },
+    async (args: {
+      schematicPath: string;
+      sheetName: string;
+      sheetFile: string;
+      position: number[];
+      size?: number[];
+      page?: string;
+      sheetUuid?: string;
+    }) => {
+      const result = await callKicadScript("add_schematic_sheet", args);
+      if (result.success) {
+        return {
+          content: [
+            {
+              type: "text" as const,
+              text:
+                result.message ||
+                `Added sheet '${args.sheetName}' → '${args.sheetFile}' on ${args.schematicPath}`,
+            },
+          ],
+        };
+      }
+      return {
+        content: [
+          {
+            type: "text" as const,
+            text: `Failed to add sheet: ${result.message || "Unknown error"}`,
+          },
+        ],
+      };
+    },
+  );
 }

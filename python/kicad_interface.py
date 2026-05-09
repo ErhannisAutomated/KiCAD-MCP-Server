@@ -431,6 +431,7 @@ class KiCADInterface:
             "add_schematic_text": self._handle_add_schematic_text,
             "list_schematic_texts": self._handle_list_schematic_texts,
             "add_sheet_pin": self._handle_add_sheet_pin,
+            "add_schematic_sheet": self._handle_add_schematic_sheet,
             "import_svg_logo": self._handle_import_svg_logo,
             # UI/Process management commands
             "check_kicad_ui": self._handle_check_kicad_ui,
@@ -3886,6 +3887,56 @@ class KiCADInterface:
 
         except Exception as e:
             logger.error(f"Error adding sheet pin: {e}")
+            import traceback
+
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_add_schematic_sheet(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Place a hierarchical sheet block on a parent schematic that
+        references a child .kicad_sch file.
+
+        Required: schematicPath, sheetName, sheetFile, position [x, y].
+        Optional: size [w, h] (default 25.4 × 25.4 mm), page (string,
+        default = next available), sheetUuid (default random).
+        """
+        logger.info("Adding schematic sheet block")
+        try:
+            from commands.sheet_manager import add_sheet_block
+
+            schematic_path = params.get("schematicPath")
+            sheet_name = params.get("sheetName")
+            sheet_file = params.get("sheetFile")
+            position = params.get("position")
+            size = params.get("size", [25.4, 25.4])
+            page = params.get("page")
+            sheet_uuid = params.get("sheetUuid")
+
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            if not sheet_name:
+                return {"success": False, "message": "sheetName is required"}
+            if not sheet_file:
+                return {"success": False, "message": "sheetFile is required"}
+            if not position or len(position) != 2:
+                return {"success": False, "message": "position [x, y] is required"}
+            if len(size) != 2:
+                return {"success": False, "message": "size must be [width, height]"}
+
+            return add_sheet_block(
+                Path(schematic_path),
+                sheet_name,
+                sheet_file,
+                x=position[0],
+                y=position[1],
+                width=size[0],
+                height=size[1],
+                page=page,
+                sheet_uuid=sheet_uuid,
+            )
+
+        except Exception as e:
+            logger.error(f"Error adding schematic sheet: {e}")
             import traceback
 
             logger.error(traceback.format_exc())
