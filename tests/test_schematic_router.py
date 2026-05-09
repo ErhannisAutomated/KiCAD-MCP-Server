@@ -47,6 +47,7 @@ from commands.schematic_router import (  # noqa: E402
     _point_on_segment,
     _segment_length,
     _segments_collinear_overlap,
+    _segments_strictly_cross,
     _U_OFFSET,
     _u_shape_candidates,
     _world_to_cell,
@@ -145,6 +146,100 @@ class TestSegmentsCollinearOverlap:
         assert _segments_collinear_overlap(
             ((10.0, 0.0), (10.0, 20.0)), ((10.0, 5.0), (10.0, 30.0))
         )
+
+
+@pytest.mark.unit
+class TestSegmentsStrictlyCross:
+    """Perpendicular crossings detected; T-junctions and shared endpoints are not."""
+
+    def test_perpendicular_cross_in_interior(self):
+        # horizontal y=50 from x=0..20, vertical x=10 from y=40..60 — cross at (10, 50)
+        assert _segments_strictly_cross(
+            ((0.0, 50.0), (20.0, 50.0)), ((10.0, 40.0), (10.0, 60.0))
+        )
+
+    def test_perpendicular_no_cross_misses(self):
+        # vertical x=30 doesn't reach the horizontal at x=0..20
+        assert not _segments_strictly_cross(
+            ((0.0, 50.0), (20.0, 50.0)), ((30.0, 40.0), (30.0, 60.0))
+        )
+
+    def test_t_junction_endpoint_not_cross(self):
+        # vertical's endpoint exactly on the horizontal — that's a T-junction,
+        # caught by rule 3, not rule 6.
+        assert not _segments_strictly_cross(
+            ((0.0, 50.0), (20.0, 50.0)), ((10.0, 50.0), (10.0, 60.0))
+        )
+
+    def test_shared_endpoint_not_cross(self):
+        # two segments meeting at a corner — not a crossing.
+        assert not _segments_strictly_cross(
+            ((0.0, 50.0), (10.0, 50.0)), ((10.0, 50.0), (10.0, 60.0))
+        )
+
+    def test_collinear_overlap_not_cross(self):
+        # parallel/overlapping — caught by rule 4, not rule 6.
+        assert not _segments_strictly_cross(
+            ((0.0, 50.0), (20.0, 50.0)), ((10.0, 50.0), (30.0, 50.0))
+        )
+
+    def test_crossing_when_segment_pairs_are_swapped(self):
+        # symmetric: result independent of which segment is s1
+        assert _segments_strictly_cross(
+            ((10.0, 40.0), (10.0, 60.0)), ((0.0, 50.0), (20.0, 50.0))
+        )
+
+
+@pytest.mark.unit
+class TestCheckSpuriousRule6_WireCrossing:
+    """Rule 6: candidate wire must not perpendicularly cross an unrelated wire."""
+
+    def _empty_obstacles(self) -> Obstacles:
+        return Obstacles(
+            other_pins=[], other_labels=[], other_wires=[], other_bboxes=[]
+        )
+
+    def test_strict_cross_is_rejected(self):
+        ob = self._empty_obstacles()
+        ob.other_wires.append(((10.0, 40.0), (10.0, 60.0)))  # vertical
+        # candidate horizontal wire crosses it at (10, 50)
+        candidate = [((0.0, 50.0), (20.0, 50.0))]
+        result = check_spurious_connections(candidate, ob, target_net="NET_A")
+        assert result is not None
+        assert "cross" in result
+
+    def test_t_junction_is_caught_by_rule_3_not_rule_6(self):
+        # T-junction: candidate wire's endpoint coincides with another wire.
+        # Rule 3 should fire, not rule 6.  The reason should mention "T" or
+        # "endpoint", not "cross".
+        ob = self._empty_obstacles()
+        ob.other_wires.append(((10.0, 40.0), (10.0, 60.0)))
+        # candidate ends ON the vertical wire (at 10, 50)
+        candidate = [((0.0, 50.0), (10.0, 50.0))]
+        result = check_spurious_connections(candidate, ob, target_net="NET_A")
+        # Either rule 3 fires (endpoint on interior) or no rule fires; rule 6
+        # specifically must NOT — the candidate doesn't strictly cross.
+        if result is not None:
+            assert "cross" not in result, f"rule 6 fired for a T-junction: {result}"
+
+    def test_same_net_crossing_is_allowed(self):
+        # If the unrelated wire belongs to target_net, this is a same-net tee
+        # (intentional join) and rule 6 should skip it.
+        ob = self._empty_obstacles()
+        ob.other_wires.append(((10.0, 40.0), (10.0, 60.0)))
+        candidate = [((0.0, 50.0), (20.0, 50.0))]
+        result = check_spurious_connections(
+            candidate, ob, target_net="NET_A", same_net_wire_indices={0}
+        )
+        assert result is None, f"same-net cross should be allowed but got: {result}"
+
+    def test_no_crossing_no_rule_6_fire(self):
+        ob = self._empty_obstacles()
+        ob.other_wires.append(((30.0, 40.0), (30.0, 60.0)))  # vertical at x=30
+        # candidate horizontal at y=50, x=0..20 — doesn't reach x=30
+        candidate = [((0.0, 50.0), (20.0, 50.0))]
+        result = check_spurious_connections(candidate, ob, target_net="NET_A")
+        assert result is None
 
 
 @pytest.mark.unit
@@ -554,21 +649,23 @@ class TestSpuriousConnectionGuard:
         # our segment, so the guard fires on rule #3 first. Either rejection
         # is correct; we just need *some* reason.
 
-    def test_wire_crossing_perpendicular_allowed(self):
-        # A perpendicular wire whose interior crosses our segment but whose
-        # endpoints don't land on us is a valid visual crossing — no junction.
+    def test_wire_crossing_perpendicular_rejected_by_rule_6(self):
+        # A perpendicular crossing is electrically valid in KiCad (no junction
+        # → no connection) but visually confusing.  Rule 6 (added 2026-05-09)
+        # rejects it so the router prefers a different shape or labels.  This
+        # test was previously asserting the OPPOSITE — that rule 6 didn't
+        # exist — and was inverted along with the policy change.
         seg = ((0.0, 50.0), (20.0, 50.0))
         obs = Obstacles(
             other_pins=[],
             other_labels=[],
             other_wires=[((10.0, 40.0), (10.0, 60.0))],
         )
-        assert (
-            check_spurious_connections(
-                [seg], obs, target_net="N", own_endpoints=[(0.0, 50.0), (20.0, 50.0)]
-            )
-            is None
+        result = check_spurious_connections(
+            [seg], obs, target_net="N", own_endpoints=[(0.0, 50.0), (20.0, 50.0)]
         )
+        assert result is not None
+        assert "cross" in result
 
 
 # ===========================================================================

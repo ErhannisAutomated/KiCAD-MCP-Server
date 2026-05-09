@@ -138,6 +138,40 @@ def _segments_collinear_overlap(s1: Segment, s2: Segment) -> bool:
     return False
 
 
+def _segments_strictly_cross(s1: Segment, s2: Segment) -> bool:
+    """True iff two orthogonal segments cross at a point strictly interior
+    to BOTH segments.
+
+    Used by ``check_spurious_connections`` rule 6 to reject candidate wires
+    that would visually pass through an unrelated wire (a perpendicular
+    crossing without a junction).  Endpoint touches and collinear overlaps
+    return False — those are caught by other rules (T-junction rule 3,
+    collinear rule 4) so we don't double-count them here.
+    """
+    (a1x, a1y), (b1x, b1y) = s1
+    (a2x, a2y), (b2x, b2y) = s2
+
+    s1_horiz = _approx(a1y, b1y)
+    s1_vert = _approx(a1x, b1x)
+    s2_horiz = _approx(a2y, b2y)
+    s2_vert = _approx(a2x, b2x)
+
+    # Both must be orthogonal AND in opposite orientations to cross.
+    if s1_horiz and s2_vert:
+        y0 = a1y
+        x0 = a2x
+        x_lo, x_hi = sorted((a1x, b1x))
+        y_lo, y_hi = sorted((a2y, b2y))
+        return x_lo + EPS < x0 < x_hi - EPS and y_lo + EPS < y0 < y_hi - EPS
+    if s1_vert and s2_horiz:
+        x0 = a1x
+        y0 = a2y
+        y_lo, y_hi = sorted((a1y, b1y))
+        x_lo, x_hi = sorted((a2x, b2x))
+        return y_lo + EPS < y0 < y_hi - EPS and x_lo + EPS < x0 < x_hi - EPS
+    return False
+
+
 def _segment_length(s: Segment) -> float:
     (ax, ay), (bx, by) = s
     return math.hypot(bx - ax, by - ay)
@@ -1099,6 +1133,18 @@ def check_spurious_connections(
                 continue  # own symbol — wires are allowed to leave it
             if _bbox_strict_intersects(seg, bbox):
                 return f"candidate wire crosses symbol {ref} body"
+
+        # 6. No segment may strictly cross an unrelated wire (perpendicular
+        #    crossing without a junction).  Such crossings are electrically
+        #    valid in KiCad — wires only connect when a junction or coincident
+        #    endpoint is present — but they're hard for a human to read.
+        #    Rule 3 (T-junction) and 4 (collinear overlap) already cover the
+        #    same-axis cases; this rule covers the perpendicular case.
+        for idx, ow in enumerate(obstacles.other_wires):
+            if idx in same_net_wires:
+                continue  # crossing same-net is intended (a tee/junction goes here)
+            if _segments_strictly_cross(seg, ow):
+                return "candidate wire perpendicularly crosses unrelated wire"
 
     return None
 
