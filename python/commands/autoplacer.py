@@ -146,6 +146,11 @@ class Session:
     schematic_path: Path
     components: Dict[str, Component] = field(default_factory=dict)
     nets: Dict[str, Net] = field(default_factory=dict)
+    # Pin-level metadata captured at load time so the apply step can
+    # re-emit it after stripping all connections.  Each entry is
+    # (component_key, pin_number) for a pin that had a no_connect
+    # marker on it in the source schematic.
+    no_connects: List[Tuple[str, str]] = field(default_factory=list)
     params: Params = field(default_factory=Params)
     iteration: int = 0
     temperature: float = 30.0
@@ -483,6 +488,32 @@ def load_session(schematic_path: Path) -> Session:
             continue
         sess.nets.setdefault(net_name, Net(name=net_name)).pins.append((comp_key, pn))
 
+    # Pass 3: no_connect markers — store (ref, pin) so apply can re-emit
+    # them at the new pin positions.  Without this, every (no_connect)
+    # in the source is stripped by apply_to_schematic and never recreated,
+    # so deliberately-unconnected pins (NC pins on ICs) come back as
+    # ERC "Pin not connected" errors after the placer runs.
+    nc_positions: List[Tuple[float, float]] = []
+    for top in sexp:
+        if not (isinstance(top, list) and top and top[0] == Symbol("no_connect")):
+            continue
+        for sub in top[1:]:
+            if isinstance(sub, list) and sub and sub[0] == Symbol("at") and len(sub) >= 3:
+                try:
+                    nc_positions.append((round(float(sub[1]), 2), round(float(sub[2]), 2)))
+                except (TypeError, ValueError):
+                    pass
+                break
+    for nc_pos in nc_positions:
+        # Find any pin within EPS of this no_connect position.  Pin
+        # endpoints may have multiple pins at the same coord (FDS9926A
+        # duplicate-pad pins) — record the no_connect against ALL of
+        # them so apply re-emits one marker (KiCad collapses coincident
+        # markers, so duplicates are harmless).
+        for (comp_key, pn), wp in pin_world.items():
+            if abs(wp[0] - nc_pos[0]) < 0.5 and abs(wp[1] - nc_pos[1]) < 0.5:
+                sess.no_connects.append((comp_key, pn))
+
     return sess
 
 
@@ -816,6 +847,47 @@ def snap_positions(sess: Session) -> None:
             break
 
 
+# A4 page in mm.  KiCad's default schematic page is A4 landscape; the
+# centre of the printable area is roughly (148.59, 104.78) — the closest
+# 1.27 mm grid point to (297/2, 210/2).  This is the target the placer
+# uses by default; callers can override via Params.sheet_x_min/max if
+# the sheet uses a different size.
+_PAGE_CENTRE = (148.59, 104.78)
+
+
+def center_components_on_page(sess: Session, target: Tuple[float, float] = _PAGE_CENTRE) -> None:
+    """Rigidly translate every component so the bbox of the placed
+    components is centred on `target` (default: KiCad A4 page centre).
+
+    The translation is applied to ALL components, including pinned ones
+    — `pinned` means "don't move during iteration", but a rigid
+    post-snap translation preserves relative positions, so pinned
+    components shift along with the rest.  Without this, a pinned
+    connector at the schematic's original anchor would stay in place
+    while mobile components get pulled toward the page centre,
+    breaking the wire routes between them.
+
+    No-op if there are no components.  Translation is rounded to the
+    nearest 1.27 mm grid step so positions stay grid-aligned.
+    """
+    comps = list(sess.components.values())
+    if not comps:
+        return
+    xs = [c.x for c in comps]
+    ys = [c.y for c in comps]
+    cur_centre = ((min(xs) + max(xs)) / 2.0, (min(ys) + max(ys)) / 2.0)
+    dx = target[0] - cur_centre[0]
+    dy = target[1] - cur_centre[1]
+    # Snap the translation to grid so post-translation coords stay on grid.
+    dx = round(dx / _GRID) * _GRID
+    dy = round(dy / _GRID) * _GRID
+    if dx == 0 and dy == 0:
+        return
+    for c in comps:
+        c.x += dx
+        c.y += dy
+
+
 _STRIPPED_TYPES = {"wire", "label", "global_label", "hierarchical_label", "junction", "no_connect"}
 
 
@@ -1045,12 +1117,36 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
             "failed_pairs": len(result.get("routing_failures", []) or []),
             "success": result.get("success", False),
         })
+
+    # Re-emit no_connect markers at new pin positions so deliberately-
+    # unconnected pins on the source schematic (NC pins on ICs, etc.)
+    # don't show up as ERC "Pin not connected" errors after the placer
+    # has stripped + re-laid wiring.  Coincident markers (FDS9926A
+    # duplicate-pad pins) collapse to one in KiCad.
+    from commands.wire_manager import WireManager as _WM
+    nc_added = 0
+    nc_seen: set = set()
+    for comp_key, pn in sess.no_connects:
+        comp = sess.components.get(comp_key)
+        if comp is None:
+            continue
+        wp = comp.world_pin_xy(pn)
+        if wp is None:
+            continue
+        key = (round(wp[0] * 1000), round(wp[1] * 1000))
+        if key in nc_seen:
+            continue
+        nc_seen.add(key)
+        if _WM.add_no_connect(schematic_path, list(wp)):
+            nc_added += 1
+
     return {
         "nets_rewired": nets_rewired,
         "pairs_wired": pairs_wired,
         "pairs_failed": pairs_failed,
         "pins_connected": pins_connected,
         "pins_skipped": skipped,
+        "no_connects_added": nc_added,
         "method": "connect_pins(auto)",
         "per_net": per_net,
     }
@@ -1129,11 +1225,14 @@ class AutoPlacer:
         }
 
     def apply(self, schematic_path: str, rewire: bool = True,
-              standalone: Optional[bool] = None) -> Dict[str, Any]:
+              standalone: Optional[bool] = None,
+              center_on_page: bool = True) -> Dict[str, Any]:
         sess = self.get(schematic_path)
         if sess is None:
             return {"success": False, "message": "session not loaded"}
         snap_positions(sess)
+        if center_on_page:
+            center_components_on_page(sess)
         result = apply_to_schematic(
             sess, None, strip_connections=True, standalone=standalone,
         )

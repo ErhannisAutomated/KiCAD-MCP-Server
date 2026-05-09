@@ -72,6 +72,37 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-10)
 
+- **Autoplacer: preserve no_connect markers + centre bbox on page.**
+  Two complementary tweaks at apply time:
+
+  1. *no_connect preservation*: `apply_to_schematic` strips every
+     `(no_connect)` marker along with wires/labels/junctions, so
+     deliberately-unconnected pins (NC pins on ICs) come back as
+     ERC "Pin not connected" errors after the placer runs.  Fix:
+     in `load_session`, find every no_connect's pin owner (by world-
+     coord match) and store `(comp_key, pin)` in
+     `Session.no_connects`.  In `rewire_session`, after the per-net
+     wiring, re-emit a no_connect marker at each (now-translated)
+     pin's world coord.  Coincident markers (FDS9926A duplicate-pad
+     pins 5/6 and 7/8) are deduped so KiCad doesn't see redundant
+     entries.
+
+  2. *centre on page*: new `center_components_on_page` runs after
+     `snap_positions` in `PLACER.apply` (gated on `center_on_page=True`
+     by default).  Applies a rigid translation to ALL components
+     (including pinned) so the bbox of the placed assembly is centred
+     on the A4 page centre (≈ 148.59, 104.78 mm).  The translation
+     preserves relative positions, so pinned components shift along
+     with mobile ones — without that, a pinned connector at the
+     schematic's original anchor would stay put while the rest moves
+     to the page centre, breaking routing across them.
+
+  Tests in `tests/test_autoplacer.py`:
+  `test_no_connect_marker_recorded_on_load`,
+  `test_apply_re_emits_no_connect_at_new_pin_position`,
+  `test_centers_bbox_on_page`,
+  `test_rigid_translation_preserves_relative_positions`.
+
 - **Autoplacer: pin-aware attraction + multi-pass snap with pin-collision
   safety check.** Three related improvements that change how the
   placer thinks about connected components:

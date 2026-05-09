@@ -383,6 +383,169 @@ class TestSnapPositions:
 
 
 @pytest.mark.unit
+class TestNoConnectPreservation:
+    def test_no_connect_marker_recorded_on_load(self):
+        """If the source schematic has a (no_connect) at a pin endpoint,
+        load_session records (component_key, pin_number) so apply can
+        re-emit it after stripping connections."""
+        from commands.autoplacer import load_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = Path(tmp) / "nc.kicad_sch"
+            R_LIB = textwrap.dedent("""\
+                (lib_symbols
+                  (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0))
+                    (symbol "R_1_1"
+                      (pin passive line (at 0 3.81 270) (length 1.27)
+                        (name "~") (number "1"))
+                      (pin passive line (at 0 -3.81 90) (length 1.27)
+                        (name "~") (number "2"))
+                    )
+                  )
+                )
+            """)
+            # R1 at (100, 100) rot=0 → pin 1 at (100, 96.19), pin 2 at (100, 103.81).
+            sch.write_text(textwrap.dedent(f"""\
+                (kicad_sch (version 20250114) (generator "test")
+                  (uuid 11111111-2222-3333-4444-555555555555)
+                  {R_LIB}
+                  (symbol (lib_id "Device:R") (at 100 100 0) (unit 1)
+                    (property "Reference" "R1" (at 100 100 0))
+                    (property "Value" "10k" (at 100 100 0))
+                    (instances (project "test" (path "/" (reference "R1") (unit 1))))
+                  )
+                  (no_connect (at 100 96.19) (uuid abcd-0001))
+                  (sheet_instances (path "/" (page "1")))
+                )
+            """))
+            sess = load_session(sch)
+            assert ("R1__u1", "1") in sess.no_connects, (
+                f"expected (R1__u1, 1) in no_connects; got {sess.no_connects}"
+            )
+
+    def test_apply_re_emits_no_connect_at_new_pin_position(self):
+        """After move + apply, the (no_connect) marker should appear at
+        the new pin coord, not the old."""
+        from commands.autoplacer import (
+            PLACER, apply_to_schematic, load_session, rewire_session,
+            snap_positions,
+        )
+        import sexpdata as _sd
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = Path(tmp) / "nc2.kicad_sch"
+            R_LIB = textwrap.dedent("""\
+                (lib_symbols
+                  (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0))
+                    (symbol "R_1_1"
+                      (pin passive line (at 0 3.81 270) (length 1.27)
+                        (name "~") (number "1"))
+                      (pin passive line (at 0 -3.81 90) (length 1.27)
+                        (name "~") (number "2"))
+                    )
+                  )
+                )
+            """)
+            # Place R1 at (100, 100), no_connect at pin 1 (100, 96.19).
+            sch.write_text(textwrap.dedent(f"""\
+                (kicad_sch (version 20250114) (generator "test")
+                  (uuid 11111111-2222-3333-4444-555555555555)
+                  {R_LIB}
+                  (symbol (lib_id "Device:R") (at 100 100 0) (unit 1)
+                    (property "Reference" "R1" (at 100 100 0))
+                    (property "Value" "10k" (at 100 100 0))
+                    (instances (project "test" (path "/" (reference "R1") (unit 1))))
+                  )
+                  (no_connect (at 100 96.19) (uuid abcd-0001))
+                  (sheet_instances (path "/" (page "1")))
+                )
+            """))
+            sess = load_session(sch)
+            # Move R1 to (200, 100); pin 1 will be at (200, 96.19).
+            sess.components["R1__u1"].x = 200.0
+            sess.components["R1__u1"].y = 100.0
+            apply_to_schematic(sess, target_path=None, strip_connections=True)
+            rewire_session(sess, sch)
+
+            text = sch.read_text()
+            sexp = _sd.loads(text)
+            ncs = []
+            for top in sexp:
+                if isinstance(top, list) and top and str(top[0]) == "no_connect":
+                    for sub in top[1:]:
+                        if (
+                            isinstance(sub, list) and sub and str(sub[0]) == "at"
+                            and len(sub) >= 3
+                        ):
+                            ncs.append((float(sub[1]), float(sub[2])))
+                            break
+            assert any(
+                abs(p[0] - 200.0) < 0.5 and abs(p[1] - 96.19) < 0.5 for p in ncs
+            ), f"expected no_connect at ~(200, 96.19), got {ncs}"
+
+
+@pytest.mark.unit
+class TestPageCentering:
+    def test_centers_bbox_on_page(self):
+        """center_components_on_page translates all mobile components so
+        the bbox of the placement is centred on the page (≈ 148.59, 104.78)."""
+        from commands.autoplacer import (
+            Component, Session, center_components_on_page, _PAGE_CENTRE,
+        )
+
+        sess = Session(schematic_path=Path("/tmp/synthetic.kicad_sch"))
+        # Place 3 components clustered far from page centre (top-left corner).
+        for ref, x, y in (("A", 30.0, 30.0), ("B", 50.0, 40.0), ("C", 40.0, 60.0)):
+            sess.components[f"{ref}__u1"] = Component(
+                ref=ref, unit=1, lib_id="Device:R", x=x, y=y, rotation=0,
+                mirror_x=False, mirror_y=False,
+                bbox_w=12.7, bbox_h=12.7,
+            )
+        center_components_on_page(sess)
+        # New bbox centre should be ~ page centre.
+        xs = [c.x for c in sess.components.values()]
+        ys = [c.y for c in sess.components.values()]
+        cx = (min(xs) + max(xs)) / 2.0
+        cy = (min(ys) + max(ys)) / 2.0
+        assert abs(cx - _PAGE_CENTRE[0]) < 1.27, (
+            f"x centre {cx} should be near {_PAGE_CENTRE[0]}"
+        )
+        assert abs(cy - _PAGE_CENTRE[1]) < 1.27, (
+            f"y centre {cy} should be near {_PAGE_CENTRE[1]}"
+        )
+
+    def test_rigid_translation_preserves_relative_positions(self):
+        """Centering is a rigid translation — every component moves by
+        the same (dx, dy), including pinned ones.  This preserves the
+        relative geometry (wire routing distances, etc.) while moving
+        the whole assembly to the page centre.  If pinned components
+        were left behind, they'd sit far from the rest of the layout
+        after centering and break routing between them."""
+        from commands.autoplacer import (
+            Component, Session, center_components_on_page,
+        )
+
+        sess = Session(schematic_path=Path("/tmp/synthetic.kicad_sch"))
+        sess.components["J1__u1"] = Component(
+            ref="J1", unit=1, lib_id="Conn", x=20.0, y=20.0, rotation=0,
+            mirror_x=False, mirror_y=False, bbox_w=12.7, bbox_h=12.7,
+            pinned=True,
+        )
+        sess.components["R1__u1"] = Component(
+            ref="R1", unit=1, lib_id="Device:R", x=30.0, y=30.0, rotation=0,
+            mirror_x=False, mirror_y=False, bbox_w=12.7, bbox_h=12.7,
+        )
+        # Original delta between J1 and R1 is (10, 10).
+        center_components_on_page(sess)
+        delta_x = sess.components["R1__u1"].x - sess.components["J1__u1"].x
+        delta_y = sess.components["R1__u1"].y - sess.components["J1__u1"].y
+        assert abs(delta_x - 10.0) < 1e-6, f"R1.x - J1.x = {delta_x}, expected 10"
+        assert abs(delta_y - 10.0) < 1e-6, f"R1.y - J1.y = {delta_y}, expected 10"
+        # And both should have moved (initial centre was (25,25), target ~(148.59, 104.78)).
+        assert sess.components["J1__u1"].x > 100, sess.components["J1__u1"].x
+
+
+@pytest.mark.unit
 class TestRewire:
     def test_rewire_uses_connect_pins_auto(self):
         """rewire_session should drive ConnectionManager.connect_pins
