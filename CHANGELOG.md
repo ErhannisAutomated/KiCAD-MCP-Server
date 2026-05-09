@@ -22,6 +22,20 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-09)
 
+- **`add_schematic_net_label` auto-rotates the label to the pin's
+  outward direction by default.** Previously the label always read
+  rightward (orientation 0), which is fine for right-facing pins but
+  overlaps the symbol body on left/up/down-facing pins — making the
+  schematic harder to trace by eye than it had to be. Now when the
+  caller supplies `componentRef`+`pinNumber` and doesn't pass an
+  explicit `orientation`, the handler reads the pin's outward angle
+  via `PinLocator.get_pin_angle` and uses that for the label.
+  Explicit `orientation=N` still wins. Response gains
+  `orientation` (the angle that was applied) and
+  `auto_orientation: true` when the default kicked in. Tests in
+  `tests/test_label_auto_orientation.py` (4 cases: pin 1 / pin 2 /
+  explicit override / position-only fallback).
+
 - **`get_schematic_view` now crops to placed-content bbox + drops the
   page frame by default.** Mirror of the recent `get_board_2d_view`
   treatment — previously the SVG was the whole A4 page including title

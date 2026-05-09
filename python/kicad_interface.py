@@ -2010,7 +2010,13 @@ class KiCADInterface:
             net_name = params.get("netName")
             position = params.get("position")
             label_type = params.get("labelType", "label")
-            orientation = params.get("orientation", 0)
+            # When componentRef+pinNumber are given AND orientation isn't
+            # explicit, default the label orientation to the pin's outward
+            # angle so the label points away from the symbol body.  This is
+            # detected with a sentinel because we want explicit orientation=0
+            # (caller asked for right-pointing) to override the auto behaviour.
+            orientation_param = params.get("orientation")
+            orientation = 0 if orientation_param is None else orientation_param
             component_ref = params.get("componentRef")
             pin_number = params.get("pinNumber")
 
@@ -2041,6 +2047,13 @@ class KiCADInterface:
                         ),
                     }
 
+                # Look up the pin's outward angle once.  Used both for the
+                # connector stub direction and (further down) the auto-
+                # orientation default.
+                angle = locator.get_pin_angle(
+                    Path(schematic_path), component_ref, str(pin_number)
+                )
+
                 # Connector pins (J* reference prefix) need a wire stub or the label
                 # won't make an electrical connection (ERC "not connected" false positive).
                 # Use the pin's outward angle to extend the stub 2.54mm away from the body.
@@ -2048,9 +2061,6 @@ class KiCADInterface:
                 if is_connector:
                     import math
 
-                    angle = locator.get_pin_angle(
-                        Path(schematic_path), component_ref, str(pin_number)
-                    )
                     if angle is not None:
                         stub_len = 2.54
                         rad = math.radians(angle)
@@ -2069,6 +2079,17 @@ class KiCADInterface:
                         position = pin_loc
                 else:
                     position = pin_loc
+
+                # Auto-orientation: when the caller didn't pass orientation
+                # explicitly AND the pin angle is known, default the label
+                # orientation to the pin's outward direction.  Reason: a
+                # label always rendering rightward looks fine on a right-
+                # facing pin, but on a left/up/down-facing pin it overlaps
+                # the symbol body and is hard to trace.  Pin angle and
+                # label orientation use the same convention (0=right,
+                # 90=up, 180=left, 270=down) so the value passes through.
+                if orientation_param is None and angle is not None:
+                    orientation = int(angle) % 360
 
                 snapped_to_pin = {"component": component_ref, "pin": str(pin_number)}
                 logger.info(
@@ -2126,6 +2147,7 @@ class KiCADInterface:
                 "success": True,
                 "message": f"Added net label '{net_name}' at {position}",
                 "actual_position": position,
+                "orientation": orientation,
             }
             if snapped_to_pin:
                 response["snapped_to_pin"] = snapped_to_pin
@@ -2136,6 +2158,9 @@ class KiCADInterface:
                 if auto_stub_added:
                     response["auto_wire_stub"] = True
                     response["message"] += " (wire stub auto-added for connector pin)"
+                if orientation_param is None and orientation != 0:
+                    response["auto_orientation"] = True
+                    response["message"] += f" (orientation auto-set to {orientation}°)"
             if case_warnings:
                 response["case_warnings"] = case_warnings
             return response
