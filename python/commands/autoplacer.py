@@ -802,22 +802,16 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
                         old_px, old_py = float(sp[1]), float(sp[2])
                         ox = old_px - old_x
                         oy = old_py - old_y
+                        # Rotate the offset around the OLD symbol
+                        # anchor so the text orbits the body.  Don't
+                        # touch the property's own (at angle) field
+                        # — KiCad already rotates property text along
+                        # with the symbol's rotation, and adding
+                        # delta_rot here would double-rotate.
                         nox = ox * cos_d + oy * sin_d
                         noy = -ox * sin_d + oy * cos_d
                         sp[1] = new_x + nox
                         sp[2] = new_y + noy
-                        # Rotate the property's own text orientation by
-                        # delta_rot.  When the (at) was emitted as
-                        # (at X Y) without an explicit angle, the
-                        # default angle is 0 — append it so KiCad
-                        # picks up the rotated text orientation.
-                        if len(sp) >= 4:
-                            try:
-                                sp[3] = (float(sp[3]) + delta_rot) % 360
-                            except (TypeError, ValueError):
-                                pass
-                        elif delta_rot != 0:
-                            sp.append(delta_rot % 360)
                     except (TypeError, ValueError):
                         pass
                     break

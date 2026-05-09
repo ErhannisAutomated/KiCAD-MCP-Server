@@ -4,7 +4,31 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
-### New MCP Tool (this branch: fixes/improvements_2, 2026-05-09)
+### New MCP Tools (this branch: fixes/improvements_2, 2026-05-09)
+
+- **Schematic autoplacer** (7 tools: `autoplacer_load`, `autoplacer_set_params`,
+  `autoplacer_iterate`, `autoplacer_run`, `autoplacer_state`,
+  `autoplacer_preview`, `autoplacer_apply`).  Force-directed
+  Fruchterman-Reingold with schematic-specific extras: real bbox
+  computation from `lib_symbols` graphics, pin-orientation torque,
+  polarity bias (GND-down, V+-up by name pattern), per-unit
+  components for multi-unit symbols (Q1's two FET units move
+  independently).  Lifecycle: load schematic → tune params →
+  iterate / run-until-stable → preview to a temp file → apply
+  (snap-to-grid, write back, re-route via stub+label per pin).
+  Implementation in `commands/autoplacer.py`.  9 tests in
+  `tests/test_autoplacer.py`.  Restart MCP server to pick up.
+
+  Caveat: the `apply` step's re-routing currently uses
+  label-with-stub per pin rather than the autorouter, because
+  `connect_pins` resolves pin world coords through PinLocator and
+  PinLocator has a known multi-unit bug (returns the first-placed
+  unit's coord for all pins, regardless of which unit owns the pin).
+  Once PinLocator is taught about multi-unit, `rewire_session` can
+  switch back to `connect_pins(style="auto")` and gain real
+  inter-pin wires for free.  The label-stub form is still
+  electrically correct (KiCad joins by label name) and matches the
+  pattern existing schematics use.
 
 - **`add_schematic_sheet`** — instantiates a hierarchical sheet block on a
   parent .kicad_sch that references a child .kicad_sch file. Until now
