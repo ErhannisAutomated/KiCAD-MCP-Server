@@ -2522,7 +2522,14 @@ class KiCADInterface:
             return {"success": False, "message": str(e)}
 
     def _handle_get_schematic_view(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Get a rasterised image of the schematic (SVG export → optional PNG conversion)"""
+        """Get a rasterised image of the schematic (SVG export → optional PNG conversion).
+
+        New default (cropToContent=True) crops the SVG viewBox to the bounding
+        box of placed symbols / wires / labels and drops the A4 drawing sheet
+        (page frame + title block), so the schematic fills the output instead
+        of floating in a sea of whitespace.  Set cropToContent=False to get
+        the legacy whole-page render.
+        """
         logger.info("Getting schematic view")
         import base64
         import subprocess
@@ -2539,10 +2546,13 @@ class KiCADInterface:
             fmt = params.get("format", "png")
             width = params.get("width", 1200)
             height = params.get("height", 900)
+            crop_to_content = params.get("cropToContent", True)
+            margin_frac = params.get("margin", 0.05)
 
-            # Step 1: Export schematic to SVG via kicad-cli
+            # Step 1: Export schematic to SVG via kicad-cli.  When cropping,
+            # also pass `--exclude-drawing-sheet` so the page frame doesn't
+            # widen the bbox we'd compute and doesn't render outside the crop.
             with tempfile.TemporaryDirectory() as tmpdir:
-                svg_path = os.path.join(tmpdir, "schematic.svg")
                 cmd = [
                     "kicad-cli",
                     "sch",
@@ -2551,8 +2561,10 @@ class KiCADInterface:
                     "--output",
                     tmpdir,
                     "--no-background-color",
-                    schematic_path,
                 ]
+                if crop_to_content:
+                    cmd.append("--exclude-drawing-sheet")
+                cmd.append(schematic_path)
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
                 if result.returncode != 0:
@@ -2561,7 +2573,6 @@ class KiCADInterface:
                         "message": f"kicad-cli SVG export failed: {result.stderr}",
                     }
 
-                # kicad-cli may name the file after the schematic, find it
                 import glob
 
                 svg_files = glob.glob(os.path.join(tmpdir, "*.svg"))
@@ -2571,6 +2582,17 @@ class KiCADInterface:
                         "message": "No SVG file produced by kicad-cli",
                     }
                 svg_path = svg_files[0]
+
+                # Step 1.5: optionally crop the SVG viewBox to the content bbox.
+                if crop_to_content:
+                    bbox = self._schematic_content_bbox_mm(schematic_path)
+                    if bbox is not None:
+                        with open(svg_path, "r", encoding="utf-8") as f:
+                            svg_text = f.read()
+                        from commands.board.view import BoardViewer
+                        svg_text = BoardViewer._svg_set_viewbox(svg_text, bbox, margin_frac)
+                        with open(svg_path, "w", encoding="utf-8") as f:
+                            f.write(svg_text)
 
                 if fmt == "svg":
                     with open(svg_path, "r", encoding="utf-8") as f:
@@ -2609,6 +2631,109 @@ class KiCADInterface:
 
             logger.error(traceback.format_exc())
             return {"success": False, "message": str(e)}
+
+    @staticmethod
+    def _schematic_content_bbox_mm(
+        schematic_path: str,
+    ) -> Optional[Tuple[float, float, float, float]]:
+        """Compute the bounding box of placed schematic content in mm.
+
+        Walks the .kicad_sch file for the (at x y …) coords on placed
+        symbols, wires, labels, junctions, no_connects, sheets, and
+        hierarchical labels.  Skips lib_symbols (those are off-canvas
+        definitions) and sheet_instances metadata.  Returns
+        (x_min, y_min, width, height) or None if the schematic has
+        no placed content.
+
+        Used by get_schematic_view to crop the SVG viewBox so the
+        schematic actually fills the rendered image.
+        """
+        import re
+        try:
+            import sexpdata
+            from sexpdata import Symbol
+        except ImportError:
+            return None
+
+        try:
+            with open(schematic_path, "r", encoding="utf-8") as f:
+                sexp = sexpdata.loads(f.read())
+        except Exception:
+            return None
+
+        if not isinstance(sexp, list):
+            return None
+
+        xs: List[float] = []
+        ys: List[float] = []
+
+        # Top-level placed-content blocks we care about.  `lib_symbols` is
+        # excluded so we don't pick up library-relative pin offsets, and
+        # `sheet_instances`/`symbol_instances` are metadata, not geometry.
+        wanted_first_token = {
+            "symbol",
+            "wire",
+            "polyline",
+            "label",
+            "global_label",
+            "hierarchical_label",
+            "junction",
+            "no_connect",
+            "bus",
+            "bus_entry",
+            "text",
+            "sheet",
+            "image",
+        }
+
+        def collect_at(node):
+            """Collect all (at x y …) coords inside *node*."""
+            if not isinstance(node, list) or not node:
+                return
+            tag = node[0]
+            tag_str = str(tag) if isinstance(tag, Symbol) else None
+            if tag_str == "at" and len(node) >= 3:
+                try:
+                    xs.append(float(node[1]))
+                    ys.append(float(node[2]))
+                except (TypeError, ValueError):
+                    pass
+                return  # at-blocks have no nested at-blocks
+            if tag_str == "xy" and len(node) >= 3:
+                # wire/polyline use (xy x y) for each endpoint
+                try:
+                    xs.append(float(node[1]))
+                    ys.append(float(node[2]))
+                except (TypeError, ValueError):
+                    pass
+                return
+            for child in node[1:]:
+                collect_at(child)
+
+        for item in sexp[1:]:
+            if not isinstance(item, list) or not item:
+                continue
+            head = item[0]
+            head_str = str(head) if isinstance(head, Symbol) else None
+            if head_str in wanted_first_token:
+                collect_at(item)
+
+        if not xs or not ys:
+            return None
+
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        # Pad slightly so labels at the extreme edges aren't clipped.
+        # (margin_frac applied in _svg_set_viewbox handles the visible
+        # margin; this padding is just a hedge against text overflowing
+        # the bounding box of the (at) anchor.)
+        pad = 5.0  # mm, ~one symbol-width
+        return (
+            x_min - pad,
+            y_min - pad,
+            (x_max - x_min) + 2 * pad,
+            (y_max - y_min) + 2 * pad,
+        )
 
     def _handle_list_schematic_components(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """List all components in a schematic"""

@@ -1438,18 +1438,32 @@ edit_schematic_component and set its value to an empty string.`,
   // Get schematic view (rasterized image)
   server.tool(
     "get_schematic_view",
-    "Return a rasterized image of the schematic (PNG by default, or SVG). Uses kicad-cli to export SVG, then converts to PNG via cairosvg. Use this for visual feedback after placing or wiring components.",
+    "Return a rasterized image of the schematic (PNG by default, or SVG). Uses kicad-cli to export SVG, then converts to PNG via cairosvg. By default, the output is cropped to the bounding box of placed content (symbols, wires, labels) and the A4 drawing sheet is excluded — so the schematic fills the image instead of floating in whitespace. Set cropToContent=false to get the legacy whole-page render.",
     {
       schematicPath: z.string().describe("Path to the .kicad_sch file"),
       format: z.enum(["png", "svg"]).optional().describe("Output format (default: png)"),
       width: z.number().optional().describe("Image width in pixels (default: 1200)"),
       height: z.number().optional().describe("Image height in pixels (default: 900)"),
+      cropToContent: z
+        .boolean()
+        .optional()
+        .describe(
+          "Crop the SVG viewBox to the bounding box of placed content and exclude the page frame. Default true.",
+        ),
+      margin: z
+        .number()
+        .optional()
+        .describe(
+          "Fractional margin around the cropped bbox (default 0.05 = 5%). Ignored when cropToContent is false.",
+        ),
     },
     async (args: {
       schematicPath: string;
       format?: "png" | "svg";
       width?: number;
       height?: number;
+      cropToContent?: boolean;
+      margin?: number;
     }) => {
       const result = await callKicadScript("get_schematic_view", args);
       if (result.success) {
