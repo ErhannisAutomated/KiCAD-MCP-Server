@@ -432,6 +432,13 @@ class KiCADInterface:
             "list_schematic_texts": self._handle_list_schematic_texts,
             "add_sheet_pin": self._handle_add_sheet_pin,
             "add_schematic_sheet": self._handle_add_schematic_sheet,
+            "autoplacer_load": self._handle_autoplacer_load,
+            "autoplacer_set_params": self._handle_autoplacer_set_params,
+            "autoplacer_iterate": self._handle_autoplacer_iterate,
+            "autoplacer_run": self._handle_autoplacer_run,
+            "autoplacer_state": self._handle_autoplacer_state,
+            "autoplacer_preview": self._handle_autoplacer_preview,
+            "autoplacer_apply": self._handle_autoplacer_apply,
             "import_svg_logo": self._handle_import_svg_logo,
             # UI/Process management commands
             "check_kicad_ui": self._handle_check_kicad_ui,
@@ -3999,6 +4006,121 @@ class KiCADInterface:
             logger.error(f"Error adding schematic sheet: {e}")
             import traceback
 
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    # ------------------------------------------------------------------
+    # Autoplacer handlers — see commands/autoplacer.py for the model.
+    # The placer keeps in-memory state per schematic_path so callers
+    # iterate without re-loading.
+    # ------------------------------------------------------------------
+
+    def _handle_autoplacer_load(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            return {"success": True, **PLACER.load(schematic_path)}
+        except Exception as e:
+            logger.error(f"Error in autoplacer_load: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_set_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            knobs = {k: v for k, v in params.items() if k != "schematicPath"}
+            return PLACER.set_params(schematic_path, **knobs)
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_iterate(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            n = int(params.get("n", 1))
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            return PLACER.iterate(schematic_path, n=n)
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_run(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Iterate until either max_iterations reached or max force drops below
+        the threshold."""
+        try:
+            from commands.autoplacer import PLACER, iterate as _iter
+
+            schematic_path = params.get("schematicPath")
+            max_iter = int(params.get("maxIterations", 200))
+            threshold = float(params.get("forceThreshold", 0.5))
+            batch = int(params.get("batchSize", 10))
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            sess = PLACER.get(schematic_path)
+            if sess is None:
+                return {"success": False, "message": "session not loaded"}
+            done = 0
+            while done < max_iter:
+                step = min(batch, max_iter - done)
+                _iter(sess, step)
+                done += step
+                if sess.last_max_force < threshold:
+                    break
+            return {
+                "success": True,
+                "iterations_run": done,
+                "iteration": sess.iteration,
+                "temperature": round(sess.temperature, 4),
+                "max_force": round(sess.last_max_force, 4),
+                "converged": sess.last_max_force < threshold,
+            }
+        except Exception as e:
+            logger.error(f"Error in autoplacer_run: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_state(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            return PLACER.state(schematic_path)
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_preview(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            target_path = params.get("targetPath")
+            strip = bool(params.get("stripConnections", False))
+            if not (schematic_path and target_path):
+                return {"success": False, "message": "schematicPath + targetPath required"}
+            return PLACER.preview(schematic_path, target_path, strip_connections=strip)
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_apply(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            rewire = bool(params.get("rewire", True))
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            return PLACER.apply(schematic_path, rewire=rewire)
+        except Exception as e:
+            logger.error(f"Error in autoplacer_apply: {e}")
+            import traceback
             logger.error(traceback.format_exc())
             return {"success": False, "message": str(e)}
 
