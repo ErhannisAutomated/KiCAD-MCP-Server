@@ -325,8 +325,10 @@ def _bbox_from_lib(sym_node) -> Tuple[float, float]:
         return 7.62, 7.62
     w = max(xs) - min(xs)
     h = max(ys) - min(ys)
-    # Pad by ~1 grid for the symbol border.
-    return max(w + 2.54, 5.08), max(h + 2.54, 5.08)
+    # Pad by 2 lead-lengths (2 × 2.54 mm = 5.08 mm) on each side so
+    # the placer's overlap-resolution leaves room for the wire stubs
+    # the rewire step adds at every pin.  Total padding 10.16 mm.
+    return max(w + 10.16, 12.7), max(h + 10.16, 12.7)
 
 
 def load_session(schematic_path: Path) -> Session:
@@ -717,7 +719,8 @@ _STRIPPED_TYPES = {"wire", "label", "global_label", "hierarchical_label", "junct
 
 
 def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
-                       strip_connections: bool = True) -> Dict[str, Any]:
+                       strip_connections: bool = True,
+                       standalone: Optional[bool] = None) -> Dict[str, Any]:
     """Write component positions back to a schematic file.  If
     target_path is None, overwrite sess.schematic_path.
 
@@ -803,11 +806,18 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
                         noy = -ox * sin_d + oy * cos_d
                         sp[1] = new_x + nox
                         sp[2] = new_y + noy
+                        # Rotate the property's own text orientation by
+                        # delta_rot.  When the (at) was emitted as
+                        # (at X Y) without an explicit angle, the
+                        # default angle is 0 — append it so KiCad
+                        # picks up the rotated text orientation.
                         if len(sp) >= 4:
                             try:
                                 sp[3] = (float(sp[3]) + delta_rot) % 360
                             except (TypeError, ValueError):
                                 pass
+                        elif delta_rot != 0:
+                            sp.append(delta_rot % 360)
                     except (TypeError, ValueError):
                         pass
                     break
@@ -827,13 +837,27 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
             new_sexp.append(item)
         sexp = new_sexp
 
-    # If writing to a different file (a preview / test render rather
-    # than the original), rewrite each placed-symbol's
-    # (instances (project … (path …))) to point to the new file's stem
-    # and root UUID — so KiCad can resolve annotations when the file
-    # is opened standalone.  When writing back to the source we leave
-    # the hierarchical paths alone so the parent project still works.
-    if dst.resolve() != src.resolve():
+    # When ``standalone`` is True, rewrite each placed-symbol's
+    # (instances (project … (path …))) to point to the destination's
+    # stem and root UUID — so KiCad can resolve annotations when the
+    # file is opened on its own (no parent .kicad_pro hierarchy).
+    # Default behaviour: auto-detect — standalone if writing to a
+    # different file from the source, OR if the source itself isn't
+    # the file referenced by its (instances …) blocks.  Pass
+    # standalone=False explicitly to preserve hierarchical paths.
+    # Default: True.  Most placer uses are tests / iterations on a
+    # copy of the file, where opening the result standalone is the
+    # natural way to inspect it.  Hierarchical-preserve mode (the
+    # original child-sheet uses its parent's path) is opt-in via
+    # standalone=False — typically used when applying placement
+    # back to a real project's child sheet without breaking
+    # the parent's references.
+    use_standalone: bool
+    if standalone is None:
+        use_standalone = True
+    else:
+        use_standalone = standalone
+    if use_standalone:
         # Need the destination's root uuid — find the first (uuid …) in
         # the (about-to-be-written) sexp.
         dst_uuid = None
@@ -869,26 +893,27 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
 
 
 def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
-    """Place a net label at every pin's NEW world coordinate so that
-    after the placer moves things, all original electrical connections
-    are restored (just in label-only form for now).
+    """For each pin: add a 2.54 mm wire stub outward from the pin
+    body and a net label at the stub's far end.  KiCad joins by
+    label name so connectivity is correct without any longer-range
+    wires being routed.
 
     We bypass connect_pins(style="auto") here: connect_pins resolves
     pin world coords through PinLocator, which has a known multi-unit
     bug (it returns the first placed instance's coord for all pins of
     a multi-unit symbol).  The placer's model already knows each
-    unit's actual position — we just write a label at each pin's
-    Component.world_pin_xy().
+    unit's actual position, so we write labels and stubs directly.
 
-    Trade-off: no autorouter wires.  Connectivity is correct (every
-    pin on net N gets a "N" label at its endpoint, KiCad joins them
-    by name) but visually less polished than the autorouter would
-    produce.  Once PinLocator is taught about multi-unit, this can
-    switch back to connect_pins(auto) and gain real wires for free.
+    Trade-off: no longer-range autorouter wires between same-net
+    pins.  The labels-with-stubs pattern is what existing schematics
+    already use; once PinLocator learns multi-unit, we can switch
+    back to connect_pins(auto) and get real inter-pin wires.
     """
     from commands.wire_manager import WireManager
 
+    STUB_LEN = 2.54  # mm — one grid step, matches existing label-stub style
     label_count = 0
+    stub_count = 0
     skipped = 0
     for name, net in sess.nets.items():
         seen_positions: set = set()
@@ -901,32 +926,37 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
             if wp is None:
                 skipped += 1
                 continue
-            # Snap to grid so labels coincide cleanly (avoid sub-mm
-            # discrepancies that confuse KiCad's net merger).
-            key = (round(wp[0], 2), round(wp[1], 2))
-            if key in seen_positions:
-                # Two pins of the same component (e.g. stacked drains
-                # 7+8) → one label is enough.
-                continue
-            seen_positions.add(key)
-            # Use the pin's outward angle for label orientation so it
-            # reads away from the component body.
-            try:
-                outward = comp.world_pin_outward_angle(pn)
-                orient = int(round(outward)) % 360 if outward is not None else 0
-            except Exception:
-                orient = 0
-            ok = WireManager.add_label(
-                schematic_path, name, list(key),
-                label_type="label", orientation=orient,
+            outward = comp.world_pin_outward_angle(pn) or 0.0
+            # Stub end = pin endpoint + STUB_LEN in the outward direction.
+            # Y is screen Y-down so sin is negated.
+            rad = math.radians(outward)
+            stub_end = (
+                round(wp[0] + STUB_LEN * math.cos(rad), 2),
+                round(wp[1] - STUB_LEN * math.sin(rad), 2),
             )
-            if ok:
+            # Dedupe by stub-end position (stacked pins on the same
+            # coord — e.g. FDS9926A drains 7/8 — collapse to one stub).
+            if stub_end in seen_positions:
+                continue
+            seen_positions.add(stub_end)
+            # Add the 2.54 mm wire stub from the pin endpoint to the
+            # stub end.
+            if WireManager.add_wire(schematic_path, list(wp), list(stub_end)):
+                stub_count += 1
+            # Add the label at the stub end with orientation matching
+            # the outward direction (label reads away from the body).
+            orient = int(round(outward)) % 360
+            if WireManager.add_label(
+                schematic_path, name, list(stub_end),
+                label_type="label", orientation=orient,
+            ):
                 label_count += 1
     return {
         "labels_added": label_count,
+        "stubs_added": stub_count,
         "pins_skipped": skipped,
         "nets_rewired": len(sess.nets),
-        "method": "direct-label",
+        "method": "direct-label-with-stub",
     }
 
 
@@ -1002,12 +1032,15 @@ class AutoPlacer:
                                  strip_connections=strip_connections),
         }
 
-    def apply(self, schematic_path: str, rewire: bool = True) -> Dict[str, Any]:
+    def apply(self, schematic_path: str, rewire: bool = True,
+              standalone: Optional[bool] = None) -> Dict[str, Any]:
         sess = self.get(schematic_path)
         if sess is None:
             return {"success": False, "message": "session not loaded"}
         snap_positions(sess)
-        result = apply_to_schematic(sess, None, strip_connections=True)
+        result = apply_to_schematic(
+            sess, None, strip_connections=True, standalone=standalone,
+        )
         if rewire:
             result["rewire"] = rewire_session(sess, sess.schematic_path)
         return {"success": True, **result}
