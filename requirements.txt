@@ -24,3 +24,9 @@ requests>=2.32.5
 
 # Environment variable management
 python-dotenv>=1.0.0
+
+# Optional: real-time autoplacer visualization (commands/autoplacer_viz.py).
+# Used during interactive parameter tuning in an iPython session; not
+# required for the MCP server itself.  Lazy-imported at viz instantiation
+# so non-viz callers don't pay the load cost.
+matplotlib>=3.7

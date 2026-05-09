@@ -72,6 +72,27 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-10)
 
+- **Autoplacer real-time visualizer** (`commands/autoplacer_viz.py`):
+  matplotlib-backed live view of an autoplacer Session.  Designed for
+  interactive parameter tuning in an iPython session — open with
+  `viz = AutoplacerViz(sess)`, iterate the placer, call `viz.update()`
+  to redraw.  Components render as bbox rectangles with the ref text
+  in the centre and pins as cyan dots.  Force overlays:
+  - Red lines per pin-pair attraction edge, intensity scaled to
+    magnitude (so weak pulls fade and strong ones are bright).
+  - Blue lines per component-pair repulsion, top-30 by magnitude
+    (configurable; N(N−1)/2 pairs would be too noisy on a 30-comp
+    sheet).
+  - Green sum-of-forces stub from each component centre, scaled so
+    the largest force vector reads ~8 mm.
+  Toggleable per-layer at construction time
+  (`show_attraction=False`, `show_repulsion=False`, etc.).  Schematic
+  Y-axis is inverted so the view matches what KiCad shows.  Works
+  headless under the Agg backend (`viz.save("/tmp/state.png")`) for
+  CI / batch runs.  `matplotlib>=3.7` added to requirements.txt as an
+  optional viz-only dep; the import is lazy so non-viz callers
+  aren't affected.  5 smoke tests in `tests/test_autoplacer_viz.py`.
+
 - **Schematic router rule 7: stub-zone reservation.**  Every pin now
   has an implicit 2.54 mm "stub zone" running outward from its
   endpoint along the pin's outward angle.  Routes for OTHER nets
