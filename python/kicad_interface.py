@@ -2589,8 +2589,8 @@ class KiCADInterface:
                     if bbox is not None:
                         with open(svg_path, "r", encoding="utf-8") as f:
                             svg_text = f.read()
-                        from commands.board.view import BoardViewer
-                        svg_text = BoardViewer._svg_set_viewbox(svg_text, bbox, margin_frac)
+                        from commands.board.view import BoardViewCommands
+                        svg_text = BoardViewCommands._svg_set_viewbox(svg_text, bbox, margin_frac)
                         with open(svg_path, "w", encoding="utf-8") as f:
                             f.write(svg_text)
 
