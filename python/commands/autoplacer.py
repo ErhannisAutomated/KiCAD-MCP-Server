@@ -52,16 +52,25 @@ class Pin:
 @dataclass
 class Component:
     ref: str
+    unit: int                # 1, 2, … (multi-unit components get one Component per unit)
     lib_id: str
-    x: float             # mm; placed-symbol position (Y-down screen coords)
+    x: float                 # mm; placed-symbol position (Y-down screen coords)
     y: float
-    rotation: float      # degrees, free during iteration; snapped at apply
+    rotation: float          # degrees, free during iteration; snapped at apply
     mirror_x: bool
     mirror_y: bool
     pins: Dict[str, Pin] = field(default_factory=dict)
-    bbox_w: float = 7.62  # default ~3 grid units; refined later if needed
+    bbox_w: float = 7.62     # default ~3 grid units; refined from lib at load
     bbox_h: float = 7.62
-    pinned: bool = False  # if True, position locked
+    pinned: bool = False     # if True, position locked
+
+    @property
+    def key(self) -> str:
+        """Synthetic key used to address this component+unit in the placer
+        model.  The bare reference designator is what KiCad uses to
+        identify the SHARED footprint on PCB; the unit suffix
+        differentiates the per-unit instances on the schematic."""
+        return f"{self.ref}__u{self.unit}"
 
     def world_pin_xy(self, pn: str) -> Optional[Tuple[float, float]]:
         """World-coord of pin pn given the component's current x/y/rot."""
@@ -161,53 +170,163 @@ def _parse_at(node) -> Optional[Tuple[float, float, float]]:
         return None
 
 
-def _extract_lib_pins(sexp_data, lib_id: str) -> Dict[str, Pin]:
-    """Find the symbol's pin definitions in lib_symbols and return them
-    as a dict of pin_number -> Pin (lib coords)."""
+def _find_lib_symbol(sexp_data, lib_id: str):
+    """Return the lib_symbols (symbol "<lib_id>" …) node, or None."""
     for top in sexp_data:
         if not (isinstance(top, list) and top and top[0] == Symbol("lib_symbols")):
             continue
         for sym in top[1:]:
-            if not (isinstance(sym, list) and len(sym) > 1 and sym[0] == Symbol("symbol")):
-                continue
-            if sym[1] != lib_id:
-                continue
-            return _walk_pins(sym)
-    return {}
+            if (
+                isinstance(sym, list) and len(sym) > 1
+                and sym[0] == Symbol("symbol") and sym[1] == lib_id
+            ):
+                return sym
+    return None
 
 
-def _walk_pins(sym_node) -> Dict[str, Pin]:
-    pins: Dict[str, Pin] = {}
+_SUBSYM_UNIT_RE = re.compile(r"_(\d+)_\d+$")
+
+
+def _pins_per_unit(sym_node) -> Dict[int, Dict[str, Pin]]:
+    """Walk a lib_symbols (symbol "Foo" …) node and return
+    {unit_number: {pin_number: Pin}}.
+
+    KiCad lib_symbols groups pins by sub-symbol named like
+    "<base>_<unit>_<convert>" (e.g. "FDS6890A_1_1", "FDS6890A_2_1").
+    The unit number on each placed (symbol …) block selects one of
+    these.  Single-unit symbols use unit 1 with sub-symbol name like
+    "R_0_1" / "R_1_1"; convert is body style for symbols with
+    de-Morgan variants.
+
+    Sub-symbols whose unit field is "0" are common-to-all-units
+    (graphics shared across units) — their pins (rare) are assigned
+    to every unit's dict.
+    """
+    by_unit: Dict[int, Dict[str, Pin]] = {}
+
+    def collect_pins(sub):
+        out: Dict[str, Pin] = {}
+        for child in sub[2:] if isinstance(sub, list) and len(sub) > 2 else []:
+            if not isinstance(child, list) or not child:
+                continue
+            if child[0] != Symbol("pin") or len(child) < 3:
+                continue
+            x = y = ang = 0.0
+            name = num = ""
+            for sp in child[2:]:
+                if not isinstance(sp, list) or not sp:
+                    continue
+                if sp[0] == Symbol("at") and len(sp) >= 3:
+                    try:
+                        x = float(sp[1])
+                        y = float(sp[2])
+                        if len(sp) >= 4:
+                            ang = float(sp[3])
+                    except (TypeError, ValueError):
+                        pass
+                elif sp[0] == Symbol("name") and len(sp) >= 2:
+                    name = str(sp[1]).strip('"')
+                elif sp[0] == Symbol("number") and len(sp) >= 2:
+                    num = str(sp[1]).strip('"')
+            if num:
+                out[num] = Pin(num, name, x, y, ang)
+        return out
+
+    if not isinstance(sym_node, list):
+        return by_unit
+    for sub in sym_node[2:]:
+        if not (isinstance(sub, list) and len(sub) > 1 and sub[0] == Symbol("symbol")):
+            continue
+        sub_name = str(sub[1]) if isinstance(sub[1], str) else ""
+        m = _SUBSYM_UNIT_RE.search(sub_name)
+        unit = int(m.group(1)) if m else 1
+        pins = collect_pins(sub)
+        if not pins:
+            continue
+        by_unit.setdefault(unit, {}).update(pins)
+
+    # Pins on "unit 0" sub-symbols are shared — copy into every other unit.
+    if 0 in by_unit:
+        shared = by_unit.pop(0)
+        for u in by_unit:
+            for pn, p in shared.items():
+                by_unit[u].setdefault(pn, p)
+    if not by_unit:
+        # Fallback: no sub-symbols matched — treat all pins as unit 1.
+        all_pins = {}
+        for sub in sym_node[2:] if isinstance(sym_node, list) else []:
+            if isinstance(sub, list) and len(sub) > 1 and sub[0] == Symbol("symbol"):
+                all_pins.update(collect_pins(sub))
+        if all_pins:
+            by_unit[1] = all_pins
+    return by_unit
+
+
+def _bbox_from_lib(sym_node) -> Tuple[float, float]:
+    """Compute approximate body bbox (width, height) in mm from
+    rectangle / polyline graphics in the lib_symbols definition.
+    Conservative — falls back to 7.62 × 7.62 if nothing useful is
+    found.  Used to size repulsion proportional to actual symbol size.
+    """
+    xs: List[float] = []
+    ys: List[float] = []
 
     def visit(node):
         if not isinstance(node, list) or not node:
             return
-        if node[0] == Symbol("pin") and len(node) >= 3:
-            x = y = ang = 0.0
-            name = num = ""
-            for sub in node[2:]:
-                if not isinstance(sub, list) or not sub:
-                    continue
-                if sub[0] == Symbol("at") and len(sub) >= 3:
+        head = node[0]
+        if head == Symbol("rectangle"):
+            # (rectangle (start x y) (end x y) ...)
+            for sp in node[1:]:
+                if isinstance(sp, list) and sp[0] in (Symbol("start"), Symbol("end")):
+                    if len(sp) >= 3:
+                        try:
+                            xs.append(float(sp[1]))
+                            ys.append(float(sp[2]))
+                        except (TypeError, ValueError):
+                            pass
+            return
+        if head == Symbol("polyline"):
+            for sp in node[1:]:
+                if isinstance(sp, list) and sp[0] == Symbol("pts"):
+                    for xy in sp[1:]:
+                        if (
+                            isinstance(xy, list) and xy[0] == Symbol("xy")
+                            and len(xy) >= 3
+                        ):
+                            try:
+                                xs.append(float(xy[1]))
+                                ys.append(float(xy[2]))
+                            except (TypeError, ValueError):
+                                pass
+            return
+        if head == Symbol("circle"):
+            cx = cy = 0.0
+            r = 0.0
+            for sp in node[1:]:
+                if isinstance(sp, list) and sp[0] == Symbol("center") and len(sp) >= 3:
                     try:
-                        x = float(sub[1])
-                        y = float(sub[2])
-                        if len(sub) >= 4:
-                            ang = float(sub[3])
+                        cx, cy = float(sp[1]), float(sp[2])
                     except (TypeError, ValueError):
                         pass
-                elif sub[0] == Symbol("name") and len(sub) >= 2:
-                    name = str(sub[1]).strip('"')
-                elif sub[0] == Symbol("number") and len(sub) >= 2:
-                    num = str(sub[1]).strip('"')
-            if num:
-                pins[num] = Pin(num, name, x, y, ang)
+                elif isinstance(sp, list) and sp[0] == Symbol("radius") and len(sp) >= 2:
+                    try:
+                        r = float(sp[1])
+                    except (TypeError, ValueError):
+                        pass
+            xs.extend([cx - r, cx + r])
+            ys.extend([cy - r, cy + r])
             return
         for sub in node[1:] if isinstance(node, list) else []:
             visit(sub)
 
     visit(sym_node)
-    return pins
+    if not xs or not ys:
+        return 7.62, 7.62
+    w = max(xs) - min(xs)
+    h = max(ys) - min(ys)
+    # Pad by ~1 grid for the symbol border.
+    return max(w + 2.54, 5.08), max(h + 2.54, 5.08)
 
 
 def load_session(schematic_path: Path) -> Session:
@@ -217,26 +336,8 @@ def load_session(schematic_path: Path) -> Session:
 
     sess = Session(schematic_path=Path(schematic_path))
 
-    # Pre-pass: count placed instances per reference.  Multi-unit
-    # symbols (FDS9926A, op-amp packages with units A/B/C, etc.) appear
-    # as multiple (symbol …) blocks sharing one ref.  The placer's
-    # model is one node per ref, so we mark these as pinned — moving
-    # one instance independently of the other would split the on-PCB
-    # footprint.
-    instance_count: Dict[str, int] = {}
-    for top in sexp:
-        if not (isinstance(top, list) and len(top) > 1 and top[0] == Symbol("symbol")):
-            continue
-        for sub in top[1:]:
-            if (
-                isinstance(sub, list) and len(sub) >= 3
-                and sub[0] == Symbol("property") and sub[1] == "Reference"
-            ):
-                ref_str = sub[2]
-                instance_count[ref_str] = instance_count.get(ref_str, 0) + 1
-                break
-
-    # Pass 1: components
+    # Pass 1: components.  Each placed (symbol …) block becomes its own
+    # Component (multi-unit symbols already appear as multiple blocks).
     for top in sexp:
         if not (isinstance(top, list) and len(top) > 1 and top[0] == Symbol("symbol")):
             continue
@@ -246,6 +347,7 @@ def load_session(schematic_path: Path) -> Session:
         rot = 0.0
         mx = my = False
         ref = None
+        unit = 1
         for sub in top[1:]:
             if not isinstance(sub, list):
                 continue
@@ -262,34 +364,39 @@ def load_session(schematic_path: Path) -> Session:
                         mx = True
                     elif mtype == Symbol("y"):
                         my = True
+            elif sub[0] == Symbol("unit") and len(sub) >= 2:
+                try:
+                    unit = int(sub[1])
+                except (TypeError, ValueError):
+                    unit = 1
             elif sub[0] == Symbol("property") and len(sub) >= 3:
                 if sub[1] == "Reference":
                     ref = sub[2]
         if not (lib_id and ref):
             continue
-        # Skip power flag pseudosymbols and template entries.
+        # Skip power flag pseudosymbols.
         if ref.startswith("#"):
             continue
-        if ref in sess.components:
-            # Already loaded (multi-unit component).  Skip duplicates;
-            # the first-seen placement keeps its position and is
-            # marked pinned below.
+        # Pin per-unit pin set + bbox from lib_symbols.
+        lib_node = _find_lib_symbol(sexp, lib_id)
+        if lib_node is None:
+            logger.warning(f"autoplacer: lib_id {lib_id} not found in lib_symbols; skipping")
             continue
-        # Pinned heuristics:
-        #   - Multi-unit symbols: moving one unit drags the other onto it.
-        #   - Connectors (J*): user-facing edges, hand-placed.
-        is_pinned = (
-            instance_count.get(ref, 0) > 1
-            or ref.upper().startswith("J")
-        )
-        pins = _extract_lib_pins(sexp, lib_id)
-        sess.components[ref] = Component(
-            ref=ref, lib_id=lib_id,
+        pins_per_unit = _pins_per_unit(lib_node)
+        unit_pins = pins_per_unit.get(unit) or pins_per_unit.get(1, {})
+        bbox_w, bbox_h = _bbox_from_lib(lib_node)
+        # Connectors (J*) are pinned by default — user-facing edges
+        # placed deliberately.
+        is_pinned = ref.upper().startswith("J")
+        comp = Component(
+            ref=ref, unit=unit, lib_id=lib_id,
             x=x, y=y, rotation=rot,
             mirror_x=mx, mirror_y=my,
-            pins=pins,
+            pins=dict(unit_pins),
+            bbox_w=bbox_w, bbox_h=bbox_h,
             pinned=is_pinned,
         )
+        sess.components[comp.key] = comp
 
     # Pass 2: connection graph from labels.  Walk all (label/global_label/
     # hierarchical_label) at world coords; for each, find the pin it's
@@ -330,13 +437,14 @@ def load_session(schematic_path: Path) -> Session:
         if len(pts) == 2:
             wires.append((pts[0], pts[1]))
 
-    # World pin positions, per component.
+    # World pin positions, per component (key includes unit so multi-
+    # unit components don't collide on the same dict key).
     pin_world: Dict[Tuple[str, str], Tuple[float, float]] = {}
     for comp in sess.components.values():
         for pn in comp.pins:
             wp = comp.world_pin_xy(pn)
             if wp is not None:
-                pin_world[(comp.ref, pn)] = (round(wp[0], 2), round(wp[1], 2))
+                pin_world[(comp.key, pn)] = (round(wp[0], 2), round(wp[1], 2))
 
     # For each (ref, pn), figure out its net by:
     #   1) Direct: any label at that exact coord?
@@ -363,11 +471,11 @@ def load_session(schematic_path: Path) -> Session:
                             queue.append((there, depth + 1))
         return None
 
-    for (ref, pn), wp in pin_world.items():
+    for (comp_key, pn), wp in pin_world.items():
         net_name = _bfs_label(wp)
         if not net_name:
             continue
-        sess.nets.setdefault(net_name, Net(name=net_name)).pins.append((ref, pn))
+        sess.nets.setdefault(net_name, Net(name=net_name)).pins.append((comp_key, pn))
 
     return sess
 
@@ -423,7 +531,7 @@ def _polarity_force(c: Component, sess: Session) -> Tuple[float, float]:
     fy = 0.0
     n = 0
     for net in sess.nets.values():
-        belongs = any(ref == c.ref for ref, _ in net.pins)
+        belongs = any(comp_key == c.key for comp_key, _ in net.pins)
         if not belongs:
             continue
         if p.is_bottom_polarity(net.name):
@@ -442,16 +550,16 @@ def _torque_for_pin_orientation(c: Component, sess: Session) -> float:
     """
     total_torque = 0.0
     for net in sess.nets.values():
-        my_pins = [pn for ref, pn in net.pins if ref == c.ref]
+        my_pins = [pn for comp_key, pn in net.pins if comp_key == c.key]
         if not my_pins:
             continue
         # Average position of all OTHER pins on this net — that's where
         # we want the pin to point.
         other_xy = []
-        for ref, pn in net.pins:
-            if ref == c.ref:
+        for comp_key, pn in net.pins:
+            if comp_key == c.key:
                 continue
-            other = sess.components.get(ref)
+            other = sess.components.get(comp_key)
             if other is None:
                 continue
             wp = other.world_pin_xy(pn)
@@ -512,32 +620,34 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
             pfx, pfy = _polarity_force(c, sess)
             fx += pfx
             fy += pfy
-            forces[c.ref] = (fx, fy)
-            torques[c.ref] = _torque_for_pin_orientation(c, sess)
+            forces[c.key] = (fx, fy)
+            torques[c.key] = _torque_for_pin_orientation(c, sess)
 
         # Attraction along each net edge — every pair of pins on the
-        # same net gets a spring force.
+        # same net gets a spring force.  Pin lists are keyed on the
+        # synthetic comp_key (ref + unit) so multi-unit components
+        # appear as distinct nodes here.
         for net in sess.nets.values():
             pin_list = net.pins
             if len(pin_list) < 2:
                 continue
-            for i, (ref_a, _) in enumerate(pin_list):
-                for ref_b, _ in pin_list[i + 1 :]:
-                    if ref_a == ref_b:
+            for i, (key_a, _) in enumerate(pin_list):
+                for key_b, _ in pin_list[i + 1 :]:
+                    if key_a == key_b:
                         continue
-                    a = sess.components.get(ref_a)
-                    b = sess.components.get(ref_b)
+                    a = sess.components.get(key_a)
+                    b = sess.components.get(key_b)
                     if a is None or b is None:
                         continue
                     afx, afy = _attractive_force(a, b, p.attraction_k)
-                    forces[ref_a] = (forces[ref_a][0] + afx, forces[ref_a][1] + afy)
-                    forces[ref_b] = (forces[ref_b][0] - afx, forces[ref_b][1] - afy)
+                    forces[key_a] = (forces[key_a][0] + afx, forces[key_a][1] + afy)
+                    forces[key_b] = (forces[key_b][0] - afx, forces[key_b][1] - afy)
 
         # Apply: cap displacement at temperature.
         for c in comps:
             if c.pinned:
                 continue
-            fx, fy = forces[c.ref]
+            fx, fy = forces[c.key]
             mag = math.hypot(fx, fy)
             max_force_seen = max(max_force_seen, mag)
             if mag > 0:
@@ -546,7 +656,7 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                 c.x += fx / mag * step
                 c.y += fy / mag * step
             # Torque (rotation update) — capped to small steps.
-            t = torques[c.ref]
+            t = torques[c.key]
             if abs(t) > 5.0:
                 t = math.copysign(5.0, t)
             c.rotation = (c.rotation + t) % 360
@@ -574,21 +684,27 @@ _GRID = 1.27
 
 def snap_positions(sess: Session) -> None:
     """Snap each component's (x, y) to nearest 1.27 mm grid; rotation
-    to nearest 90°.  Resolves overlaps by spreading along x."""
+    to nearest 90°.  Resolves bbox-aware overlaps by pushing the later
+    component along x."""
     for c in sess.components.values():
         c.x = round(c.x / _GRID) * _GRID
         c.y = round(c.y / _GRID) * _GRID
         c.rotation = round(c.rotation / 90) * 90 % 360
 
-    # Simple overlap resolution: scan in deterministic order; if a
-    # component is within 5 mm of another, push the LATER one one grid step.
-    refs = sorted(sess.components.keys())
-    for i, ref_i in enumerate(refs):
-        for ref_j in refs[i + 1 :]:
-            a = sess.components[ref_i]
-            b = sess.components[ref_j]
+    # bbox-aware overlap resolution: scan in deterministic order.
+    keys = sorted(sess.components.keys())
+    for i, ki in enumerate(keys):
+        for kj in keys[i + 1 :]:
+            a = sess.components[ki]
+            b = sess.components[kj]
+            min_dx = (a.bbox_w + b.bbox_w) / 2 + _GRID
+            min_dy = (a.bbox_h + b.bbox_h) / 2 + _GRID
             tries = 0
-            while abs(a.x - b.x) < 5.0 and abs(a.y - b.y) < 5.0 and tries < 20:
+            while (
+                abs(a.x - b.x) < min_dx
+                and abs(a.y - b.y) < min_dy
+                and tries < 30
+            ):
                 b.x += _GRID * 4  # nudge right
                 tries += 1
 
@@ -616,42 +732,66 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
     text = src.read_text()
     sexp = sexpdata.loads(text)
 
-    # Replace each placed-symbol's (at).  The placer's model preserves
-    # mirror flags from load, so we don't touch (mirror).  For
-    # multi-unit symbols (multiple placed blocks sharing a ref), the
-    # placer holds ONE position per ref so we only update the FIRST
-    # placed instance.  Pinned components retain their original
-    # position (placer didn't move them) so writing the same value
-    # back is harmless.
-    by_ref: Dict[str, Component] = sess.components
-    seen_refs: set = set()
+    # Replace each placed-symbol's (at) AND each property's (at) so
+    # the Reference / Value text labels follow the symbol body.  Match
+    # by (ref, unit) so multi-unit symbols update each placed instance
+    # to its own model position.
     n_updated = 0
     for top in sexp:
         if not (isinstance(top, list) and len(top) > 1 and top[0] == Symbol("symbol")):
             continue
         ref = None
-        for sub in top[1:]:
-            if isinstance(sub, list) and len(sub) >= 3 and sub[0] == Symbol("property"):
-                if sub[1] == "Reference":
-                    ref = sub[2]
-                    break
-        if ref is None or ref not in by_ref:
-            continue
-        if ref in seen_refs:
-            # Multi-unit second instance — leave it alone so the unit-2
-            # placement isn't dragged onto unit-1's position.
-            continue
-        seen_refs.add(ref)
-        comp = by_ref[ref]
+        unit = 1
+        old_x = old_y = old_rot = None
         for sub in top[1:]:
             if isinstance(sub, list) and sub and sub[0] == Symbol("at"):
-                sub[1] = comp.x
-                sub[2] = comp.y
+                at = _parse_at(sub)
+                if at:
+                    old_x, old_y, old_rot = at
+            elif isinstance(sub, list) and sub and sub[0] == Symbol("unit") and len(sub) >= 2:
+                try:
+                    unit = int(sub[1])
+                except (TypeError, ValueError):
+                    pass
+            elif isinstance(sub, list) and len(sub) >= 3 and sub[0] == Symbol("property"):
+                if sub[1] == "Reference":
+                    ref = sub[2]
+        if ref is None or old_x is None:
+            continue
+        comp_key = f"{ref}__u{unit}"
+        comp = sess.components.get(comp_key)
+        if comp is None:
+            continue
+        new_x, new_y, new_rot = comp.x, comp.y, comp.rotation
+        dx = new_x - old_x
+        dy = new_y - old_y
+        # Update the symbol's primary (at).
+        for sub in top[1:]:
+            if isinstance(sub, list) and sub and sub[0] == Symbol("at"):
+                sub[1] = new_x
+                sub[2] = new_y
                 if len(sub) >= 4:
-                    sub[3] = comp.rotation
+                    sub[3] = new_rot
                 else:
-                    sub.append(comp.rotation)
+                    sub.append(new_rot)
                 break
+        # Translate every property's (at) by the same delta so the
+        # Reference / Value text labels move WITH the symbol.  Property
+        # text orientation isn't auto-rotated to match the symbol — that
+        # would require recomputing whether the text fits beside the
+        # rotated body.  Leaving it as-is means text might overlap a
+        # rotated symbol; that's a follow-on improvement.
+        for sub in top[1:]:
+            if not (isinstance(sub, list) and len(sub) >= 3 and sub[0] == Symbol("property")):
+                continue
+            for sp in sub[2:]:
+                if isinstance(sp, list) and sp and sp[0] == Symbol("at") and len(sp) >= 3:
+                    try:
+                        sp[1] = float(sp[1]) + dx
+                        sp[2] = float(sp[2]) + dy
+                    except (TypeError, ValueError):
+                        pass
+                    break
         n_updated += 1
 
     n_stripped = 0
@@ -685,19 +825,26 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
     from commands.connection_schematic import ConnectionManager
 
     results: Dict[str, Dict[str, Any]] = {}
+
+    def _bare_ref(comp_key: str) -> str:
+        """Strip the unit suffix that the placer model uses internally
+        — connect_pins expects bare reference designators (the unit
+        is implicit in pin number on multi-unit symbols)."""
+        i = comp_key.rfind("__u")
+        return comp_key[:i] if i >= 0 else comp_key
+
     for name, net in sess.nets.items():
         if len(net.pins) < 2:
-            # Single-pin net — drop a label at the pin so it's named.
             if len(net.pins) == 1:
                 from commands.wire_manager import WireManager
-                ref, pn = net.pins[0]
-                comp = sess.components.get(ref)
+                comp_key, pn = net.pins[0]
+                comp = sess.components.get(comp_key)
                 if comp:
                     wp = comp.world_pin_xy(pn)
                     if wp:
                         WireManager.add_label(schematic_path, name, list(wp))
             continue
-        pins_arg = [{"ref": r, "pin": p} for r, p in net.pins]
+        pins_arg = [{"ref": _bare_ref(k), "pin": p} for k, p in net.pins]
         try:
             res = ConnectionManager.connect_pins(
                 schematic_path, pins_arg, net_name=name, style="auto"
@@ -761,9 +908,15 @@ class AutoPlacer:
             "success": True,
             "iteration": sess.iteration,
             "temperature": round(sess.temperature, 4),
+            "max_force": round(sess.last_max_force, 4),
             "components": {
-                ref: {"x": round(c.x, 3), "y": round(c.y, 3), "rotation": round(c.rotation, 1)}
-                for ref, c in sess.components.items()
+                key: {
+                    "ref": c.ref, "unit": c.unit,
+                    "x": round(c.x, 3), "y": round(c.y, 3),
+                    "rotation": round(c.rotation, 1),
+                    "pinned": c.pinned,
+                }
+                for key, c in sess.components.items()
             },
         }
 

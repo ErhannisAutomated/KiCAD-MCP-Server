@@ -74,42 +74,46 @@ class TestLoad:
         with tempfile.TemporaryDirectory() as tmp:
             sch = _make_two_r_with_net(Path(tmp))
             sess = load_session(sch)
-            assert "R1" in sess.components
-            assert "R2" in sess.components
-            assert not sess.components["R1"].pinned
+            # Single-unit components: key is ref__u1
+            assert "R1__u1" in sess.components
+            assert "R2__u1" in sess.components
+            assert not sess.components["R1__u1"].pinned
 
-    def test_load_multi_unit_pins_are_marked(self):
-        """Multi-unit symbols (multiple placed blocks sharing a ref) must
-        be marked pinned so the placer doesn't drag both units onto
-        each other."""
+    def test_load_multi_unit_components_each_get_own_node(self):
+        """Multi-unit symbols (e.g. Q1 unit 1 + Q1 unit 2) must
+        produce TWO Component nodes so each placed unit moves
+        independently and its pins resolve at the right world coord.
+        """
         from commands.autoplacer import load_session
 
-        # Build a synthetic multi-unit schematic by repeating a Device:R
-        # block with the same Reference (matching what KiCad does for
-        # FDS9926A's two N-FET units).
         with tempfile.TemporaryDirectory() as tmp:
             sch = Path(tmp) / "multi.kicad_sch"
-            R_LIB = textwrap.dedent("""\
-                (lib_symbols
-                  (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0))
-                    (symbol "R_1_1"
-                      (pin passive line (at 0 3.81 270) (length 1.27)
-                        (name "~" (effects (font (size 1.27 1.27))))
-                        (number "1" (effects (font (size 1.27 1.27))))
+            # Synthetic multi-unit symbol with disjoint pin numbers per unit:
+            # unit 1 has pins 1, 2; unit 2 has pins 3, 4.
+            sch.write_text(textwrap.dedent("""\
+                (kicad_sch (version 20250114) (generator "test")
+                  (uuid aaaa-bbbb)
+                  (lib_symbols
+                    (symbol "Test:DualR" (pin_numbers hide) (pin_names (offset 0))
+                      (symbol "DualR_1_1"
+                        (pin passive line (at 0 3.81 270) (length 1.27)
+                          (name "~") (number "1"))
+                        (pin passive line (at 0 -3.81 90) (length 1.27)
+                          (name "~") (number "2"))
+                      )
+                      (symbol "DualR_2_1"
+                        (pin passive line (at 0 3.81 270) (length 1.27)
+                          (name "~") (number "3"))
+                        (pin passive line (at 0 -3.81 90) (length 1.27)
+                          (name "~") (number "4"))
                       )
                     )
                   )
-                )
-            """)
-            sch.write_text(textwrap.dedent(f"""\
-                (kicad_sch (version 20250114) (generator "test")
-                  (uuid aaaa-bbbb)
-                  {R_LIB}
-                  (symbol (lib_id "Device:R") (at 100 100 0) (unit 1)
+                  (symbol (lib_id "Test:DualR") (at 100 100 0) (unit 1)
                     (property "Reference" "Q1" (at 100 100 0))
                     (instances (project "test" (path "/" (reference "Q1") (unit 1))))
                   )
-                  (symbol (lib_id "Device:R") (at 150 100 0) (unit 2)
+                  (symbol (lib_id "Test:DualR") (at 150 100 0) (unit 2)
                     (property "Reference" "Q1" (at 150 100 0))
                     (instances (project "test" (path "/" (reference "Q1") (unit 2))))
                   )
@@ -117,8 +121,16 @@ class TestLoad:
                 )
             """))
             sess = load_session(sch)
-            assert "Q1" in sess.components
-            assert sess.components["Q1"].pinned is True
+            assert "Q1__u1" in sess.components
+            assert "Q1__u2" in sess.components
+            u1 = sess.components["Q1__u1"]
+            u2 = sess.components["Q1__u2"]
+            # Each unit only owns its own pin numbers.
+            assert set(u1.pins.keys()) == {"1", "2"}
+            assert set(u2.pins.keys()) == {"3", "4"}
+            # And they sit at distinct positions (placer can move them
+            # independently).
+            assert u1.x != u2.x
 
     def test_load_connectors_are_pinned(self):
         from commands.autoplacer import load_session
@@ -145,7 +157,7 @@ class TestLoad:
                 )
             """))
             sess = load_session(sch)
-            assert sess.components["J1"].pinned is True
+            assert sess.components["J1__u1"].pinned is True
 
 
 @pytest.mark.unit
@@ -153,9 +165,9 @@ class TestForceMath:
     def test_repulsion_pushes_apart(self):
         from commands.autoplacer import _component_pair_force, Component
 
-        a = Component("A", "Device:R", x=100, y=100, rotation=0,
+        a = Component("A", 1, "Device:R", x=100, y=100, rotation=0,
                       mirror_x=False, mirror_y=False)
-        b = Component("B", "Device:R", x=110, y=100, rotation=0,
+        b = Component("B", 1, "Device:R", x=110, y=100, rotation=0,
                       mirror_x=False, mirror_y=False)
         # Force on A from B: should point away from B (i.e. -x direction).
         fx, fy = _component_pair_force(a, b, k=100.0)
@@ -164,9 +176,9 @@ class TestForceMath:
     def test_attraction_pulls_together(self):
         from commands.autoplacer import _attractive_force, Component
 
-        a = Component("A", "Device:R", x=100, y=100, rotation=0,
+        a = Component("A", 1, "Device:R", x=100, y=100, rotation=0,
                       mirror_x=False, mirror_y=False)
-        b = Component("B", "Device:R", x=110, y=100, rotation=0,
+        b = Component("B", 1, "Device:R", x=110, y=100, rotation=0,
                       mirror_x=False, mirror_y=False)
         # Force on A from edge to B: should point toward B (+x).
         fx, fy = _attractive_force(a, b, k=1.0)
@@ -199,11 +211,35 @@ class TestRoundTrip:
             sch = _make_two_r_with_net(Path(tmp))
             sess = load_session(sch)
             # Force R1 to a new position
-            sess.components["R1"].x = 200.0
-            sess.components["R1"].y = 50.0
+            sess.components["R1__u1"].x = 200.0
+            sess.components["R1__u1"].y = 50.0
             apply_to_schematic(sess, target_path=None)
             text = sch.read_text()
             assert "200" in text and "50" in text
+
+    def test_apply_translates_property_at_with_symbol(self):
+        """When the symbol's (at) moves by (dx, dy), every property's
+        (at) should follow — otherwise the Reference/Value text labels
+        get left behind in the original position."""
+        from commands.autoplacer import load_session, apply_to_schematic
+        import re
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = _make_two_r_with_net(Path(tmp))
+            # R1 starts at (100, 100); property "Reference" at (100, 100, 0).
+            sess = load_session(sch)
+            sess.components["R1__u1"].x = 200.0
+            sess.components["R1__u1"].y = 100.0
+            apply_to_schematic(sess, target_path=None)
+            text = sch.read_text()
+            # The Reference property's (at) should now be at x=200
+            # (translated by +100 from original 100).
+            m = re.search(r'\(property\s+"Reference"\s+"R1"\s+\(at\s+([\d.-]+)\s+([\d.-]+)', text)
+            assert m, "Reference property block not found"
+            px = float(m.group(1))
+            assert abs(px - 200.0) < 0.5, (
+                f"Reference text x={px}, expected ~200 (followed symbol translation)"
+            )
 
     def test_apply_strips_wires_and_labels(self):
         from commands.autoplacer import load_session, apply_to_schematic
