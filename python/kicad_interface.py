@@ -2576,13 +2576,22 @@ class KiCADInterface:
 
                 import glob
 
-                svg_files = glob.glob(os.path.join(tmpdir, "*.svg"))
-                if not svg_files:
-                    return {
-                        "success": False,
-                        "message": "No SVG file produced by kicad-cli",
-                    }
-                svg_path = svg_files[0]
+                # kicad-cli writes <schematic_stem>.svg for the top-level
+                # sheet plus <schematic_stem>-<sub-sheet-name>.svg for each
+                # child.  Pick the bare-stem one — picking arbitrarily would
+                # render a sub-sheet as if it were the requested top-level.
+                stem = os.path.splitext(os.path.basename(schematic_path))[0]
+                preferred = os.path.join(tmpdir, stem + ".svg")
+                if os.path.exists(preferred):
+                    svg_path = preferred
+                else:
+                    svg_files = glob.glob(os.path.join(tmpdir, "*.svg"))
+                    if not svg_files:
+                        return {
+                            "success": False,
+                            "message": "No SVG file produced by kicad-cli",
+                        }
+                    svg_path = svg_files[0]
 
                 # Step 1.5: optionally crop the SVG viewBox to the content bbox.
                 if crop_to_content:
@@ -2718,6 +2727,32 @@ class KiCADInterface:
             head_str = str(head) if isinstance(head, Symbol) else None
             if head_str in wanted_first_token:
                 collect_at(item)
+                # Sheet blocks have an explicit (size w h) — extend the
+                # bbox by the sheet rectangle's extent, not just its
+                # top-left anchor, so the rendered viewBox covers the
+                # whole sheet body.
+                if head_str == "sheet":
+                    sheet_x = sheet_y = None
+                    sheet_w = sheet_h = None
+                    for sub in item[1:]:
+                        if not isinstance(sub, list) or not sub:
+                            continue
+                        if sub[0] == Symbol("at") and len(sub) >= 3:
+                            try:
+                                sheet_x = float(sub[1])
+                                sheet_y = float(sub[2])
+                            except (TypeError, ValueError):
+                                pass
+                        elif sub[0] == Symbol("size") and len(sub) >= 3:
+                            try:
+                                sheet_w = float(sub[1])
+                                sheet_h = float(sub[2])
+                            except (TypeError, ValueError):
+                                pass
+                    if sheet_x is not None and sheet_w is not None:
+                        xs.append(sheet_x + sheet_w)
+                    if sheet_y is not None and sheet_h is not None:
+                        ys.append(sheet_y + sheet_h)
 
         if not xs or not ys:
             return None
