@@ -347,6 +347,65 @@ class TestSnapPositions:
             f"R1/1 and R2/1 still coincident at {wp1} after snap"
         )
 
+    def test_multi_unit_pin_stub_end_collision_resolved(self):
+        """Two units of one multi-unit symbol must not place pin endpoints
+        OR stub-ends on top of another unit's pin endpoint.  Repro from
+        the BMS run: Q1 unit 1's drain stub-end landed exactly on Q1
+        unit 2's source pin (different units of Q1, both at x=59.69),
+        which would have merged FET_MID and SRP nets at rewire time.
+        """
+        from commands.autoplacer import Component, Pin, Session, snap_positions
+
+        sess = Session(schematic_path=Path("/tmp/synthetic.kicad_sch"))
+
+        def _q1_unit(unit: int, x: float, y: float) -> Component:
+            return Component(
+                ref="Q1", unit=unit, lib_id="Test:DualFET",
+                x=x, y=y, rotation=0,
+                mirror_x=False, mirror_y=False,
+                # Pin 7/8 (D, top — outward UP), pin 3 (S, bottom — outward DOWN).
+                pins={
+                    "7": Pin("7", "D", local_x=2.54, local_y=5.08, lib_angle=270),
+                    "8": Pin("8", "D", local_x=2.54, local_y=5.08, lib_angle=270),
+                    "3": Pin("3", "S", local_x=2.54, local_y=-5.08, lib_angle=90),
+                },
+                bbox_w=12.7, bbox_h=12.7,
+            )
+
+        # Place Q1__u1 12.7mm below Q1__u2.  Pin 7/8 on u1 at world
+        # (x+2.54, y-5.08) = (102.54, 92.07).  Stub end (outward up by
+        # 2.54mm) at (102.54, 89.53).  Pin 3 on u2 at world (x+2.54,
+        # y+5.08) = (102.54, 89.53) — SAME COORD as u1's stub end.
+        sess.components["Q1__u1"] = _q1_unit(1, 100.0, 97.15)
+        sess.components["Q1__u2"] = _q1_unit(2, 100.0, 84.45)
+
+        # Verify the collision exists pre-snap (sanity).
+        u1_stub_end = (
+            sess.components["Q1__u1"].world_pin_xy("7")[0],
+            sess.components["Q1__u1"].world_pin_xy("7")[1] - 2.54,
+        )
+        u2_pin3 = sess.components["Q1__u2"].world_pin_xy("3")
+        assert (
+            abs(u1_stub_end[0] - u2_pin3[0]) < 0.01
+            and abs(u1_stub_end[1] - u2_pin3[1]) < 0.01
+        ), f"setup invariant: u1 stub-end {u1_stub_end} should equal u2 pin3 {u2_pin3}"
+
+        snap_positions(sess)
+
+        # After snap, the stub-end and pin coord must no longer coincide.
+        u1_stub_end = (
+            sess.components["Q1__u1"].world_pin_xy("7")[0],
+            sess.components["Q1__u1"].world_pin_xy("7")[1] - 2.54,
+        )
+        u2_pin3 = sess.components["Q1__u2"].world_pin_xy("3")
+        assert not (
+            abs(u1_stub_end[0] - u2_pin3[0]) < 0.01
+            and abs(u1_stub_end[1] - u2_pin3[1]) < 0.01
+        ), (
+            f"u1 stub-end {u1_stub_end} still coincides with u2 pin3 "
+            f"{u2_pin3} after snap — would merge FET_MID and SRP at rewire"
+        )
+
     def test_multipass_resolves_chained_overlaps(self):
         """If pair (a, b) nudges b right and the new b position now
         overlaps with a previously-OK pair (c, b) where c < a in the

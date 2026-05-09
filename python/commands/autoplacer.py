@@ -780,6 +780,14 @@ def snap_positions(sess: Session) -> None:
             return None
         return b if not b.pinned else a
 
+    def _same_unit(a: "Component", b: "Component") -> bool:
+        # Two components are considered the same physical instance iff
+        # they share BOTH ref and unit.  Multi-unit symbols have one
+        # Component per unit (Q1__u1 vs Q1__u2): different units of the
+        # same ref are physically distinct and must NOT overlap, even
+        # though the bare reference matches.
+        return a.ref == b.ref and a.unit == b.unit
+
     # Bbox-overlap pass — repeat until stable.
     for _ in range(MAX_PASSES):
         moved = False
@@ -787,8 +795,8 @@ def snap_positions(sess: Session) -> None:
             for kj in keys[i + 1 :]:
                 a = sess.components[ki]
                 b = sess.components[kj]
-                if a.ref == b.ref:
-                    continue  # same-ref multi-unit — exempt
+                if _same_unit(a, b):
+                    continue  # same physical instance — exempt
                 target = _pick_target(a, b)
                 if target is None:
                     continue
@@ -807,34 +815,56 @@ def snap_positions(sess: Session) -> None:
         if not moved:
             break
 
-    # Pin-coord-collision safety pass — same multi-pass shape so a
-    # nudge that creates a *new* coincident pair gets resolved next.
-    def _pin_world_iu(c: "Component", pn: str) -> Optional[Tuple[int, int]]:
+    # Pin-coord-collision safety pass.  Catches two flavours of net-merge
+    # bug at the placement level:
+    #   * Two pins of distinct components share a world coord — connect_pins
+    #     would wire them under each net, fusing the nets in KiCad.
+    #   * One pin's *stub end* (pin endpoint + 2.54mm in the outward
+    #     direction; this is where Phase 3 of connect_pins drops a label)
+    #     coincides with another pin's endpoint — KiCad would treat the
+    #     stub as ending on that pin, again merging nets.  Surfaced
+    #     2026-05-10 on a BMS run where Q1 unit 1's drain stub landed
+    #     exactly on Q1 unit 2's source pin (pin S2 on net SRP), pulling
+    #     the FET_MID drain net into SRP.
+    # Same-physical-instance pairs (same ref AND same unit; e.g. duplicate-
+    # pad pins 7/8 on FDS9926A unit 1) are exempt because their pins are
+    # *meant* to share a coord.
+    def _key_positions(c: "Component", pn: str) -> List[Tuple[int, int]]:
         wp = c.world_pin_xy(pn)
         if wp is None:
-            return None
-        return (round(wp[0] * 1000), round(wp[1] * 1000))
+            return []
+        out = [(round(wp[0] * 1000), round(wp[1] * 1000))]
+        outward = c.world_pin_outward_angle(pn)
+        if outward is not None:
+            rad = math.radians(outward)
+            stub_end = (
+                wp[0] + 2.54 * math.cos(rad),
+                wp[1] - 2.54 * math.sin(rad),
+            )
+            out.append((round(stub_end[0] * 1000), round(stub_end[1] * 1000)))
+        return out
 
     for _ in range(MAX_PASSES):
         moved = False
-        # Group pin-world-coords by (x_um, y_um).
         pin_coords: Dict[Tuple[int, int], List[Tuple[str, str]]] = {}
         for c in sess.components.values():
             for pn in c.pins:
-                key_iu = _pin_world_iu(c, pn)
-                if key_iu is None:
-                    continue
-                pin_coords.setdefault(key_iu, []).append((c.key, pn))
+                for pos in _key_positions(c, pn):
+                    pin_coords.setdefault(pos, []).append((c.key, pn))
         for occupants in pin_coords.values():
-            unique_refs = {sess.components[k].ref for k, _ in occupants}
-            if len(unique_refs) <= 1:
-                # Either single occupant, or multiple pins of the SAME
-                # symbol unit (e.g. duplicate-pad pins on FDS9926A) —
-                # no net-merge risk.
+            distinct_units = {
+                (sess.components[k].ref, sess.components[k].unit)
+                for k, _ in occupants
+            }
+            if len(distinct_units) <= 1:
+                # All occupants are the SAME physical instance (e.g.
+                # FDS9926A pin 7 and pin 8, both on Q1 unit 1) —
+                # safe by design.
                 continue
-            # Multiple distinct refs at the same pin coord.  Nudge
-            # one of them — pick the alphabetically-last non-pinned
-            # ref so the deterministic order matches the bbox pass.
+            # Multiple distinct (ref, unit) pairs at the same world
+            # coord → real net-merge risk.  Nudge one mobile component;
+            # pick the alphabetically-last non-pinned key so the order
+            # matches the bbox pass.
             non_pinned = [
                 k for k, _ in occupants if not sess.components[k].pinned
             ]

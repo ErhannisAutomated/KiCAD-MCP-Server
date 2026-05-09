@@ -72,6 +72,24 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-10)
 
+- **Autoplacer: multi-unit pin/stub-end collision safety.**
+  `snap_positions`'s same-ref blanket exemption let two units of one
+  multi-unit symbol overlap, and the pin-coord-collision pass only
+  checked pin endpoints (not stub-end positions).  Surfaced on a BMS
+  run where Q1 unit 1's drain stub-end (pin endpoint + 2.54mm outward,
+  where Phase 3 lays the label) landed exactly on Q1 unit 2's source
+  pin endpoint, which was on net SRP — so the rewire merged FET_MID
+  and SRP nets through the stub.  Two changes:
+  1. Bbox-overlap and pin-coord passes now exempt pairs by `(ref,
+     unit)` rather than `ref` alone.  Different units of one symbol
+     are physically distinct components and must separate.
+  2. Pin-coord pass now considers each pin's *stub-end* position
+     (pin + 2.54mm in the outward direction) in addition to the pin
+     endpoint, so endpoint↔stub-end collisions are caught.
+  Test in `test_autoplacer.py::TestSnapPositions::
+  test_multi_unit_pin_stub_end_collision_resolved` (verified to fail
+  on the pre-fix code).
+
 - **Autoplacer real-time visualizer** (`commands/autoplacer_viz.py`):
   matplotlib-backed live view of an autoplacer Session.  Designed for
   interactive parameter tuning in an iPython session — open with
