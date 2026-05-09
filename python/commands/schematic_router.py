@@ -435,8 +435,14 @@ def _build_grid_obstacles(
                 ref = sym.get("reference", "")
                 if not ref or ref.startswith("_TEMPLATE"):
                     continue
-                if ref in own_refs:
-                    continue  # own symbols' bodies aren't obstacles for their own pins
+                # NOTE: own_refs is *not* skipped — the route must not pass
+                # through its own component's body even though it starts/
+                # ends on its pins.  cell_p1 and cell_p2 (the actual pin
+                # endpoints) are re-allowed at the end of this function so
+                # the start/goal cells stay reachable.  Without this rule,
+                # a route from pin A of a tall symbol can take a path
+                # back over the symbol body to reach a remote pin —
+                # legal electrically but ugly.
                 lib_data = lib_defs.get(sym.get("lib_id", ""), {})
                 pin_defs = lib_data.get("pins", {})
                 graphics_points = lib_data.get("graphics_points", [])

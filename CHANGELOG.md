@@ -112,6 +112,27 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-10)
 
+- **`connect_pins(auto)` lost the net label entirely on duplicate-pad
+  multi-unit pins.**  `connect_pins` for a net like FET_MID
+  (FDS9926A drain pads where pin 7 = pin 8 at the same lib coord)
+  returned `success=True` for the degenerate Q1/7→Q1/8 route with
+  `segments=[]`, then added both pins to `wired_pin_set`.  Phase 3
+  skipped them ("already wired"), and Phase 5 had no segments to
+  operate on (`if not segs: continue`).  Net result: the entire
+  FET_MID name vanished from the schematic.  Same root cause hit
+  charger USB_VBUS where J1's A4/A9/B4/B9 are all at the same coord.
+  Fix: when `result.success and not result.segments`, `continue`
+  without adding pins to `wired_pin_set`; Phase 3 then labels each
+  pin individually so the net name is preserved.
+
+- **Schematic router could route through its own component's bbox.**
+  `_build_grid_obstacles` skipped the route's own ref-pair from the
+  bbox-blocking pass, so a wire leaving pin A of a tall symbol could
+  double back through the symbol body on its way to pin B.  Drop the
+  skip — the actual pin-endpoint cells are still re-allowed at the
+  end of the function (`discard(cell_p1)` / `discard(cell_p2)`), so
+  start/goal stay reachable but the body proper now blocks traversal.
+
 - **`WireManager.add_wire` didn't split a new wire at existing wire
   endpoints on its interior.** The existing logic split *existing*
   wires at the new wire's endpoints, but the symmetric case — a new

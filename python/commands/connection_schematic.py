@@ -731,6 +731,14 @@ class ConnectionManager:
                         extra_own_endpoints=extras,
                     )
                     if result.success:
+                        if not result.segments:
+                            # Degenerate route — both pins resolved to the
+                            # same world coord (e.g. duplicate-pad pins on a
+                            # multi-unit symbol like FDS9926A 5/6, 7/8).  No
+                            # wire was emitted, so don't claim the pins as
+                            # "wired" — let Phase 3 add a label-with-stub
+                            # for each pin so the net is named.
+                            continue
                         # Apply the wire segments. Re-collect obstacles after
                         # so subsequent pairs see the new wire as an obstacle.
                         for (start, end) in result.segments:
