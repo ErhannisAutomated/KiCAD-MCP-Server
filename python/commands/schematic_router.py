@@ -465,11 +465,36 @@ def _build_grid_obstacles(
         except Exception as e:
             logger.warning(f"_build_grid_obstacles: bbox pass failed: {e}")
 
-    # 2) Other-component pin endpoints — block their cell.
+    # 2) Other-component pin endpoints — block their cell AND reserve a
+    # "stub zone" of 2 cells in the pin's outward direction.  Without
+    # the stub-zone reservation, a route can pass through cells where
+    # a future label-stub will go (Phase 3 of connect_pins lays a
+    # 2.54mm stub straight outward from each labeled pin).  The result
+    # is "wire crossing stub" geometry — electrically OK on its own,
+    # but if any subsequent edit lands an endpoint on the crossing
+    # point, sync_junctions will merge two unrelated nets.  Reserving
+    # the cells up-front prevents the crossing from forming.
     for pin_pt in obstacles.other_pins:
         cell = _world_to_cell(pin_pt, origin, snap)
         if min_x <= cell[0] <= max_x and min_y <= cell[1] <= max_y:
             grid.blocked_cells.add(cell)
+        angle = obstacles.pin_angles.get(
+            (round(pin_pt[0] * 1000), round(pin_pt[1] * 1000))
+        )
+        if angle is None:
+            continue
+        # Outward direction in screen coords.  pin_locator returns angle
+        # in lib convention (0=right, 90=up); screen formula is
+        # (cos α, -sin α).  We round to ±1/0 to get a unit grid step.
+        rad = math.radians(angle)
+        dx_step = round(math.cos(rad))
+        dy_step = -round(math.sin(rad))
+        if dx_step == 0 and dy_step == 0:
+            continue
+        for steps in (1, 2):
+            sz_cell = (cell[0] + dx_step * steps, cell[1] + dy_step * steps)
+            if min_x <= sz_cell[0] <= max_x and min_y <= sz_cell[1] <= max_y:
+                grid.blocked_cells.add(sz_cell)
 
     # 3) Other-net labels — block the cell. Same-net labels are fine.
     for (lpos, lname) in obstacles.other_labels:
@@ -832,15 +857,26 @@ class Obstacles:
     other_bboxes: List[Tuple[Tuple[float, float, float, float], str]] = field(
         default_factory=list
     )
+    # Pin outward angles, keyed by pin endpoint (rounded to int micrometres
+    # for hashability).  Used to reserve "stub zones": the 1-2 grid cells
+    # outward of each pin where a label-stub would go if connect_to_net
+    # ran on that pin.  Blocking those cells in the routing grid prevents
+    # routes from crossing potential stubs even before the stubs exist.
+    pin_angles: Dict[Tuple[int, int], float] = field(default_factory=dict)
 
 
 def _collect_pin_endpoints(
     schematic_path: Path, exclude: Set[Tuple[str, str]]
-) -> List[Point]:
-    """Return endpoints of every pin on every component, except those in *exclude*.
+) -> Tuple[List[Point], Dict[Tuple[int, int], float]]:
+    """Return endpoints + outward-angle map for every pin on every component,
+    except those in *exclude*.
 
     *exclude* is a set of (ref, pin_number_string) tuples — typically the two
     pins we are intentionally connecting.
+
+    The angles dict maps the pin's int-micrometre cell key to its outward
+    angle in degrees (lib convention, 0=right/90=up/180=left/270=down).
+    Used by `_build_grid_obstacles` to reserve stub zones.
     """
     # Lazy import to avoid a circular dep at module load time.
     from commands.pin_locator import PinLocator
@@ -848,11 +884,12 @@ def _collect_pin_endpoints(
 
     locator = PinLocator()
     out: List[Point] = []
+    angles: Dict[Tuple[int, int], float] = {}
     try:
         sch = Schematic(str(schematic_path))
     except Exception as e:
         logger.warning(f"_collect_pin_endpoints: could not load {schematic_path}: {e}")
-        return out
+        return out, angles
 
     for symbol in getattr(sch, "symbol", []):
         if not hasattr(symbol.property, "Reference"):
@@ -867,8 +904,15 @@ def _collect_pin_endpoints(
         for pin_num, coords in (pins or {}).items():
             if (ref, str(pin_num)) in exclude:
                 continue
-            out.append((float(coords[0]), float(coords[1])))
-    return out
+            pt = (float(coords[0]), float(coords[1]))
+            out.append(pt)
+            try:
+                angle = locator.get_pin_angle(schematic_path, ref, str(pin_num))
+            except Exception:
+                angle = None
+            if angle is not None:
+                angles[(round(pt[0] * 1000), round(pt[1] * 1000))] = float(angle)
+    return out, angles
 
 
 def _collect_labels(schematic_path: Path) -> List[Tuple[Point, str]]:
@@ -959,11 +1003,13 @@ def _collect_bboxes(
 def collect_obstacles(
     schematic_path: Path, exclude_pins: Set[Tuple[str, str]]
 ) -> Obstacles:
+    pins, angles = _collect_pin_endpoints(schematic_path, exclude_pins)
     return Obstacles(
-        other_pins=_collect_pin_endpoints(schematic_path, exclude_pins),
+        other_pins=pins,
         other_labels=_collect_labels(schematic_path),
         other_wires=_collect_wires(schematic_path),
         other_bboxes=_collect_bboxes(schematic_path),
+        pin_angles=angles,
     )
 
 
@@ -1204,6 +1250,30 @@ def check_spurious_connections(
                 continue  # crossing same-net is intended (a tee/junction goes here)
             if _segments_strictly_cross(seg, ow):
                 return "candidate wire perpendicularly crosses unrelated wire"
+
+        # 7. Stub-zone crossing.  Each unrelated pin has an implicit 2.54mm
+        # stub running outward (Phase 3 of connect_pins lays it as a
+        # label-stub).  Routes shouldn't cross where that stub will be —
+        # the post-route stub would otherwise overlay the route, creating
+        # the "wire crosses stub" pattern even before the stub is laid.
+        for opin in obstacles.other_pins:
+            if _is_own(opin):
+                continue
+            angle = obstacles.pin_angles.get(
+                (round(opin[0] * 1000), round(opin[1] * 1000))
+            )
+            if angle is None:
+                continue
+            rad = math.radians(angle)
+            stub_end = (
+                opin[0] + 2.54 * math.cos(rad),
+                opin[1] - 2.54 * math.sin(rad),
+            )
+            if _segments_strictly_cross(seg, (opin, stub_end)):
+                return (
+                    f"candidate wire crosses stub zone of pin at "
+                    f"({opin[0]:.2f},{opin[1]:.2f})"
+                )
 
     return None
 

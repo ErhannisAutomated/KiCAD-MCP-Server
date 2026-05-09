@@ -243,6 +243,64 @@ class TestCheckSpuriousRule6_WireCrossing:
 
 
 @pytest.mark.unit
+class TestCheckSpuriousRule7_StubZoneCrossing:
+    """Rule 7: candidate wire must not cross a pin's outward stub zone."""
+
+    def _make_obstacles(self, pin_pt, angle):
+        from commands.schematic_router import Obstacles
+        ob = Obstacles(
+            other_pins=[pin_pt],
+            other_labels=[],
+            other_wires=[],
+            other_bboxes=[],
+        )
+        ob.pin_angles[(round(pin_pt[0] * 1000), round(pin_pt[1] * 1000))] = angle
+        return ob
+
+    def test_route_crossing_stub_zone_is_rejected(self):
+        # Pin at (10, 40), outward angle 90 (lib up = screen -y).
+        # Stub zone runs from (10, 40) to (10, 37.46) (40 - 2.54).
+        # A horizontal candidate at y=38.5 from x=0 to x=20 crosses the stub.
+        ob = self._make_obstacles((10.0, 40.0), 90.0)
+        candidate = [((0.0, 38.5), (20.0, 38.5))]
+        result = check_spurious_connections(candidate, ob, target_net="NET_A")
+        assert result is not None
+        assert "stub" in result, result
+
+    def test_route_far_from_stub_zone_is_allowed(self):
+        # Pin at (10, 40), outward up; stub zone y in [37.46, 40].
+        # Horizontal candidate at y=20 — well clear of the stub zone.
+        ob = self._make_obstacles((10.0, 40.0), 90.0)
+        candidate = [((0.0, 20.0), (20.0, 20.0))]
+        result = check_spurious_connections(candidate, ob, target_net="NET_A")
+        assert result is None
+
+    def test_pin_with_no_angle_doesnt_block_routes(self):
+        # If pin_angles doesn't have an entry for this pin (older obstacle
+        # collection paths), rule 7 must skip cleanly.
+        from commands.schematic_router import Obstacles
+        ob = Obstacles(
+            other_pins=[(10.0, 40.0)],
+            other_labels=[], other_wires=[], other_bboxes=[],
+        )
+        # No pin_angles entry; the candidate would only fail rule 1 if it
+        # passed THROUGH the pin endpoint, which it doesn't.
+        candidate = [((0.0, 38.5), (20.0, 38.5))]
+        result = check_spurious_connections(candidate, ob, target_net="NET_A")
+        assert result is None
+
+    def test_own_pin_not_blocked(self):
+        # Own pins (the route's own endpoints) are exempt — the route's own
+        # stub zone shouldn't reject the route reaching its own pin.
+        ob = self._make_obstacles((10.0, 40.0), 90.0)
+        candidate = [((0.0, 38.5), (20.0, 38.5))]
+        result = check_spurious_connections(
+            candidate, ob, target_net="NET_A", own_endpoints=((10.0, 40.0),)
+        )
+        assert result is None
+
+
+@pytest.mark.unit
 class TestIsPowerNet:
     def test_default_powers(self):
         for net in ("VBUS", "GND", "VCC", "+3V3", "+5V"):

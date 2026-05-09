@@ -72,6 +72,39 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-10)
 
+- **Schematic router rule 7: stub-zone reservation.**  Every pin now
+  has an implicit 2.54 mm "stub zone" running outward from its
+  endpoint along the pin's outward angle.  Routes for OTHER nets
+  can't traverse the stub zone — they'd otherwise create the "wire
+  crosses stub" pattern when Phase 3 of `connect_pins` lays the
+  label-stub.  Implementation:
+  1. `Obstacles` gains a `pin_angles: Dict[(int_um_x, int_um_y), float]`
+     field.  `_collect_pin_endpoints` populates it via
+     `PinLocator.get_pin_angle` for every collected pin.
+  2. `_build_grid_obstacles` blocks 1 and 2 cells outward of every
+     non-own pin — A* routes can't enter the stub zone.
+  3. `check_spurious_connections` adds rule 7: candidate segment
+     must not strictly cross any pin's outward stub segment.  Covers
+     the shape-router (straight/L/U) which doesn't go through the A*
+     grid.  Tests in
+     `tests/test_schematic_router.py::TestCheckSpuriousRule7_StubZoneCrossing`
+     (4 cases: cross-rejected, far-allowed, no-angle-skips, own-pin-exempt).
+
+  Knock-on: `connect_to_net` (Phase 3 of connect_pins) now runs the
+  prospective stub through the spurious-connection guard before
+  laying it.  If a 2.54 mm stub would create a crossing, lengths up
+  to 6.35 mm are tried in turn; falls back to 2.54 mm with an info
+  log if no length fits (pre-existing behaviour preserved).
+
+  Also: `rewire_session` now scans the final schematic for
+  unrelated-net wire crossings without junctions and returns a list
+  of findings as `unrelated_crossings` in the result dict.  Each
+  is electrically harmless on its own (KiCad treats no-junction
+  crossings as not connected) but flags places where any future
+  endpoint landing at the crossing point would silently merge two
+  unrelated nets.  Verified end-to-end: BMS, charger, and buckboost
+  all produce 0 crossings post-fix (down from 4 / 1 / 1).
+
 - **Autoplacer: preserve no_connect markers + centre bbox on page.**
   Two complementary tweaks at apply time:
 

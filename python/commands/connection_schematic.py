@@ -106,10 +106,52 @@ class ConnectionManager:
             import math as _math
 
             angle_rad = _math.radians(pin_angle_deg)
+            cos_a = _math.cos(angle_rad)
+            sin_a = _math.sin(angle_rad)
+
+            # Try increasing stub lengths until the resulting (pin → stub_end)
+            # segment passes the spurious-connection guard.  If a 2.54 mm stub
+            # would cross an unrelated wire (the "stub crosses route" pattern
+            # we want to avoid), a 5.08 mm stub may clear it.  Cap at 5 grid
+            # steps and fall back to 2.54 mm if no length fits — the fallback
+            # matches the pre-guard behaviour so callers don't hard-fail.
+            from commands.schematic_router import (
+                check_spurious_connections, collect_obstacles,
+            )
+
             stub_end = [
-                round(pin_loc[0] + 2.54 * _math.cos(angle_rad), 4),
-                round(pin_loc[1] - 2.54 * _math.sin(angle_rad), 4),
+                round(pin_loc[0] + 2.54 * cos_a, 4),
+                round(pin_loc[1] - 2.54 * sin_a, 4),
             ]
+            try:
+                obstacles = collect_obstacles(
+                    schematic_path,
+                    exclude_pins={(component_ref, str(pin_name))},
+                )
+                pin_pt = (float(pin_loc[0]), float(pin_loc[1]))
+                for length_mm in (2.54, 3.81, 5.08, 6.35):
+                    cand_end = (
+                        round(pin_loc[0] + length_mm * cos_a, 4),
+                        round(pin_loc[1] - length_mm * sin_a, 4),
+                    )
+                    bad = check_spurious_connections(
+                        [(pin_pt, cand_end)],
+                        obstacles,
+                        net_name,
+                        own_endpoints=(pin_pt, cand_end),
+                    )
+                    if bad is None:
+                        stub_end = [cand_end[0], cand_end[1]]
+                        break
+                else:
+                    logger.info(
+                        f"connect_to_net: no clear stub direction for "
+                        f"{component_ref}/{pin_name} on net {net_name}; "
+                        f"falling back to 2.54mm (visual crossing possible, "
+                        f"electrically OK)"
+                    )
+            except Exception as e:
+                logger.debug(f"connect_to_net: stub guard skipped ({e})")
 
             # Create wire stub using WireManager
             wire_success = WireManager.add_wire(schematic_path, pin_loc, stub_end)

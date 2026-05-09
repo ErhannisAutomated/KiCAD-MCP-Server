@@ -1140,6 +1140,8 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
         if _WM.add_no_connect(schematic_path, list(wp)):
             nc_added += 1
 
+    crossings = _scan_unrelated_wire_crossings(schematic_path)
+
     return {
         "nets_rewired": nets_rewired,
         "pairs_wired": pairs_wired,
@@ -1147,9 +1149,110 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
         "pins_connected": pins_connected,
         "pins_skipped": skipped,
         "no_connects_added": nc_added,
+        "unrelated_crossings": crossings,
         "method": "connect_pins(auto)",
         "per_net": per_net,
     }
+
+
+def _scan_unrelated_wire_crossings(schematic_path: Path) -> List[Dict[str, Any]]:
+    """Walk every pair of perpendicular wires and find interior crossings
+    where neither wire has a junction at the crossing point.  Each
+    finding is electrically harmless on its own (KiCad's wire graph
+    treats no-junction crossings as not connected) but flags places
+    where any future endpoint landing at the crossing point would
+    silently merge two unrelated nets.  Returned as a list of dicts
+    with point + endpoint info; callers (and tests) can surface them.
+    """
+    try:
+        text = Path(schematic_path).read_text()
+        sexp = sexpdata.loads(text)
+    except Exception:
+        return []
+    wires: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+    label_at: Dict[Tuple[float, float], List[str]] = {}
+    junctions: set = set()
+    for top in sexp:
+        if not (isinstance(top, list) and top):
+            continue
+        head = str(top[0])
+        if head == "wire":
+            for sub in top[1:]:
+                if isinstance(sub, list) and str(sub[0]) == "pts":
+                    pts = []
+                    for xy in sub[1:]:
+                        if (
+                            isinstance(xy, list) and str(xy[0]) == "xy"
+                            and len(xy) >= 3
+                        ):
+                            try:
+                                pts.append(
+                                    (round(float(xy[1]), 2), round(float(xy[2]), 2))
+                                )
+                            except (TypeError, ValueError):
+                                pass
+                    if len(pts) == 2:
+                        wires.append((pts[0], pts[1]))
+        elif head == "label":
+            name = top[1] if isinstance(top[1], str) else ""
+            for sub in top[2:]:
+                if isinstance(sub, list) and str(sub[0]) == "at" and len(sub) >= 3:
+                    try:
+                        pos = (round(float(sub[1]), 2), round(float(sub[2]), 2))
+                    except (TypeError, ValueError):
+                        continue
+                    label_at.setdefault(pos, []).append(name)
+                    break
+        elif head == "junction":
+            for sub in top[1:]:
+                if isinstance(sub, list) and str(sub[0]) == "at" and len(sub) >= 3:
+                    try:
+                        junctions.add(
+                            (round(float(sub[1]), 2), round(float(sub[2]), 2))
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                    break
+
+    def _wire_label(w):
+        a, b = w
+        return label_at.get(a, []) + label_at.get(b, [])
+
+    EPS = 1e-3
+    findings: List[Dict[str, Any]] = []
+    for i, w1 in enumerate(wires):
+        for w2 in wires[i + 1:]:
+            a, b = w1
+            c, d = w2
+            v1 = a[0] == b[0]
+            h1 = a[1] == b[1]
+            v2 = c[0] == d[0]
+            h2 = c[1] == d[1]
+            if not ((v1 and h2) or (h1 and v2)):
+                continue
+            if v1 and h2:
+                x = a[0]; y = c[1]
+                x1, x2 = sorted((c[0], d[0])); y1, y2 = sorted((a[1], b[1]))
+            else:
+                x = c[0]; y = a[1]
+                x1, x2 = sorted((a[0], b[0])); y1, y2 = sorted((c[1], d[1]))
+            if not (x1 + EPS < x < x2 - EPS and y1 + EPS < y < y2 - EPS):
+                continue
+            pt = (round(x, 2), round(y, 2))
+            if pt in junctions:
+                continue
+            n1 = _wire_label(w1)
+            n2 = _wire_label(w2)
+            if n1 and n2 and set(n1) & set(n2):
+                continue
+            findings.append({
+                "point": list(pt),
+                "wire_a": [list(a), list(b)],
+                "wire_a_labels": n1,
+                "wire_b": [list(c), list(d)],
+                "wire_b_labels": n2,
+            })
+    return findings
 
 
 # ----------------------------------------------------------------------
