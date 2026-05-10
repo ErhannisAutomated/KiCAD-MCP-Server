@@ -896,23 +896,17 @@ class ConnectionManager:
                 ),
             }
 
-        # Phase 5 — auto-label: ensure EVERY just-laid wire chain carries
-        # a `resolved_net` label.  Each wired pair gets checked individually:
-        # if its segments are reachable (via wire/T-junction connectivity)
-        # from an existing target_net label, no new label is needed for that
-        # pair.  Otherwise we add a label at the end of the pair's first
-        # segment and re-compute the reachability set so subsequent pairs in
-        # the same chain see the new label.
-        #
-        # Why per-pair, not just one global label: if the autorouter formed
-        # two disjoint chains (e.g. wired pair P0↔P1 in one corner of the
-        # sheet and pair P2↔P3 in another), labeling only the first would
-        # leave the second on an unlabeled "ghost" sub-net.  KiCad would
-        # auto-name it `Net-(C2-Pad1)` etc., silently fragmenting the named
-        # net.  This was the root cause of three orphaned cap chains
-        # (C27↔C28 BAT+, C25↔C26 BB_VCC, C29↔C30 V12_OUT) discovered when
-        # the power_module flat schematic was partitioned across sheets.
+        # Phase 5 — auto-label orphan chains.  Runs BEFORE Phase 3 in
+        # the file but accounts for Phase 3's future contributions:
+        # any pin that Phase 3 will stub-and-label (= unwired + not
+        # already on a different net) is treated as a "future label"
+        # whose stub will sit on the chain's pin endpoint, so that
+        # chain doesn't need a Phase 5 label.  Without this lookahead,
+        # nets like FET_MID (where Phase 3 labels Q1's duplicate-pad
+        # pins Q1/7+8 and Q1/5+6) end up with both Phase 5 AND Phase 3
+        # labels on the same chain.
         auto_labels_added: List[List[float]] = []
+        auto_label_added: Optional[List[float]] = None
         if wired_pairs and resolved_net:
             from commands.schematic_router import (
                 _classify_wires_by_net,
@@ -942,33 +936,99 @@ class ConnectionManager:
 
             reachable_endpoints = _label_reachable_endpoints()
 
-            # First pass: collect all orphan chains (wired pairs not
-            # reachable from any existing target_net label).  Don't
-            # label yet — we want to choose normal vs branch-stub
-            # depending on whether this net ends up with multiple
-            # chains.  A single-chain net just gets an in-line label
-            # (the chain IS the whole net here, so there's no
-            # "continues elsewhere"); multi-chain nets get a branch-
-            # stub per chain to mark each as a continuation point.
-            orphan_pairs: List[Dict[str, Any]] = []
-            for wp in wired_pairs:
-                pair_reachable = False
-                for (a, b) in wp["segments"]:
-                    for endpoint in (a, b):
-                        if _key(endpoint) in reachable_endpoints:
-                            pair_reachable = True
-                            break
-                    if pair_reachable:
-                        break
-                if not pair_reachable:
-                    orphan_pairs.append(wp)
+            # Future Phase 3 labels: pins that Phase 3 will stub-and-
+            # label (not in wired_pin_set, not already on a different
+            # net).  Each such pin's endpoint becomes a label-reachable
+            # cell after Phase 3 runs, so a chain touching that pin
+            # endpoint doesn't need a Phase 5 label of its own.  We
+            # use the same coord-key normalisation as reachable_endpoints
+            # so the chain-reachability check below treats them
+            # uniformly.
+            phase3_future_labels: Set[Tuple[int, int]] = set()
+            if _locator_for_endpoints is not None:
+                for p in pins:
+                    ref, pin = p.get("ref", ""), p.get("pin", "")
+                    if not (ref and pin):
+                        continue
+                    key = f"{ref}/{pin}"
+                    if key in wired_pin_set:
+                        continue
+                    cur = existing.get(key)
+                    if cur is not None and cur != resolved_net:
+                        # Will fail in Phase 3, not labelled.
+                        continue
+                    pt = pin_endpoints.get(key)
+                    if pt is not None:
+                        phase3_future_labels.add(_key(pt))
+            reachable_endpoints |= phase3_future_labels
 
-            use_branch_stubs = len(orphan_pairs) >= 2
+            # Group wired_pairs into chains.  MST routing typically
+            # produces one connected wire-graph per net (every pair
+            # shares an endpoint with the previous one), but we have
+            # to detect that explicitly so Phase 5 doesn't label every
+            # *pair* as a separate orphan when they're really one
+            # chain.  Use union-find over pair indices, unioning two
+            # pairs whenever they share a wire endpoint coord.
+            n_pairs = len(wired_pairs)
+            _parent = list(range(n_pairs))
+
+            def _find(x: int) -> int:
+                while _parent[x] != x:
+                    _parent[x] = _parent[_parent[x]]
+                    x = _parent[x]
+                return x
+
+            def _union(a: int, b: int) -> None:
+                ra, rb = _find(a), _find(b)
+                if ra != rb:
+                    _parent[ra] = rb
+
+            ep_to_pair: Dict[Tuple[int, int], int] = {}
+            for i, wp in enumerate(wired_pairs):
+                for (a, b) in wp["segments"]:
+                    for ep in (a, b):
+                        k = _key(ep)
+                        if k in ep_to_pair:
+                            _union(i, ep_to_pair[k])
+                        else:
+                            ep_to_pair[k] = i
+
+            # Group pairs by chain root.
+            chains: Dict[int, List[Dict[str, Any]]] = {}
+            for i, wp in enumerate(wired_pairs):
+                chains.setdefault(_find(i), []).append(wp)
+
+            # For each chain, decide if it's reachable from an existing
+            # target_net label (no relabel needed) or an orphan.
+            orphan_chains: List[List[Dict[str, Any]]] = []
+            for chain_pairs in chains.values():
+                chain_reachable = False
+                for wp in chain_pairs:
+                    for (a, b) in wp["segments"]:
+                        for ep in (a, b):
+                            if _key(ep) in reachable_endpoints:
+                                chain_reachable = True
+                                break
+                        if chain_reachable:
+                            break
+                    if chain_reachable:
+                        break
+                if not chain_reachable:
+                    orphan_chains.append(chain_pairs)
+
+            use_branch_stubs = len(orphan_chains) >= 2
             from commands.schematic_router import (
                 check_spurious_connections,
             )
 
-            for wp in orphan_pairs:
+            for chain_pairs in orphan_chains:
+                # Pick a representative pair: prefer one with multiple
+                # segments (gives a corner to branch off), else fall
+                # back to the first.
+                wp = next(
+                    (wp for wp in chain_pairs if len(wp["segments"]) >= 2),
+                    chain_pairs[0],
+                )
                 segs = wp["segments"]
                 if not segs:
                     continue
