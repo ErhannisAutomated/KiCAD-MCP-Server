@@ -1196,6 +1196,21 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
                 continue
             pins_per_net.setdefault(name, []).append({"ref": comp.ref, "pin": pn})
 
+    # Compute a per-call max_len that scales with the placement bbox.
+    # `connect_pins` defaults to 80 mm — fine for small boards but
+    # forces label-fallback on every long route across a sheet with a
+    # big chip (BMS U1 has pin-to-pin direct distances of 100+ mm).
+    # Use 2 × the placement diagonal + 40 mm: enough headroom for one
+    # full detour around the placement, still rejects pathological
+    # routes that wander all over the sheet.
+    if sess.components:
+        xs = [c.x for c in sess.components.values()]
+        ys = [c.y for c in sess.components.values()]
+        diagonal = math.hypot(max(xs) - min(xs), max(ys) - min(ys))
+    else:
+        diagonal = 80.0
+    routing_max_len = max(80.0, 2.0 * diagonal + 40.0)
+
     nets_rewired = 0
     pairs_wired = 0
     pairs_failed = 0
@@ -1214,6 +1229,7 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
         else:
             result = ConnectionManager.connect_pins(
                 schematic_path, pin_dicts, net_name=name, style="auto",
+                max_len=routing_max_len,
             )
         nets_rewired += 1
         pairs_wired += len(result.get("wired_pairs", []) or [])

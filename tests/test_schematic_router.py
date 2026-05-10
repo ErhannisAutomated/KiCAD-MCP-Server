@@ -1244,10 +1244,16 @@ class TestConnectPinsStyle:
         assert wp["style"] == "U"
         assert len(wp["segments"]) == 3
         text = sch.read_text()
-        assert text.count("(wire") == 3
-        # Phase 5: exactly one auto-label was added (multi-segment paths
-        # place it at the first corner — visually clean).
+        # Phase 5 adds a perpendicular branch-stub from the first corner
+        # of the chain so the auto-label sits at a stub's far end —
+        # visually marked as "this net continues elsewhere" — rather
+        # than on the wire itself.  So 3 route segments + 1 branch stub
+        # = 4 wires.  The +y branch direction is collinear with the
+        # route's vertical leg (at x=115, y=100..110), so the guard
+        # rejects it and -y wins → label at (115, 97.46).
+        assert text.count("(wire") == 4
         assert text.count('(label "SIG"') == 1
+        assert '(label "SIG" (at 115.0 97.46' in text
 
     def test_phase4_tees_into_existing_same_net_wire(self, tmp_path):
         # Pre-existing R1↔R2 wire labeled SIG at the R1 endpoint; R3 placed

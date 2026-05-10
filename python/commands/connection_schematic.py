@@ -955,22 +955,76 @@ class ConnectionManager:
                 if pair_reachable:
                     continue
 
-                # Orphaned chain — label its first segment's far end.  For
-                # multi-segment routes this is a corner (clean spot); for
-                # straight routes it lands on the second pin's endpoint
-                # (less pretty but always a wire endpoint, which is what
-                # subsequent calls need to detect this label).
+                # Orphaned chain — needs a label.  When the chain has a
+                # corner (multi-segment route), branch a 2.54mm stub off
+                # the corner perpendicular to the first segment and put
+                # the label at the stub's far end — visually clear "this
+                # net continues elsewhere" mark.  For single-segment
+                # chains we fall back to labeling segs[0][1] directly
+                # (the second pin's endpoint) — adding a perpendicular
+                # branch off a pin is more confusing than informative.
+                # The branch direction is chosen via the spurious-
+                # connection guard so the new stub doesn't cross any
+                # unrelated net.
                 segs = wp["segments"]
                 if not segs:
                     continue
-                label_pos = list(segs[0][1])
+                label_pos: Optional[List[float]] = None
+                if len(segs) >= 2:
+                    seg_a, seg_b = segs[0]
+                    seg_dx = seg_b[0] - seg_a[0]
+                    seg_dy = seg_b[1] - seg_a[1]
+                    L = 2.54
+                    # Axis-aligned perpendicular candidates.  Router only
+                    # emits horizontal/vertical segments, so seg is one
+                    # axis or the other; rotate ±90° on the grid.
+                    if abs(seg_dx) > abs(seg_dy):
+                        cands = [(0.0, +L), (0.0, -L)]   # vertical branches
+                    else:
+                        cands = [(+L, 0.0), (-L, 0.0)]   # horizontal branches
+                    from commands.schematic_router import (
+                        check_spurious_connections,
+                    )
+                    branch_pt: Tuple[float, float] = (
+                        float(seg_b[0]), float(seg_b[1]),
+                    )
+                    for dx, dy in cands:
+                        stub_end = (
+                            round(branch_pt[0] + dx, 4),
+                            round(branch_pt[1] + dy, 4),
+                        )
+                        # Guard against creating a spurious connection
+                        # with this branch (collinear with another wire,
+                        # crossing an unrelated wire, etc.).
+                        bad = check_spurious_connections(
+                            [(branch_pt, stub_end)],
+                            obstacles,
+                            resolved_net,
+                            own_endpoints=(branch_pt, stub_end),
+                        )
+                        if bad is None:
+                            if WireManager.add_wire(
+                                schematic_path,
+                                list(branch_pt),
+                                list(stub_end),
+                            ):
+                                label_pos = list(stub_end)
+                                break
+                if label_pos is None:
+                    # Fallback for single-segment chains, or when no
+                    # perpendicular branch direction passed the guard.
+                    label_pos = list(segs[0][1])
                 if WireManager.add_label(
                     schematic_path, resolved_net, label_pos, label_type="label"
                 ):
                     auto_labels_added.append(label_pos)
-                    # Refresh the reachable set so other pairs that share
-                    # this just-labeled chain are now considered reachable.
+                    # Refresh both: reachable_endpoints (for the next
+                    # orphan check) and obstacles (for any subsequent
+                    # branch-stub guard checks in this loop).
                     reachable_endpoints = _label_reachable_endpoints()
+                    obstacles = collect_obstacles(
+                        schematic_path, exclude_pins=exclude
+                    )
 
         # Backwards-compat key — first auto-label only.  The full list is
         # exposed via auto_labels_added.

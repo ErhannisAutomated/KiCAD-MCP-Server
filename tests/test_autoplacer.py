@@ -806,6 +806,59 @@ class TestPageCentering:
 
 
 @pytest.mark.unit
+class TestRewireMaxLenScaling:
+    def test_routing_max_len_scales_with_placement_diagonal(self):
+        """rewire_session should pass connect_pins a max_len that scales
+        with the placement bbox.  On a tightly-packed test sheet the
+        default would suffice, but on the BMS layout (~150 mm diagonal)
+        the default 80 mm is too small for routes around the BMS chip."""
+        from unittest.mock import patch
+
+        from commands.autoplacer import (
+            Component, Net, Pin, Session, rewire_session,
+        )
+        from commands.connection_schematic import ConnectionManager
+
+        sess = Session(schematic_path=Path("/tmp/synth.kicad_sch"))
+        # Two components ~150 mm apart on the diagonal.  Diagonal =
+        # hypot(150, 0) = 150; routing_max_len = 2*150 + 40 = 340.
+        sess.components["R1__u1"] = Component(
+            ref="R1", unit=1, lib_id="Device:R", x=50.0, y=100.0, rotation=0,
+            mirror_x=False, mirror_y=False,
+            pins={"1": Pin("1", "~", local_x=0, local_y=3.81, lib_angle=270)},
+            bbox_w=12.7, bbox_h=12.7,
+        )
+        sess.components["R2__u1"] = Component(
+            ref="R2", unit=1, lib_id="Device:R", x=200.0, y=100.0, rotation=0,
+            mirror_x=False, mirror_y=False,
+            pins={"1": Pin("1", "~", local_x=0, local_y=3.81, lib_angle=270)},
+            bbox_w=12.7, bbox_h=12.7,
+        )
+        sess.nets["SIG"] = Net(
+            name="SIG", pins=[("R1__u1", "1"), ("R2__u1", "1")],
+        )
+
+        captured: dict = {}
+
+        def _spy(schematic_path, pins, net_name=None, style="label", **kw):
+            captured.setdefault("calls", []).append(kw.get("max_len"))
+            return {
+                "success": True, "connected": [], "wired_pairs": [],
+                "routing_failures": [],
+            }
+
+        with patch.object(ConnectionManager, "connect_pins", staticmethod(_spy)):
+            rewire_session(sess, sess.schematic_path)
+
+        # Diagonal ≈ 150 mm; expected max_len = 2*150 + 40 = 340 mm.
+        assert captured["calls"], "no connect_pins calls recorded"
+        max_len = captured["calls"][0]
+        assert max_len is not None and max_len >= 340 - 1e-6, (
+            f"rewire should pass max_len that scales with placement; got {max_len}"
+        )
+
+
+@pytest.mark.unit
 class TestRewire:
     def test_rewire_uses_connect_pins_auto(self):
         """rewire_session should drive ConnectionManager.connect_pins
