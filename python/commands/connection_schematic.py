@@ -942,6 +942,15 @@ class ConnectionManager:
 
             reachable_endpoints = _label_reachable_endpoints()
 
+            # First pass: collect all orphan chains (wired pairs not
+            # reachable from any existing target_net label).  Don't
+            # label yet — we want to choose normal vs branch-stub
+            # depending on whether this net ends up with multiple
+            # chains.  A single-chain net just gets an in-line label
+            # (the chain IS the whole net here, so there's no
+            # "continues elsewhere"); multi-chain nets get a branch-
+            # stub per chain to mark each as a continuation point.
+            orphan_pairs: List[Dict[str, Any]] = []
             for wp in wired_pairs:
                 pair_reachable = False
                 for (a, b) in wp["segments"]:
@@ -951,40 +960,33 @@ class ConnectionManager:
                             break
                     if pair_reachable:
                         break
+                if not pair_reachable:
+                    orphan_pairs.append(wp)
 
-                if pair_reachable:
-                    continue
+            use_branch_stubs = len(orphan_pairs) >= 2
+            from commands.schematic_router import (
+                check_spurious_connections,
+            )
 
-                # Orphaned chain — needs a label.  When the chain has a
-                # corner (multi-segment route), branch a 2.54mm stub off
-                # the corner perpendicular to the first segment and put
-                # the label at the stub's far end — visually clear "this
-                # net continues elsewhere" mark.  For single-segment
-                # chains we fall back to labeling segs[0][1] directly
-                # (the second pin's endpoint) — adding a perpendicular
-                # branch off a pin is more confusing than informative.
-                # The branch direction is chosen via the spurious-
-                # connection guard so the new stub doesn't cross any
-                # unrelated net.
+            for wp in orphan_pairs:
                 segs = wp["segments"]
                 if not segs:
                     continue
                 label_pos: Optional[List[float]] = None
-                if len(segs) >= 2:
+                # Branch-stub only when (a) there are multiple orphan
+                # chains needing visual distinction, AND (b) the chain
+                # has a corner to branch off (single-segment chains
+                # have only pin endpoints, where a perpendicular branch
+                # is confusing).
+                if use_branch_stubs and len(segs) >= 2:
                     seg_a, seg_b = segs[0]
                     seg_dx = seg_b[0] - seg_a[0]
                     seg_dy = seg_b[1] - seg_a[1]
                     L = 2.54
-                    # Axis-aligned perpendicular candidates.  Router only
-                    # emits horizontal/vertical segments, so seg is one
-                    # axis or the other; rotate ±90° on the grid.
                     if abs(seg_dx) > abs(seg_dy):
-                        cands = [(0.0, +L), (0.0, -L)]   # vertical branches
+                        cands = [(0.0, +L), (0.0, -L)]
                     else:
-                        cands = [(+L, 0.0), (-L, 0.0)]   # horizontal branches
-                    from commands.schematic_router import (
-                        check_spurious_connections,
-                    )
+                        cands = [(+L, 0.0), (-L, 0.0)]
                     branch_pt: Tuple[float, float] = (
                         float(seg_b[0]), float(seg_b[1]),
                     )
@@ -993,9 +995,6 @@ class ConnectionManager:
                             round(branch_pt[0] + dx, 4),
                             round(branch_pt[1] + dy, 4),
                         )
-                        # Guard against creating a spurious connection
-                        # with this branch (collinear with another wire,
-                        # crossing an unrelated wire, etc.).
                         bad = check_spurious_connections(
                             [(branch_pt, stub_end)],
                             obstacles,
@@ -1011,16 +1010,16 @@ class ConnectionManager:
                                 label_pos = list(stub_end)
                                 break
                 if label_pos is None:
-                    # Fallback for single-segment chains, or when no
-                    # perpendicular branch direction passed the guard.
+                    # Fallback: in-line label at segs[0][1].
                     label_pos = list(segs[0][1])
                 if WireManager.add_label(
                     schematic_path, resolved_net, label_pos, label_type="label"
                 ):
                     auto_labels_added.append(label_pos)
-                    # Refresh both: reachable_endpoints (for the next
-                    # orphan check) and obstacles (for any subsequent
-                    # branch-stub guard checks in this loop).
+                    # Refresh both: reachable_endpoints (for next pair's
+                    # orphan check — the new label may now make a
+                    # subsequent chain reachable) and obstacles (for
+                    # the next branch-stub guard).
                     reachable_endpoints = _label_reachable_endpoints()
                     obstacles = collect_obstacles(
                         schematic_path, exclude_pins=exclude
