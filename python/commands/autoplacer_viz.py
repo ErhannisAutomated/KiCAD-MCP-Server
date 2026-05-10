@@ -184,9 +184,19 @@ class AutoplacerViz:
 
     def _draw_component(self, c) -> None:
         _, Rectangle = _import_matplotlib()
+        # Rotate the bbox around the component centre so it aligns with
+        # the pins.  matplotlib Rectangle.angle is CCW in DATA coords; we
+        # use invert_yaxis() so DATA y-up becomes screen y-down.  KiCad
+        # rotation is screen-CCW (y-down), which is the OPPOSITE of data-
+        # CCW after the axis flip — hence the negation.  Mirror flags
+        # would also need to be applied (matplotlib has no built-in
+        # support, so we'd compute corners as a Polygon); they're rare
+        # in practice and not handled yet.
         rect = Rectangle(
             (c.x - c.bbox_w / 2, c.y - c.bbox_h / 2),
             c.bbox_w, c.bbox_h,
+            angle=-c.rotation,
+            rotation_point="center",
             fill=False, edgecolor=self.BBOX_COLOR, linewidth=0.8,
         )
         self.ax.add_patch(rect)
