@@ -118,6 +118,7 @@ class Params:
     boundary_k: float = 5.0          # boundary repulsion
     polarity_k: float = 0.5          # polarity bias (V+ up, GND down)
     rotation_k: float = 4.0          # pin-orientation torque
+    polarity_torque_k: float = 3.0   # rotate GND pins down, V+ up
 
     initial_temperature: float = 30.0  # max displacement per iteration (mm)
     cooling: float = 0.95              # temperature *= cooling per iter
@@ -636,9 +637,18 @@ def _torque_for_pin_orientation(c: Component, sess: Session) -> float:
     """For each connection touching c, compute a torque that wants to
     align c's pin's outward direction with the vector toward the other
     endpoint.  Returns net torque (degrees of rotation).
+
+    Power/excluded nets (GND, VCC, +3V3, ...) are skipped: they're not
+    wired by `connect_pins(auto)`, so averaging their (often-scattered)
+    pin positions gives a target direction that drags rotation toward
+    a meaningless centroid.  Polarity orientation for those nets is
+    handled separately by ``_torque_polarity_orientation``.
     """
+    p = sess.params
     total_torque = 0.0
     for net in sess.nets.values():
+        if p.is_excluded_from_attraction(net.name):
+            continue
         my_pins = [pn for comp_key, pn in net.pins if comp_key == c.key]
         if not my_pins:
             continue
@@ -676,6 +686,39 @@ def _torque_for_pin_orientation(c: Component, sess: Session) -> float:
     return total_torque * sess.params.rotation_k * 0.01
 
 
+def _torque_polarity_orientation(c: Component, sess: Session) -> float:
+    """Rotate components so polarity-net pins face their preferred
+    direction: GND (and other ``bottom_polarity_nets``) → 270° (down
+    in screen Y); V+ (and ``top_polarity_nets``) → 90° (up).
+
+    Independent of where the partner pins are — a component connected
+    only to GND somewhere off-screen will still rotate so its GND pin
+    is at the bottom.  Stacks with ``_torque_for_pin_orientation``
+    (ordinary nets handle their own pin direction) and competes
+    proportionally with it: at the recommended defaults
+    (``rotation_k=4.0``, ``polarity_torque_k=3.0``), a component with
+    one GND pin and one signal pin will compromise between facing
+    its signal partner and getting GND down.
+    """
+    p = sess.params
+    total = 0.0
+    for net in sess.nets.values():
+        is_bottom = p.is_bottom_polarity(net.name)
+        is_top = p.is_top_polarity(net.name)
+        if not (is_bottom or is_top):
+            continue
+        target = 270.0 if is_bottom else 90.0
+        for comp_key, pn in net.pins:
+            if comp_key != c.key:
+                continue
+            outward = c.world_pin_outward_angle(pn)
+            if outward is None:
+                continue
+            diff = (target - outward + 540) % 360 - 180  # signed shortest
+            total += diff
+    return total * p.polarity_torque_k * 0.01
+
+
 # ----------------------------------------------------------------------
 # Iteration
 # ----------------------------------------------------------------------
@@ -710,7 +753,10 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
             fx += pfx
             fy += pfy
             forces[c.key] = (fx, fy)
-            torques[c.key] = _torque_for_pin_orientation(c, sess)
+            torques[c.key] = (
+                _torque_for_pin_orientation(c, sess)
+                + _torque_polarity_orientation(c, sess)
+            )
 
         # Attraction along each net edge — every pair of pins on the
         # same net gets a spring force.  Pin-aware: the force is

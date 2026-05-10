@@ -62,6 +62,7 @@ from commands.autoplacer import (
     _component_pair_force,
     _polarity_force,
     _torque_for_pin_orientation,
+    _torque_polarity_orientation,
 )
 
 
@@ -255,7 +256,10 @@ class AutoplacerViz:
             fx += pfx
             fy += pfy
             forces[c.key] = (fx, fy)
-            torques[c.key] = _torque_for_pin_orientation(c, self.sess)
+            torques[c.key] = (
+                _torque_for_pin_orientation(c, self.sess)
+                + _torque_polarity_orientation(c, self.sess)
+            )
 
         for net in self.sess.nets.values():
             pin_list = net.pins

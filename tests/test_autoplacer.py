@@ -294,6 +294,108 @@ class TestRoundTrip:
 
 
 @pytest.mark.unit
+class TestPolarityTorque:
+    def _make_resistor_with_gnd(self, rotation: float):
+        """One resistor whose pin 2 is on GND.  At rotation=0, pin 2's
+        outward angle is 270° (down) — already pointing the right way
+        for GND.  At rotation=180, pin 2 ends up facing UP, so the
+        polarity torque should rotate it back toward 270."""
+        from commands.autoplacer import Component, Net, Pin, Session
+
+        sess = Session(schematic_path=Path("/tmp/synthetic.kicad_sch"))
+        sess.components["R1__u1"] = Component(
+            ref="R1", unit=1, lib_id="Device:R", x=100.0, y=100.0,
+            rotation=rotation, mirror_x=False, mirror_y=False,
+            pins={
+                "1": Pin("1", "~", local_x=0, local_y=3.81, lib_angle=270),
+                "2": Pin("2", "~", local_x=0, local_y=-3.81, lib_angle=90),
+            },
+            bbox_w=12.7, bbox_h=12.7,
+        )
+        sess.nets["GND"] = Net(name="GND", pins=[("R1__u1", "2")])
+        return sess
+
+    def test_already_oriented_gives_zero_torque(self):
+        """Pin 2 outward angle at rotation=0 is 270° — already pointing
+        down (GND target), so polarity torque must be (approximately)
+        zero."""
+        from commands.autoplacer import _torque_polarity_orientation
+
+        sess = self._make_resistor_with_gnd(rotation=0)
+        torque = _torque_polarity_orientation(sess.components["R1__u1"], sess)
+        assert abs(torque) < 1e-3, torque
+
+    def test_misoriented_gives_nonzero_torque_toward_target(self):
+        """At rotation=180, pin 2's outward angle is 90° (up).  Target
+        for GND is 270° (down).  Shortest rotation: ±180.  Torque sign
+        is whichever way the diff lands; magnitude should be nonzero
+        and proportional to polarity_torque_k."""
+        from commands.autoplacer import _torque_polarity_orientation
+
+        sess = self._make_resistor_with_gnd(rotation=180)
+        torque = _torque_polarity_orientation(sess.components["R1__u1"], sess)
+        assert abs(torque) > 0, torque
+        # Doubling polarity_torque_k must double the torque.
+        sess.params.polarity_torque_k *= 2
+        torque2 = _torque_polarity_orientation(sess.components["R1__u1"], sess)
+        assert abs(abs(torque2) - 2 * abs(torque)) < 1e-6, (torque, torque2)
+
+    def test_v_plus_pin_targets_up(self):
+        """A pin on a top-polarity net targets 90° (up).  At rotation=0
+        with pin 2 facing 270° (down), torque should be nonzero pulling
+        toward 90."""
+        from commands.autoplacer import _torque_polarity_orientation
+
+        sess = self._make_resistor_with_gnd(rotation=0)
+        # Switch the net from GND to a top-polarity name.
+        sess.nets.pop("GND")
+        from commands.autoplacer import Net
+        sess.nets["+3V3"] = Net(name="+3V3", pins=[("R1__u1", "2")])
+        torque = _torque_polarity_orientation(sess.components["R1__u1"], sess)
+        # Pin 2 outward = 270, target = 90, signed shortest = -180 (or 180).
+        assert abs(torque) > 0, torque
+
+    def test_pin_orientation_torque_skips_power_nets(self):
+        """`_torque_for_pin_orientation` must NOT contribute torque on
+        power/excluded nets — those are handled by polarity torque
+        instead.  Without this, GND with N pins scattered around the
+        sheet drags every component's GND pin toward the centroid of
+        all the GND pins, which is meaningless and overwhelms torque
+        from the small signal nets."""
+        from commands.autoplacer import (
+            Component, Net, Pin, Session, _torque_for_pin_orientation,
+        )
+
+        # R1 with a GND pin connection to a far-away GND endpoint.
+        sess = Session(schematic_path=Path("/tmp/synthetic.kicad_sch"))
+        sess.components["R1__u1"] = Component(
+            ref="R1", unit=1, lib_id="Device:R", x=100.0, y=100.0, rotation=0,
+            mirror_x=False, mirror_y=False,
+            pins={
+                "1": Pin("1", "~", local_x=0, local_y=3.81, lib_angle=270),
+                "2": Pin("2", "~", local_x=0, local_y=-3.81, lib_angle=90),
+            },
+            bbox_w=12.7, bbox_h=12.7,
+        )
+        sess.components["U1__u1"] = Component(
+            ref="U1", unit=1, lib_id="Device:U", x=300.0, y=100.0, rotation=0,
+            mirror_x=False, mirror_y=False,
+            pins={
+                "1": Pin("1", "~", local_x=0, local_y=0, lib_angle=180),
+            },
+            bbox_w=12.7, bbox_h=12.7,
+        )
+        sess.nets["GND"] = Net(
+            name="GND", pins=[("R1__u1", "2"), ("U1__u1", "1")],
+        )
+        torque = _torque_for_pin_orientation(sess.components["R1__u1"], sess)
+        assert torque == 0, (
+            f"power-net torque should be zero (handled by polarity "
+            f"torque); got {torque}"
+        )
+
+
+@pytest.mark.unit
 class TestAttractionExclusion:
     def _make_two_resistors_on_net(self, net_name: str):
         from commands.autoplacer import Component, Net, Pin, Session

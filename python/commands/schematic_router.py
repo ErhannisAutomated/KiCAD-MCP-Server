@@ -401,6 +401,7 @@ def _build_grid_obstacles(
     pad_cells: int = 25,
     own_refs: Tuple[str, str] = ("", ""),
     same_net_wire_indices: Optional[Set[int]] = None,
+    own_pin_angles: Tuple[Optional[float], Optional[float]] = (None, None),
 ) -> Tuple[GridObstacles, Tuple[int, int], Tuple[int, int]]:
     """Build a `GridObstacles` covering the bbox of (p1, p2) plus *pad_cells*
     of margin in each direction.
@@ -532,9 +533,27 @@ def _build_grid_obstacles(
     # The two pins we are intentionally connecting must be valid endpoints,
     # so make sure they are not in blocked_cells. (They might have been added
     # via the other_pins or symbol-bbox passes if the caller didn't exclude
-    # them.) Re-allow them.
+    # them.) Re-allow them — AND the cell one step in the pin's outward
+    # direction, which is the route's lead-in / lead-out (initial_dir from
+    # cell_p1 and final-step predecessor of cell_p2).  Without this
+    # adjacent-cell unblock, components whose bbox extends past the pin
+    # endpoint (Device:C with bbox half-width 6.35mm and pin at 3.81mm) make
+    # the lead-in cell blocked by the bbox pass, and A* can never approach
+    # the pin from outside the body.
     grid.blocked_cells.discard(cell_p1)
     grid.blocked_cells.discard(cell_p2)
+    a1, a2 = own_pin_angles
+    for ep_cell, angle in ((cell_p1, a1), (cell_p2, a2)):
+        if angle is None:
+            continue
+        rad = math.radians(angle)
+        dx_step = round(math.cos(rad))
+        dy_step = -round(math.sin(rad))
+        if dx_step == 0 and dy_step == 0:
+            continue
+        for steps in (1, 2):
+            adj = (ep_cell[0] + dx_step * steps, ep_cell[1] + dy_step * steps)
+            grid.blocked_cells.discard(adj)
 
     return grid, (min_x, min_y), (max_x, max_y)
 
@@ -1407,6 +1426,7 @@ class SchematicRouter:
             obstacles,
             origin=p1,
             own_refs=(ref1, ref2),
+            own_pin_angles=(a1, a2),
             same_net_wire_indices=same_net_wires,
         )
         # Phase 4 — same-net cells are valid tee targets. Drop the goal
