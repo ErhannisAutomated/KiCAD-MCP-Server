@@ -122,8 +122,31 @@ def test_viz_toggles_force_layers_on_and_off():
         show_attraction=False,
         show_repulsion=False,
         show_sum_force=False,
+        show_polarity_force=False,
     )
     try:
         viz.update()  # should still render component bboxes only
+    finally:
+        viz.close()
+
+
+@pytest.mark.unit
+def test_polarity_pin_keys_finds_gnd_and_v_plus_pins():
+    """Pins on a GND or V+ net should be picked up as polarity
+    contributors so the viz can colour them yellow."""
+    from commands.autoplacer import Net
+    from commands.autoplacer_viz import AutoplacerViz
+
+    sess = _make_synthetic_session()
+    # Add a GND net touching R1/1, plus a +3V3 net touching R2/2.
+    sess.nets["GND"] = Net(name="GND", pins=[("R1__u1", "1")])
+    sess.nets["+3V3"] = Net(name="+3V3", pins=[("R2__u1", "2")])
+    viz = AutoplacerViz(sess)
+    try:
+        keys = viz._polarity_pin_keys()
+        assert ("R1__u1", "1") in keys, keys
+        assert ("R2__u1", "2") in keys, keys
+        # SIG is not polarity — its pins should NOT be in the set.
+        assert ("R1__u1", "2") not in keys, keys
     finally:
         viz.close()

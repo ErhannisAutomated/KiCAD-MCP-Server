@@ -78,8 +78,10 @@ class AutoplacerViz:
     BG = "#101010"
     BBOX_COLOR = "#404040"
     PIN_COLOR = "#00ccff"
+    POLARITY_PIN_COLOR = "#ffcc00"  # pins on GND / V+ nets
     LABEL_COLOR = "#cccccc"
     SUM_FORCE_COLOR = "#00ff00"
+    POLARITY_FORCE_COLOR = "#ffcc00"
     SHEET_BBOX_COLOR = "#202028"
 
     def __init__(
@@ -91,6 +93,7 @@ class AutoplacerViz:
         show_attraction: bool = True,
         show_repulsion: bool = True,
         show_sum_force: bool = True,
+        show_polarity_force: bool = True,
         show_pin_labels: bool = False,
     ):
         self.sess = sess
@@ -98,6 +101,7 @@ class AutoplacerViz:
         self.show_attraction = show_attraction
         self.show_repulsion = show_repulsion
         self.show_sum_force = show_sum_force
+        self.show_polarity_force = show_polarity_force
         self.show_pin_labels = show_pin_labels
 
         plt, _ = _import_matplotlib()
@@ -135,6 +139,8 @@ class AutoplacerViz:
             self._draw_attraction()
         if self.show_repulsion:
             self._draw_repulsion()
+        if self.show_polarity_force:
+            self._draw_polarity_forces()
         if self.show_sum_force:
             self._draw_sum_forces(forces)
 
@@ -204,15 +210,25 @@ class AutoplacerViz:
             c.x, c.y, f"{c.ref}{f'.{c.unit}' if c.unit > 1 else ''}",
             color=self.LABEL_COLOR, ha="center", va="center", fontsize=7,
         )
+        # Pre-compute which (component_key, pin) pairs are on a polarity
+        # net so the pin dot can be coloured to indicate "this is a
+        # polarity contributor".  Cheap; recomputed every frame so live
+        # net edits are reflected.
+        polarity_pin_keys = self._polarity_pin_keys()
         for pn in c.pins:
             wp = c.world_pin_xy(pn)
             if wp is None:
                 continue
-            self.ax.plot(wp[0], wp[1], "o", color=self.PIN_COLOR, markersize=2.5)
+            colour = (
+                self.POLARITY_PIN_COLOR
+                if (c.key, pn) in polarity_pin_keys
+                else self.PIN_COLOR
+            )
+            self.ax.plot(wp[0], wp[1], "o", color=colour, markersize=2.5)
             if self.show_pin_labels:
                 self.ax.text(
                     wp[0], wp[1], f" {pn}",
-                    color=self.PIN_COLOR, fontsize=5, ha="left", va="center",
+                    color=colour, fontsize=5, ha="left", va="center",
                 )
 
     def _compute_forces(
@@ -323,6 +339,55 @@ class AutoplacerViz:
             self.ax.plot(
                 [a.x, b.x], [a.y, b.y],
                 color=color, alpha=0.45, linewidth=0.5 + 0.8 * t,
+            )
+
+    def _polarity_pin_keys(self) -> set:
+        """Return the set of (comp_key, pin) tuples sitting on any
+        polarity (V+ / GND) net.  Used to highlight pins that
+        contribute to the polarity bias."""
+        p = self.sess.params
+        out: set = set()
+        for net in self.sess.nets.values():
+            if not (
+                p.is_bottom_polarity(net.name) or p.is_top_polarity(net.name)
+            ):
+                continue
+            for comp_key, pn in net.pins:
+                out.add((comp_key, pn))
+        return out
+
+    def _draw_polarity_forces(self) -> None:
+        """Yellow arrow per component showing polarity-bias contribution
+        (the V+ pull-up / GND pull-down, separate from net attraction).
+        Drawn from each component centre with length scaled to the
+        largest polarity force in the model — so weak biases fade and
+        strong ones stand out."""
+        polarity_forces: Dict[str, Tuple[float, float]] = {}
+        for c in self.sess.components.values():
+            pfx, pfy = _polarity_force(c, self.sess)
+            if math.hypot(pfx, pfy) > 1e-3:
+                polarity_forces[c.key] = (pfx, pfy)
+        if not polarity_forces:
+            return
+        max_mag = max(
+            math.hypot(fx, fy) for fx, fy in polarity_forces.values()
+        )
+        # Slightly shorter than the green sum stub so they don't fully
+        # overlap when the polarity force happens to dominate.
+        scale = 6.0 / max_mag
+        for key, (fx, fy) in polarity_forces.items():
+            c = self.sess.components.get(key)
+            if c is None:
+                continue
+            ex = c.x + fx * scale
+            ey = c.y + fy * scale
+            self.ax.plot(
+                [c.x, ex], [c.y, ey],
+                color=self.POLARITY_FORCE_COLOR, alpha=0.7, linewidth=1.0,
+            )
+            self.ax.plot(
+                [ex], [ey], "o",
+                color=self.POLARITY_FORCE_COLOR, markersize=3,
             )
 
     def _draw_sum_forces(
