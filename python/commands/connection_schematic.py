@@ -723,9 +723,67 @@ class ConnectionManager:
                                 float(loc[1]),
                             )
 
-                for i in range(len(pins) - 1):
-                    a = pins[i]
-                    b = pins[i + 1]
+                # Pair iteration order: shortest physical distance first
+                # (Kruskal-style minimum-spanning-tree).  This means the
+                # closest pins on the net get wired together first; once
+                # both are in the same connected component, longer
+                # candidate edges between them are skipped.  The result
+                # bridges what would otherwise be disjoint label-only
+                # sub-trees on the same net (the previous "consecutive
+                # i, i+1 in load order" iteration left obvious cross-
+                # cluster edges unattempted because that pair wasn't
+                # consecutive in the input list).
+                #
+                # Same-net wires from earlier pairs in the same call get
+                # their endpoints union'd via the pin_endpoints map +
+                # `_classify_wires_by_net`'s extra_own_endpoints, so
+                # tee-onto-existing-wire still works inside this loop.
+                import math as _math
+                _n = len(pins)
+                _parent = list(range(_n))
+
+                def _find(x: int) -> int:
+                    while _parent[x] != x:
+                        _parent[x] = _parent[_parent[x]]
+                        x = _parent[x]
+                    return x
+
+                def _union(a: int, b: int) -> bool:
+                    ra, rb = _find(a), _find(b)
+                    if ra == rb:
+                        return False
+                    _parent[ra] = rb
+                    return True
+
+                _candidates: List[Tuple[float, int, int]] = []
+                for _i in range(_n):
+                    _ai = pins[_i]
+                    _ai_key = f"{_ai.get('ref','')}/{_ai.get('pin','')}"
+                    _ai_pt = pin_endpoints.get(_ai_key)
+                    if _ai_pt is None:
+                        continue
+                    for _j in range(_i + 1, _n):
+                        _bj = pins[_j]
+                        _bj_key = f"{_bj.get('ref','')}/{_bj.get('pin','')}"
+                        _bj_pt = pin_endpoints.get(_bj_key)
+                        if _bj_pt is None:
+                            continue
+                        _d = _math.hypot(
+                            _bj_pt[0] - _ai_pt[0], _bj_pt[1] - _ai_pt[1],
+                        )
+                        _candidates.append((_d, _i, _j))
+                _candidates.sort()
+
+                for _dist, _i, _j in _candidates:
+                    if _find(_i) == _find(_j):
+                        # Already in the same connected sub-tree on this
+                        # net — wiring this edge would create a cycle.
+                        # The MST guarantees we've already wired (or
+                        # tried to wire) a cheaper edge that connects
+                        # them.
+                        continue
+                    a = pins[_i]
+                    b = pins[_j]
                     a_ref, a_pin = a.get("ref", ""), a.get("pin", "")
                     b_ref, b_pin = b.get("ref", ""), b.get("pin", "")
                     if not (a_ref and a_pin and b_ref and b_pin):
@@ -807,6 +865,12 @@ class ConnectionManager:
                                     ],
                                 }
                             )
+                            # Mark these two pins as connected on the
+                            # MST so subsequent (longer) edges between
+                            # any of their cluster members are skipped
+                            # without retrying — preserves both wire
+                            # count and routing time.
+                            _union(_i, _j)
                             obstacles = collect_obstacles(
                                 schematic_path, exclude_pins=exclude
                             )

@@ -1077,6 +1077,80 @@ class TestConnectPinsStyle:
         assert result["success"] is False
         assert "invalid style" in result["message"]
 
+    def test_auto_orders_pairs_by_distance_not_load_order(self, tmp_path):
+        """`connect_pins(auto)` should attempt closer pin pairs first,
+        regardless of where they sit in the load-order list.
+
+        Repro from the BMS REGOUT case: 3 R's facing each other in a
+        line — R1 (left), R2 (mid), R3 (right).  Input list order is
+        [R1, R3, R2] so the *consecutive*-pair walk would try
+        (R1↔R3) first (the longer cross-cluster bridge) then (R3↔R2).
+        After the MST switch, the closest pair is attempted first
+        instead.  We patch `route_pair` to record the order of attempts
+        and assert MST ordering.
+        """
+        from unittest.mock import patch
+
+        from commands.connection_schematic import ConnectionManager
+        from commands.schematic_router import RouteResult, SchematicRouter
+
+        sch_text = textwrap.dedent("""\
+            (kicad_sch (version 20250114) (generator "test")
+              %s
+              (symbol (lib_id "Device:R") (at 100 100 90) (unit 1)
+                (property "Reference" "R1" (at 100 100 0))
+                (property "Value" "10k" (at 100 100 0))
+                (instances (project "test" (path "/" (reference "R1") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 130 100 90) (unit 1)
+                (property "Reference" "R2" (at 130 100 0))
+                (property "Value" "10k" (at 130 100 0))
+                (instances (project "test" (path "/" (reference "R2") (unit 1))))
+              )
+              (symbol (lib_id "Device:R") (at 200 100 90) (unit 1)
+                (property "Reference" "R3" (at 200 100 0))
+                (property "Value" "10k" (at 200 100 0))
+                (instances (project "test" (path "/" (reference "R3") (unit 1))))
+              )
+              (sheet_instances (path "/" (page "1")))
+            )
+        """) % R_LIB
+        sch = _write(tmp_path, "mst_order.kicad_sch", sch_text)
+
+        attempted: List[Tuple[str, str]] = []
+        original = SchematicRouter.route_pair
+
+        def _spy(schematic_path, ref1, pin1, ref2, pin2, **kw):
+            attempted.append((f"{ref1}/{pin1}", f"{ref2}/{pin2}"))
+            # Return a "no path" result so we just observe the order
+            # without modifying the schematic.
+            return RouteResult(False, [], "spy")
+
+        with patch.object(SchematicRouter, "route_pair", staticmethod(_spy)):
+            ConnectionManager.connect_pins(
+                sch,
+                [
+                    {"ref": "R1", "pin": "2"},  # 100 mm
+                    {"ref": "R3", "pin": "1"},  # 200 mm  ← far
+                    {"ref": "R2", "pin": "1"},  # 130 mm  ← in the middle
+                ],
+                net_name="SIG",
+                style="auto",
+            )
+
+        # Distances (R rot=90, pin 1 = left side, pin 2 = right side):
+        #   R1/2 ≈ x=103.8, R2/1 ≈ x=126.2, R2/2 ≈ x=133.8, R3/1 ≈ x=196.2
+        # So closest pair = (R1/2, R2/1) at ~22 mm; second-closest =
+        # (R2/1, R3/1) at ~70 mm; third = (R1/2, R3/1) at ~92 mm.
+        #
+        # Consecutive walk would have tried (R1/2, R3/1) first.  MST
+        # must try (R1/2, R2/1) first.
+        assert attempted, "no pairs attempted at all"
+        assert attempted[0] == ("R1/2", "R2/1"), (
+            f"first attempt should be the closest pair (R1/2, R2/1); "
+            f"got {attempted[0]}.  Full order: {attempted}"
+        )
+
     def test_auto_writes_wire_segment_and_one_auto_label(self, tmp_path):
         from commands.connection_schematic import ConnectionManager
 
