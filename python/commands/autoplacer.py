@@ -134,11 +134,32 @@ class Params:
     bottom_polarity_nets: Tuple[str, ...] = ("GND", "BAT-", "VSS", "VEE")
     top_polarity_nets: Tuple[str, ...] = ("BAT+", "V+", "VCC", "VDD", "+3V3", "+5V")
 
+    # Attraction exclusion: nets whose components are NOT pulled together
+    # by the spring force.  Power rails (GND, VCC, +3V3, etc.) typically
+    # fan out across the whole sheet — `connect_pins(auto)` lays them as
+    # labels rather than wires, so pulling components onto them with
+    # attraction just distorts the layout without buying any routing.
+    # The default uses `schematic_router.is_power_net()` (comprehensive
+    # list with `+/-<digit>` regex), and `attraction_excluded_nets` lets
+    # the user add more net names ("ALERT", "MODULE_EN", ...).  Polarity
+    # bias is unaffected — it still pulls GND-connected components down
+    # and V+ ones up; only the per-edge spring is skipped.
+    exclude_power_nets_from_attraction: bool = True
+    attraction_excluded_nets: Tuple[str, ...] = ()
+
     def is_bottom_polarity(self, name: str) -> bool:
         return name in self.bottom_polarity_nets
 
     def is_top_polarity(self, name: str) -> bool:
         return name in self.top_polarity_nets
+
+    def is_excluded_from_attraction(self, name: str) -> bool:
+        if name in self.attraction_excluded_nets:
+            return True
+        if self.exclude_power_nets_from_attraction:
+            from commands.schematic_router import is_power_net
+            return is_power_net(name)
+        return False
 
 
 @dataclass
@@ -701,6 +722,12 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
         for net in sess.nets.values():
             pin_list = net.pins
             if len(pin_list) < 2:
+                continue
+            if p.is_excluded_from_attraction(net.name):
+                # Power rails (GND, VCC, ...) and other label-only nets
+                # don't pull their components together — they're routed
+                # as labels at apply time, so the layout shouldn't
+                # distort to bring them close.
                 continue
             for i, (key_a, pin_a) in enumerate(pin_list):
                 for key_b, pin_b in pin_list[i + 1 :]:

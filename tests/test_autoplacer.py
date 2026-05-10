@@ -294,6 +294,105 @@ class TestRoundTrip:
 
 
 @pytest.mark.unit
+class TestAttractionExclusion:
+    def _make_two_resistors_on_net(self, net_name: str):
+        from commands.autoplacer import Component, Net, Pin, Session
+
+        sess = Session(schematic_path=Path("/tmp/synthetic.kicad_sch"))
+        for ref, x in (("R1", 100.0), ("R2", 200.0)):
+            sess.components[f"{ref}__u1"] = Component(
+                ref=ref, unit=1, lib_id="Device:R", x=x, y=100.0, rotation=0,
+                mirror_x=False, mirror_y=False,
+                pins={
+                    "1": Pin("1", "~", local_x=0, local_y=3.81, lib_angle=270),
+                    "2": Pin("2", "~", local_x=0, local_y=-3.81, lib_angle=90),
+                },
+                bbox_w=12.7, bbox_h=12.7,
+            )
+        sess.nets[net_name] = Net(
+            name=net_name, pins=[("R1__u1", "2"), ("R2__u1", "1")],
+        )
+        return sess
+
+    def test_signal_net_pulls_components_together(self):
+        """Sanity: a non-excluded net should produce attraction; the
+        components should move toward each other after one iteration."""
+        from commands.autoplacer import iterate
+
+        sess = self._make_two_resistors_on_net("SIG")
+        sess.params.attraction_k = 1.0  # crank up so one step is visible
+        sess.params.repulsion_k = 0.0   # zero out repulsion to isolate
+        sess.params.boundary_k = 0.0
+        sess.temperature = 5.0
+        x_before = (sess.components["R1__u1"].x, sess.components["R2__u1"].x)
+        iterate(sess, n=1)
+        x_after = (sess.components["R1__u1"].x, sess.components["R2__u1"].x)
+        # R1 should move +x, R2 should move -x (toward each other).
+        assert x_after[0] > x_before[0], (x_before, x_after)
+        assert x_after[1] < x_before[1], (x_before, x_after)
+
+    def test_power_net_does_not_pull_components_together(self):
+        """A net classified as power (default behaviour) is excluded from
+        attraction.  With no other forces, the components shouldn't move
+        toward each other."""
+        from commands.autoplacer import iterate
+
+        sess = self._make_two_resistors_on_net("GND")
+        sess.params.attraction_k = 1.0
+        sess.params.repulsion_k = 0.0
+        sess.params.boundary_k = 0.0
+        sess.params.polarity_k = 0.0  # disable polarity bias too
+        sess.params.rotation_k = 0.0
+        sess.temperature = 5.0
+        x_before = (sess.components["R1__u1"].x, sess.components["R2__u1"].x)
+        iterate(sess, n=1)
+        x_after = (sess.components["R1__u1"].x, sess.components["R2__u1"].x)
+        # Components shouldn't have moved.
+        assert x_after == x_before, (
+            f"GND should be excluded from attraction; got {x_before} → {x_after}"
+        )
+
+    def test_user_added_excluded_net_is_skipped(self):
+        """The user-supplied attraction_excluded_nets tuple adds names
+        on top of the power-net default."""
+        from commands.autoplacer import iterate
+
+        sess = self._make_two_resistors_on_net("ALERT")
+        sess.params.attraction_k = 1.0
+        sess.params.repulsion_k = 0.0
+        sess.params.boundary_k = 0.0
+        sess.params.polarity_k = 0.0
+        sess.params.rotation_k = 0.0
+        sess.params.attraction_excluded_nets = ("ALERT",)
+        sess.temperature = 5.0
+        x_before = (sess.components["R1__u1"].x, sess.components["R2__u1"].x)
+        iterate(sess, n=1)
+        x_after = (sess.components["R1__u1"].x, sess.components["R2__u1"].x)
+        assert x_after == x_before, (
+            f"ALERT should be excluded; got {x_before} → {x_after}"
+        )
+
+    def test_disabling_power_exclusion_lets_power_nets_pull(self):
+        """Setting exclude_power_nets_from_attraction=False makes the
+        default GND/VCC/etc. NOT excluded — useful for debugging."""
+        from commands.autoplacer import iterate
+
+        sess = self._make_two_resistors_on_net("GND")
+        sess.params.attraction_k = 1.0
+        sess.params.repulsion_k = 0.0
+        sess.params.boundary_k = 0.0
+        sess.params.polarity_k = 0.0
+        sess.params.rotation_k = 0.0
+        sess.params.exclude_power_nets_from_attraction = False
+        sess.temperature = 5.0
+        x_before = (sess.components["R1__u1"].x, sess.components["R2__u1"].x)
+        iterate(sess, n=1)
+        x_after = (sess.components["R1__u1"].x, sess.components["R2__u1"].x)
+        assert x_after[0] > x_before[0], x_after
+        assert x_after[1] < x_before[1], x_after
+
+
+@pytest.mark.unit
 class TestSnapPositions:
     def test_pin_coord_collision_resolved(self):
         """Two single-unit resistors placed so their bboxes clear but

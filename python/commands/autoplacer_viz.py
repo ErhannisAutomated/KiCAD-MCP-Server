@@ -245,6 +245,8 @@ class AutoplacerViz:
             pin_list = net.pins
             if len(pin_list) < 2:
                 continue
+            if p.is_excluded_from_attraction(net.name):
+                continue
             for i, (key_a, pin_a) in enumerate(pin_list):
                 for key_b, pin_b in pin_list[i + 1 :]:
                     if key_a == key_b:
@@ -271,6 +273,8 @@ class AutoplacerViz:
         for net in self.sess.nets.values():
             pin_list = net.pins
             if len(pin_list) < 2:
+                continue
+            if p.is_excluded_from_attraction(net.name):
                 continue
             for i, (key_a, pin_a) in enumerate(pin_list):
                 for key_b, pin_b in pin_list[i + 1 :]:
