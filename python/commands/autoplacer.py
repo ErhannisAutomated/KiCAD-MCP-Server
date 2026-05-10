@@ -532,6 +532,13 @@ def _component_pair_force(c1: Component, c2: Component, k: float) -> Tuple[float
         # direction so two co-located components separate.
         return 5.0, 5.0
     inv_dist = 1.0 / math.sqrt(dist2)
+
+    # Scale by size
+    c1_size = max(c1.bbox_w, c1.bbox_h)
+    c2_size = max(c2.bbox_w, c2.bbox_h)
+    size_scale = c1_size*c1_size + c2_size*c2_size
+    k = k * size_scale
+
     # Force magnitude ∝ 1/r²; project onto unit direction (dx, dy)/r.
     mag = k / dist2
     return mag * dx * inv_dist, mag * dy * inv_dist
