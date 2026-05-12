@@ -1725,3 +1725,312 @@ class TestConnectPinsStyle:
                 f"{ref}/{pin} ended up on net {net!r}, expected 'SIG' — "
                 "orphan-chain bug has regressed"
             )
+
+
+@pytest.mark.unit
+class TestPhase5ChainFinder:
+    """Direct tests of the new walk_wire_chain-based Phase 5 helper.
+
+    These bypass the autorouter and feed the helper a pre-laid wire
+    graph + pin_endpoints, so we can deterministically exercise the
+    chain-grouping logic on tricky topologies the autorouter doesn't
+    reliably produce in unit tests."""
+
+    def _empty_sch_with_wires(
+        self,
+        tmp_path: Path,
+        wires: list,
+        labels: list = (),
+    ) -> Path:
+        parts = [
+            '(kicad_sch (version 20250114) (generator "test")',
+            '  (uuid 11111111-1111-1111-1111-111111111111)',
+            '  (paper "A4")',
+        ]
+        for (x1, y1), (x2, y2) in wires:
+            parts.append(
+                f'  (wire (pts (xy {x1} {y1}) (xy {x2} {y2})) '
+                '(stroke (width 0) (type default)) '
+                '(uuid 11111111-1111-1111-1111-111111111111))'
+            )
+        for name, x, y in labels:
+            parts.append(
+                f'  (label "{name}" (at {x} {y} 0) '
+                '(effects (font (size 1.27 1.27))) '
+                '(uuid 22222222-2222-2222-2222-222222222222))'
+            )
+        parts.append('  (sheet_instances (path "/" (page "1")))')
+        parts.append(')')
+        p = tmp_path / "t.kicad_sch"
+        p.write_text("\n".join(parts))
+        return p
+
+    def test_t_junction_chain_gets_single_label(self, tmp_path: Path):
+        """Two wires connected only via a mid-segment T-junction must
+        be recognised as ONE chain and labelled exactly once.
+
+        Regression: the old union-find pair grouping in Phase 5 used
+        wired_pairs' segment endpoints, which don't reflect the T-
+        junction created when one wire's endpoint lands on another's
+        interior.  Two pin endpoints on the same physical chain ended
+        up in different "chains" and each got its own auto-label."""
+        from commands.connection_schematic import _phase5_label_orphan_chains
+
+        sch = self._empty_sch_with_wires(
+            tmp_path,
+            wires=[
+                ((100.0, 100.0), (130.0, 100.0)),  # horizontal trunk
+                ((115.0, 100.0), (115.0, 95.0)),   # T-junction stub down
+            ],
+        )
+
+        labels = _phase5_label_orphan_chains(
+            schematic_path=sch,
+            resolved_net="SIG",
+            pins=[
+                {"ref": "R1", "pin": "2"},  # at horizontal trunk left
+                {"ref": "R2", "pin": "1"},  # at horizontal trunk right
+                {"ref": "R3", "pin": "1"},  # at stub bottom
+            ],
+            pin_endpoints={
+                "R1/2": (100.0, 100.0),
+                "R2/1": (130.0, 100.0),
+                "R3/1": (115.0, 95.0),
+            },
+            exclude_pins={("R1", "2"), ("R2", "1"), ("R3", "1")},
+        )
+
+        assert len(labels) == 1, (
+            f"T-junction chain must be labelled once, got {len(labels)}: "
+            f"{labels}"
+        )
+        text = sch.read_text()
+        assert text.count('(label "SIG"') == 1
+
+    def test_already_labelled_chain_gets_no_extra_label(self, tmp_path: Path):
+        """A chain that already carries the resolved_net label must
+        not be re-labelled, even when multiple pin endpoints lie on it."""
+        from commands.connection_schematic import _phase5_label_orphan_chains
+
+        sch = self._empty_sch_with_wires(
+            tmp_path,
+            wires=[((100.0, 100.0), (130.0, 100.0))],
+            labels=[("SIG", 130.0, 100.0)],  # label at right end
+        )
+
+        labels = _phase5_label_orphan_chains(
+            schematic_path=sch,
+            resolved_net="SIG",
+            pins=[
+                {"ref": "R1", "pin": "2"},
+                {"ref": "R2", "pin": "1"},
+            ],
+            pin_endpoints={
+                "R1/2": (100.0, 100.0),
+                "R2/1": (130.0, 100.0),
+            },
+            exclude_pins={("R1", "2"), ("R2", "1")},
+        )
+
+        assert labels == []
+        text = sch.read_text()
+        assert text.count('(label "SIG"') == 1  # original only
+
+    def test_two_disjoint_chains_each_get_a_label(self, tmp_path: Path):
+        """Two physically disjoint chains for the same net must each
+        get their own auto-label so the net isn't silently fragmented."""
+        from commands.connection_schematic import _phase5_label_orphan_chains
+
+        sch = self._empty_sch_with_wires(
+            tmp_path,
+            wires=[
+                ((100.0, 100.0), (110.0, 100.0)),  # chain A
+                ((200.0, 100.0), (210.0, 100.0)),  # chain B (disjoint)
+            ],
+        )
+
+        labels = _phase5_label_orphan_chains(
+            schematic_path=sch,
+            resolved_net="SIG",
+            pins=[
+                {"ref": "R1", "pin": "2"},
+                {"ref": "R2", "pin": "1"},
+                {"ref": "R3", "pin": "2"},
+                {"ref": "R4", "pin": "1"},
+            ],
+            pin_endpoints={
+                "R1/2": (100.0, 100.0),
+                "R2/1": (110.0, 100.0),
+                "R3/2": (200.0, 100.0),
+                "R4/1": (210.0, 100.0),
+            },
+            exclude_pins={
+                ("R1", "2"), ("R2", "1"), ("R3", "2"), ("R4", "1")
+            },
+        )
+
+        assert len(labels) == 2, (
+            f"Two disjoint chains require two labels, got {len(labels)}"
+        )
+        text = sch.read_text()
+        assert text.count('(label "SIG"') == 2
+
+    def test_stub_style_kicks_in_when_phase3_already_stubbed_one_chain(
+        self, tmp_path: Path
+    ):
+        """When the net has one orphan multi-pin chain AND one chain
+        already labelled by Phase 3 (a single-pin stub), the orphan
+        chain should also get a stub-style label so the two read
+        symmetrically.  Regression for the VC3 case where the multi-
+        pin chain got an in-line label while R4's stub looked
+        completely disconnected from it visually."""
+        from commands.connection_schematic import _phase5_label_orphan_chains
+
+        # Setup: two physically disjoint chains.
+        #   chain A: existing 3-segment U-shape with no label.
+        #   chain B: existing single 2.54mm stub with a SIG label at
+        #            its free end (Phase 3-style).
+        sch = self._empty_sch_with_wires(
+            tmp_path,
+            wires=[
+                # chain A — U-shape (corner at 110,100; corner at 120,100)
+                ((100.0, 100.0), (110.0, 100.0)),
+                ((110.0, 100.0), (110.0, 105.0)),  # vertical leg
+                ((110.0, 105.0), (120.0, 105.0)),  # bottom of U
+                # chain B — Phase 3 stub
+                ((200.0, 100.0), (202.54, 100.0)),
+            ],
+            labels=[("SIG", 202.54, 100.0)],  # label on chain B's free end
+        )
+
+        labels = _phase5_label_orphan_chains(
+            schematic_path=sch,
+            resolved_net="SIG",
+            pins=[
+                {"ref": "R1", "pin": "2"},
+                {"ref": "R2", "pin": "1"},
+                {"ref": "R3", "pin": "2"},
+            ],
+            pin_endpoints={
+                "R1/2": (100.0, 100.0),  # chain A end
+                "R2/1": (120.0, 105.0),  # chain A other end
+                "R3/2": (200.0, 100.0),  # chain B pin
+            },
+            exclude_pins={("R1", "2"), ("R2", "1"), ("R3", "2")},
+        )
+
+        # One label added (for chain A — chain B already has SIG).
+        assert len(labels) == 1, (
+            f"Phase 5 should add exactly one label for chain A; got {labels}"
+        )
+        # And it should be at a stub-end (perpendicular branch from
+        # the U's corner), NOT at a pin endpoint or interior of an
+        # existing wire.  The corners are (110,100) and (110,105);
+        # the branch-stub direction is perpendicular to whichever
+        # corner the helper picks.  We just require the label is NOT
+        # at one of the pin endpoints (which would be the "in-line"
+        # case).
+        added_pt = tuple(labels[0])
+        assert added_pt not in {
+            (100.0, 100.0), (120.0, 105.0),
+        }, (
+            f"Phase 5 placed label at pin endpoint {added_pt}; "
+            "with another chain already on the net it should have "
+            "used stub-style placement."
+        )
+
+    def test_branch_stub_refuses_to_bridge_to_another_chain(
+        self, tmp_path: Path
+    ):
+        """Two physically disjoint orphan chains of the SAME net.  The
+        old code laid a perpendicular branch-stub at each corner and
+        accidentally T-junction-bridged them through some unrelated
+        existing wire, producing a single merged chain with two
+        labels.  The merge guard in _try_branch_stub_at_corner must
+        refuse a stub_end that lands on a different chain.
+
+        Setup: chain A has a corner at (110, 100) with vertical
+        leg going down to (110, 105).  An unrelated wire (also no
+        label) runs from (112.54, 100) to (112.54, 105) — would form
+        a T-junction with chain A if a stub from chain A's corner
+        went +X by 2.54mm.  The guard should refuse.
+        """
+        from commands.connection_schematic import _phase5_label_orphan_chains
+
+        sch = self._empty_sch_with_wires(
+            tmp_path,
+            wires=[
+                # chain A — horizontal + vertical, corner at (110,100)
+                ((100.0, 100.0), (110.0, 100.0)),
+                ((110.0, 100.0), (110.0, 105.0)),
+                # chain B — would catch a +X stub from (110,100)
+                ((112.54, 100.0), (112.54, 105.0)),
+            ],
+        )
+
+        labels = _phase5_label_orphan_chains(
+            schematic_path=sch,
+            resolved_net="SIG",
+            pins=[
+                {"ref": "R1", "pin": "2"},  # chain A
+                {"ref": "R2", "pin": "1"},  # chain A
+                {"ref": "R3", "pin": "2"},  # chain B
+                {"ref": "R4", "pin": "1"},  # chain B
+            ],
+            pin_endpoints={
+                "R1/2": (100.0, 100.0),
+                "R2/1": (110.0, 105.0),
+                "R3/2": (112.54, 100.0),
+                "R4/1": (112.54, 105.0),
+            },
+            exclude_pins={
+                ("R1", "2"), ("R2", "1"), ("R3", "2"), ("R4", "1")
+            },
+        )
+
+        text = sch.read_text()
+        # After labelling: we still want each chain to get exactly one
+        # SIG label.  The guard should pick a direction that doesn't
+        # merge.  Total SIG labels written: 2.
+        assert text.count('(label "SIG"') == 2, (
+            f"each disjoint chain needs one label, got "
+            f"{text.count('(label \"SIG\"')}: chain merge defect"
+        )
+
+        # And the chains should remain physically disjoint after
+        # labelling.  Walk both seeds and assert no overlap.
+        from commands.wire_connectivity import walk_wire_chain
+        ca = walk_wire_chain((100.0, 100.0), sch)
+        cb = walk_wire_chain((112.54, 100.0), sch)
+        assert ca is not None and cb is not None
+        assert ca.points.isdisjoint(cb.points), (
+            "Phase 5 branch-stubs merged two disjoint chains; "
+            "the merge guard should have refused the candidate"
+        )
+
+    def test_chain_with_foreign_label_skipped(self, tmp_path: Path):
+        """Defensive: if a chain already carries a foreign-net label
+        (indicating a cross-net merge bug elsewhere), Phase 5 must NOT
+        add a second label.  It would compound the merge and make the
+        problem harder to spot in ERC.  See issue #74."""
+        from commands.connection_schematic import _phase5_label_orphan_chains
+
+        sch = self._empty_sch_with_wires(
+            tmp_path,
+            wires=[((100.0, 100.0), (130.0, 100.0))],
+            labels=[("OTHER_NET", 130.0, 100.0)],
+        )
+
+        labels = _phase5_label_orphan_chains(
+            schematic_path=sch,
+            resolved_net="SIG",
+            pins=[{"ref": "R1", "pin": "2"}],
+            pin_endpoints={"R1/2": (100.0, 100.0)},
+            exclude_pins={("R1", "2")},
+        )
+
+        assert labels == [], (
+            "Phase 5 should refuse to label a chain that already carries "
+            "a foreign-net label — that indicates a cross-net merge "
+            "defect and adding another label compounds the bug."
+        )

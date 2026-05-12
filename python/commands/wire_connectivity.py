@@ -10,6 +10,7 @@ sub-sheet files and bridging nets via hierarchical labels / sheet pins.
 """
 
 import logging
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -321,6 +322,119 @@ def _find_connected_wires(
                                 net_points.update(all_wires[idx])
 
     return (visited, net_points)
+
+
+@dataclass(frozen=True)
+class WireChain:
+    """Physical connected component of the wire graph touching a query point.
+
+    ``points`` are IU coordinates of every wire endpoint in the chain (and
+    every T-junction interior coord registered into iu_to_wires).
+    ``labels`` are the net names of every (label | global_label |
+    hierarchical_label) whose position falls on a point in the chain.
+    ``wire_indices`` are indices into the wires-list used to build the
+    chain — useful for tests and for callers that want to inspect the
+    specific segments.
+    ``segments`` carry (start_iu, end_iu) for each wire in the chain,
+    ordered by wire index — callers use these for direction-aware
+    placement decisions (e.g. branch-stub perpendicular to a corner).
+    ``free_endpoints`` are chain points with degree exactly 1 in the
+    full wire graph — i.e. points where a single wire ends and nothing
+    else touches.  Natural anchors for label placement.
+
+    Unlike :func:`_find_connected_wires`, this chain does NOT bridge to
+    other wires sharing the same label name elsewhere on the sheet — it
+    is the strict *physical* connected component.  That distinction is
+    what makes it correct for "is this chain already labelled?" queries.
+    """
+
+    points: frozenset = field(default_factory=frozenset)
+    labels: frozenset = field(default_factory=frozenset)
+    wire_indices: frozenset = field(default_factory=frozenset)
+    segments: Tuple[Tuple[Tuple[int, int], Tuple[int, int]], ...] = ()
+    free_endpoints: frozenset = field(default_factory=frozenset)
+
+
+def walk_wire_chain(
+    point_mm: Tuple[float, float],
+    schematic_path: Any,
+) -> Optional[WireChain]:
+    """Walk the physical wire graph starting at *point_mm*.
+
+    Two wires are connected when they share an IU endpoint OR one wire's
+    endpoint falls strictly on the interior of another wire (T-junction)
+    — exactly the adjacency that KiCad's connectivity engine uses.
+
+    Returns ``None`` if the point lies on no wire (including interiors).
+    """
+    try:
+        sexp = _load_sexp(str(schematic_path))
+    except Exception as e:
+        logger.warning(f"walk_wire_chain: could not load {schematic_path}: {e}")
+        return None
+
+    all_wires = _parse_wires_sexp(sexp)
+    if not all_wires:
+        return None
+
+    adjacency, iu_to_wires = _build_adjacency(all_wires)
+    point_to_label, _ = _parse_labels_sexp(sexp)
+
+    query_iu = _to_iu(point_mm[0], point_mm[1])
+    seed_set = iu_to_wires.get(query_iu)
+    if not seed_set:
+        px, py = query_iu
+        for i, pts in enumerate(all_wires):
+            if len(pts) >= 2 and _point_on_segment(
+                px, py, pts[0][0], pts[0][1], pts[-1][0], pts[-1][1]
+            ):
+                seed_set = {i}
+                break
+    if not seed_set:
+        return None
+
+    visited: Set[int] = set(seed_set)
+    queue: List[int] = list(seed_set)
+    points: Set[Tuple[int, int]] = set()
+    for i in seed_set:
+        points.update(all_wires[i])
+    while queue:
+        wire_idx = queue.pop()
+        for nb in adjacency[wire_idx]:
+            if nb not in visited:
+                visited.add(nb)
+                queue.append(nb)
+                points.update(all_wires[nb])
+
+    labels: Set[str] = set()
+    for pt in points:
+        name = point_to_label.get(pt)
+        if name is not None:
+            labels.add(name)
+
+    # Free endpoints: chain points with exactly one wire touching them in
+    # the full wire graph.  Excludes T-junctions (degree ≥ 2 because the
+    # ender wire AND the interior-hit wire both register at the point).
+    free_endpoints: Set[Tuple[int, int]] = set()
+    for pt in points:
+        if len(iu_to_wires.get(pt, ())) == 1:
+            free_endpoints.add(pt)
+
+    # Stable, sorted-by-wire-index segment snapshot for direction-aware
+    # callers.  Each segment is (start_iu, end_iu).
+    segments: List[Tuple[Tuple[int, int], Tuple[int, int]]] = []
+    for i in sorted(visited):
+        pts_i = all_wires[i]
+        if len(pts_i) >= 2:
+            segments.append((tuple(pts_i[0]), tuple(pts_i[-1])))
+
+    return WireChain(
+        points=frozenset(points),
+        labels=frozenset(labels),
+        wire_indices=frozenset(visited),
+        segments=tuple(segments),
+        free_endpoints=frozenset(free_endpoints),
+    )
 
 
 def _parse_symbol_instances_sexp(

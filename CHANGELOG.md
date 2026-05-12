@@ -4,6 +4,71 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-12 part 2)
+
+- **connect_pins Phase 5: stub-style label now triggers on total
+  chain count, not just orphan count.**  Previously
+  ``use_stub_style = len(orphan_chains) >= 2``, which missed the case
+  where Phase 3 had already stubbed one of the net's chains.  Result
+  on a net like VC3 (multi-pin chain at U1+C4 plus an R4 single-pin
+  stub Phase 3 contributed): the multi-pin chain got an in-line label
+  on a free wire endpoint, the R4 chain had a proper Phase-3 stub
+  label, and the two read asymmetrically.  Fix:
+  ``use_stub_style = len(this_net_chains) >= 2`` where
+  ``this_net_chains`` includes both orphan AND already-labelled-with-
+  resolved_net chains.
+
+- **connect_pins Phase 5: merge guard in branch-stub placement.**
+  ``_try_branch_stub_at_corner`` could lay a 2.54 mm perpendicular
+  stub whose end-point coincided with another disjoint orphan chain
+  of the same target net — KiCad's sync_junctions then added a
+  junction and the chains merged.  Result on REGOUT / SRP on the
+  BMS sheet: two separate 4-6 pin sub-chains got branch-stub labels,
+  then merged into a single chain carrying both labels (a LOOP-flagged
+  duplicate-label state).  Fix: before laying a candidate stub, walk
+  the wire chain at the stub-end position; if it returns a chain
+  whose ``points`` set is disjoint from our chain's points, refuse
+  and try another perpendicular direction.
+
+- **connect_pins Phase 5: re-walk each chain just before labelling
+  it.**  An earlier iteration's branch-stub may have merged this
+  chain with another or labelled it through some unforeseen path.
+  Re-walking with the freshest file state catches both cases and
+  lets us skip a chain that no longer needs a label (or that has
+  acquired a foreign-net label, indicating cross-net contamination
+  to be left for ERC).
+
+Two new tests:
+``TestPhase5ChainFinder::test_stub_style_kicks_in_when_phase3_already_stubbed_one_chain``,
+``TestPhase5ChainFinder::test_branch_stub_refuses_to_bridge_to_another_chain``.
+Diagnostic helper at ``/tmp/claude-1000/claude/diagnose_chains.py``
+enumerates chains/labels/pins per chain and flags
+``DUPLICATE_LABELS``/``CROSS_NET``/``LOOP`` — handy for verifying
+fixes on real schematics.
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-12)
+
+- **connect_pins Phase 5: rewrite on top of the real wire graph.**  The
+  previous Phase 5 auto-label code did chain grouping by union-find over
+  `wired_pairs` segment endpoints — a proxy that missed mid-segment
+  T-junctions and produced two labels per net when two routed pairs
+  connected only through a wire-interior hit.  A `phase3_future_labels`
+  lookahead was added as a band-aid but didn't cover all cases.
+  Replaced with a new public helper
+  `commands.wire_connectivity.walk_wire_chain(point_mm, schematic_path)`
+  that BFSes the actual wire graph (reusing the T-junction-aware
+  `_build_adjacency`).  Phase 5 now runs AFTER Phase 3 (so the file's
+  wire graph already reflects every label Phase 3 added) and walks
+  chains directly from each wired pin endpoint, deduplicating by
+  `wire_indices`.  Single orphan chains get an in-line label on a free
+  wire endpoint; multi-orphan-chain nets get a perpendicular branch-stub
+  at a corner.  Defensive: a chain that already carries a foreign-net
+  label is skipped (don't compound a cross-net merge defect — see issue
+  #74).  Fixes the duplicate-label cases observed on BMS-sheet runs
+  (FET_MID, REGOUT, VC3 double-labels).  10 new tests
+  (`TestWalkWireChain` × 9, `TestPhase5ChainFinder` × 4); the union-find
+  pair-grouping path and the `phase3_future_labels` lookahead are gone.
+
 ### New MCP Tools (this branch: fixes/improvements_2, 2026-05-09)
 
 - **Schematic autoplacer** (7 tools: `autoplacer_load`, `autoplacer_set_params`,

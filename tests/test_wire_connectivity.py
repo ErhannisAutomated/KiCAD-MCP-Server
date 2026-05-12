@@ -30,6 +30,7 @@ from commands.wire_connectivity import (
     _parse_wires,
     _to_iu,
     get_wire_connections,
+    walk_wire_chain,
 )
 
 # ---------------------------------------------------------------------------
@@ -481,3 +482,173 @@ class TestGetWireConnectionsHandlerRefPinMode:
             iface = KiCADInterface.__new__(KiCADInterface)
             KiCADInterface.__init__(iface)
         assert "get_pin_net" not in iface.command_routes
+
+
+# ---------------------------------------------------------------------------
+# TestWalkWireChain — physical wire-graph chain finder
+# ---------------------------------------------------------------------------
+
+
+def _write_sch_with_wires_and_labels(
+    tmp_path: Path,
+    wires: list,
+    labels: list = (),
+) -> Path:
+    """Write a minimal real .kicad_sch with given wires + labels.
+
+    ``wires`` is [((x1,y1),(x2,y2)), ...].
+    ``labels`` is [(name, x, y), ...].  Label type is local ``label``.
+    """
+    parts = ['(kicad_sch (version 20250114) (generator "test")']
+    parts.append('  (uuid 11111111-1111-1111-1111-111111111111)')
+    parts.append('  (paper "A4")')
+    for (x1, y1), (x2, y2) in wires:
+        parts.append(
+            f'  (wire (pts (xy {x1} {y1}) (xy {x2} {y2})) '
+            '(stroke (width 0) (type default)) '
+            '(uuid 11111111-1111-1111-1111-111111111111))'
+        )
+    for name, x, y in labels:
+        parts.append(
+            f'  (label "{name}" (at {x} {y} 0) '
+            '(effects (font (size 1.27 1.27))) '
+            '(uuid 22222222-2222-2222-2222-222222222222))'
+        )
+    parts.append('  (sheet_instances (path "/" (page "1")))')
+    parts.append(')')
+    p = tmp_path / "t.kicad_sch"
+    p.write_text("\n".join(parts))
+    return p
+
+
+@pytest.mark.unit
+class TestWalkWireChain:
+    """Physical chain BFS via wire_connectivity.walk_wire_chain."""
+
+    def test_returns_none_off_wire(self, tmp_path: Path) -> None:
+        p = _write_sch_with_wires_and_labels(
+            tmp_path, [((0.0, 0.0), (10.0, 0.0))]
+        )
+        assert walk_wire_chain((50.0, 50.0), p) is None
+
+    def test_single_wire_endpoint(self, tmp_path: Path) -> None:
+        p = _write_sch_with_wires_and_labels(
+            tmp_path, [((0.0, 0.0), (10.0, 0.0))]
+        )
+        chain = walk_wire_chain((0.0, 0.0), p)
+        assert chain is not None
+        assert _to_iu(0.0, 0.0) in chain.points
+        assert _to_iu(10.0, 0.0) in chain.points
+        assert chain.labels == frozenset()
+
+    def test_label_attached_to_chain(self, tmp_path: Path) -> None:
+        p = _write_sch_with_wires_and_labels(
+            tmp_path,
+            wires=[((0.0, 0.0), (10.0, 0.0))],
+            labels=[("VCC", 10.0, 0.0)],
+        )
+        chain = walk_wire_chain((0.0, 0.0), p)
+        assert chain is not None
+        assert "VCC" in chain.labels
+
+    def test_t_junction_groups_into_single_chain(self, tmp_path: Path) -> None:
+        """A wire whose endpoint lands on the INTERIOR of another wire
+        must group into a single chain.  This is the regression for the
+        Phase 5 union-find bug where mid-segment T-junctions produced
+        two separate chain groups and two labels per net."""
+        # Long horizontal wire (0,0)→(20,0); short vertical wire whose
+        # bottom endpoint (10,0) is strictly on the long wire's interior.
+        p = _write_sch_with_wires_and_labels(
+            tmp_path,
+            wires=[
+                ((0.0, 0.0), (20.0, 0.0)),
+                ((10.0, 0.0), (10.0, 5.0)),
+            ],
+        )
+        # Walking from either end of either wire must yield the same chain.
+        chain_a = walk_wire_chain((0.0, 0.0), p)
+        chain_b = walk_wire_chain((10.0, 5.0), p)
+        assert chain_a is not None and chain_b is not None
+        assert chain_a.wire_indices == chain_b.wire_indices
+        assert len(chain_a.wire_indices) == 2
+
+    def test_disjoint_chains_have_distinct_indices(
+        self, tmp_path: Path
+    ) -> None:
+        p = _write_sch_with_wires_and_labels(
+            tmp_path,
+            wires=[
+                ((0.0, 0.0), (5.0, 0.0)),
+                ((10.0, 0.0), (15.0, 0.0)),
+            ],
+        )
+        chain_a = walk_wire_chain((0.0, 0.0), p)
+        chain_b = walk_wire_chain((10.0, 0.0), p)
+        assert chain_a is not None and chain_b is not None
+        assert chain_a.wire_indices.isdisjoint(chain_b.wire_indices)
+
+    def test_does_not_bridge_same_named_labels_across_chains(
+        self, tmp_path: Path
+    ) -> None:
+        """Two disjoint chains both labelled "VCC" must remain DISTINCT
+        physical chains.  walk_wire_chain is the strict physical
+        component; net-name bridging is not its job."""
+        p = _write_sch_with_wires_and_labels(
+            tmp_path,
+            wires=[
+                ((0.0, 0.0), (5.0, 0.0)),
+                ((10.0, 0.0), (15.0, 0.0)),
+            ],
+            labels=[("VCC", 5.0, 0.0), ("VCC", 15.0, 0.0)],
+        )
+        chain_a = walk_wire_chain((0.0, 0.0), p)
+        chain_b = walk_wire_chain((10.0, 0.0), p)
+        assert chain_a is not None and chain_b is not None
+        assert chain_a.wire_indices.isdisjoint(chain_b.wire_indices)
+        # Each chain sees its own label, not the other's pair.
+        assert "VCC" in chain_a.labels
+        assert "VCC" in chain_b.labels
+
+    def test_interior_query_point_lands_on_chain(self, tmp_path: Path) -> None:
+        """Calling walk_wire_chain at the MIDPOINT of a long wire should
+        still find that wire."""
+        p = _write_sch_with_wires_and_labels(
+            tmp_path, [((0.0, 0.0), (20.0, 0.0))]
+        )
+        chain = walk_wire_chain((10.0, 0.0), p)
+        assert chain is not None
+        assert len(chain.wire_indices) == 1
+
+    def test_free_endpoints_excludes_t_junction(self, tmp_path: Path) -> None:
+        """T-junction interior point is NOT a free endpoint (it has the
+        ender wire + the interior-hit wire registered → degree 2)."""
+        p = _write_sch_with_wires_and_labels(
+            tmp_path,
+            wires=[
+                ((0.0, 0.0), (20.0, 0.0)),
+                ((10.0, 0.0), (10.0, 5.0)),
+            ],
+        )
+        chain = walk_wire_chain((0.0, 0.0), p)
+        assert chain is not None
+        assert _to_iu(0.0, 0.0) in chain.free_endpoints   # truly free
+        assert _to_iu(20.0, 0.0) in chain.free_endpoints  # truly free
+        assert _to_iu(10.0, 5.0) in chain.free_endpoints  # stub end is free
+        assert _to_iu(10.0, 0.0) not in chain.free_endpoints  # T-junction
+
+    def test_segments_returned_in_index_order(self, tmp_path: Path) -> None:
+        p = _write_sch_with_wires_and_labels(
+            tmp_path,
+            wires=[
+                ((0.0, 0.0), (20.0, 0.0)),
+                ((10.0, 0.0), (10.0, 5.0)),
+            ],
+        )
+        chain = walk_wire_chain((0.0, 0.0), p)
+        assert chain is not None
+        # Each segment is (start_iu, end_iu); the chain has both wires.
+        assert len(chain.segments) == 2
+        starts = {seg[0] for seg in chain.segments}
+        ends = {seg[1] for seg in chain.segments}
+        assert _to_iu(0.0, 0.0) in starts or _to_iu(0.0, 0.0) in ends
+        assert _to_iu(10.0, 5.0) in starts or _to_iu(10.0, 5.0) in ends

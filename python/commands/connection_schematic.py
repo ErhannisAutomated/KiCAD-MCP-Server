@@ -18,6 +18,272 @@ except ImportError:
     WIRE_MANAGER_AVAILABLE = False
 
 
+_IU_PER_MM = 10000
+
+
+def _iu(p: Tuple[float, float]) -> Tuple[int, int]:
+    return (round(p[0] * _IU_PER_MM), round(p[1] * _IU_PER_MM))
+
+
+def _mm(p: Tuple[int, int]) -> List[float]:
+    return [p[0] / _IU_PER_MM, p[1] / _IU_PER_MM]
+
+
+def _phase5_label_orphan_chains(
+    *,
+    schematic_path: Path,
+    resolved_net: str,
+    pins: List[Dict[str, Any]],
+    pin_endpoints: Dict[str, Tuple[float, float]],
+    exclude_pins: Set[Tuple[str, str]],
+) -> List[List[float]]:
+    """Walk the wire graph from each wired pin endpoint and add a label
+    of *resolved_net* to any chain that doesn't already have one.
+
+    Runs AFTER Phase 3, so the wire graph already reflects every label
+    Phase 3 contributed.  Each unique physical chain is labelled at most
+    once.  When a single orphan chain exists for the net the label goes
+    in-line on a free wire endpoint; when ≥2 orphan chains exist each
+    gets its own stub-style label so a viewer can see that the net
+    continues elsewhere.
+
+    Returns the list of (x, y) label positions actually written.
+    """
+    from commands.schematic_router import (
+        check_spurious_connections,
+        collect_obstacles,
+    )
+    from commands.wire_connectivity import walk_wire_chain
+
+    labels_written: List[List[float]] = []
+
+    # Walk a chain from each pin endpoint that exists in the schematic.
+    # Dedupe by wire_indices so each unique physical chain is handled
+    # only once.
+    seen_keys: Set[frozenset] = set()
+    chains = []
+    for p in pins:
+        ref, pin_name = p.get("ref", ""), p.get("pin", "")
+        if not (ref and pin_name):
+            continue
+        key = f"{ref}/{pin_name}"
+        ep = pin_endpoints.get(key)
+        if ep is None:
+            continue
+        chain = walk_wire_chain((float(ep[0]), float(ep[1])), schematic_path)
+        if chain is None:
+            continue
+        if chain.wire_indices in seen_keys:
+            continue
+        seen_keys.add(chain.wire_indices)
+        chains.append(chain)
+
+    if not chains:
+        return labels_written
+
+    # Orphan = chain with no resolved_net label.  Defensive: a chain
+    # carrying a foreign-net label is almost certainly a cross-net
+    # merge defect (see issue #74) — don't compound it by adding a
+    # second label of our own.
+    orphan_chains = [
+        c for c in chains
+        if resolved_net not in c.labels
+        and not (c.labels - {resolved_net})
+    ]
+    if not orphan_chains:
+        return labels_written
+
+    # Stub-style applies whenever the net spans MULTIPLE chains in any
+    # sense — including chains already labelled by Phase 3 stubs.  If
+    # the net has one orphan multi-pin chain plus one Phase-3 stub
+    # chain, the orphan should also get a stub so the two reads
+    # symmetrically as "this net continues elsewhere".
+    this_net_chains = [
+        c for c in chains if not (c.labels - {resolved_net})
+    ]
+    use_stub_style = len(this_net_chains) >= 2
+
+    # Pin endpoints (this call's pins) in IU — we don't want to drop a
+    # label exactly on top of a component pin.
+    pin_ius: Set[Tuple[int, int]] = {
+        _iu(p) for p in pin_endpoints.values()
+    }
+
+    obstacles = collect_obstacles(schematic_path, exclude_pins=exclude_pins)
+
+    for chain_initial in orphan_chains:
+        # Re-walk from any seed point in the original chain so we have
+        # the freshest state.  A previous iteration's branch-stub may
+        # have merged this chain with another (changing the wire
+        # graph) or labelled it (so it's no longer orphan).
+        seed_pt = next(iter(chain_initial.points))
+        chain = walk_wire_chain(
+            (seed_pt[0] / _IU_PER_MM, seed_pt[1] / _IU_PER_MM),
+            schematic_path,
+        )
+        if chain is None:
+            continue
+        if resolved_net in chain.labels:
+            continue  # already labelled by an earlier iteration
+        if chain.labels - {resolved_net}:
+            continue  # cross-net merge — refuse to compound
+
+        label_pos = _choose_label_position(
+            chain=chain,
+            pin_ius=pin_ius,
+            use_stub_style=use_stub_style,
+            schematic_path=schematic_path,
+            resolved_net=resolved_net,
+            obstacles=obstacles,
+            check_spurious_connections=check_spurious_connections,
+        )
+        if label_pos is None:
+            continue
+
+        if WireManager.add_label(
+            schematic_path, resolved_net, label_pos, label_type="label"
+        ):
+            labels_written.append(label_pos)
+            # Refresh obstacles so the next chain's branch-stub guard
+            # sees this label.
+            obstacles = collect_obstacles(
+                schematic_path, exclude_pins=exclude_pins
+            )
+
+    return labels_written
+
+
+def _choose_label_position(
+    *,
+    chain,  # WireChain
+    pin_ius: Set[Tuple[int, int]],
+    use_stub_style: bool,
+    schematic_path: Path,
+    resolved_net: str,
+    obstacles,
+    check_spurious_connections,
+) -> Optional[List[float]]:
+    """Pick (or synthesise) a label position on *chain*.
+
+    Strategy, in priority order:
+      1. A free wire endpoint that is not a pin.  No new wire needed.
+      2. (stub-style only) A corner — two perpendicular wires meeting
+         at a non-pin vertex — branch a 2.54 mm perpendicular stub off
+         it, label the stub end.  Guarded by ``check_spurious_connections``.
+      3. (in-line only) Any chain point that isn't a pin endpoint.
+      4. Give up rather than drop a confusing label.
+    """
+    # --- 1. free non-pin endpoint -------------------------------------
+    free_candidates = sorted(
+        (pt for pt in chain.free_endpoints if pt not in pin_ius)
+    )
+    if free_candidates:
+        return _mm(free_candidates[0])
+
+    if use_stub_style:
+        # --- 2. corner + branch-stub ---------------------------------
+        stub_end = _try_branch_stub_at_corner(
+            chain=chain,
+            pin_ius=pin_ius,
+            schematic_path=schematic_path,
+            resolved_net=resolved_net,
+            obstacles=obstacles,
+            check_spurious_connections=check_spurious_connections,
+        )
+        if stub_end is not None:
+            return stub_end
+        # Fall through: stub creation failed.  Better to mis-place an
+        # in-line label than leave the chain entirely unlabelled, since
+        # an unlabelled chain in a multi-chain net silently fragments
+        # the net across calls.
+
+    # --- 3. in-line label on any non-pin chain point -----------------
+    non_pin = sorted(pt for pt in chain.points if pt not in pin_ius)
+    if non_pin:
+        return _mm(non_pin[0])
+
+    # --- 4. final fallback: any chain point (will sit on a pin
+    #       endpoint).  Matches old behavior for pin-to-pin chains
+    #       with no intermediate wire vertex.
+    any_pt = sorted(chain.points)
+    if any_pt:
+        return _mm(any_pt[0])
+    return None
+
+
+def _try_branch_stub_at_corner(
+    *,
+    chain,  # WireChain
+    pin_ius: Set[Tuple[int, int]],
+    schematic_path: Path,
+    resolved_net: str,
+    obstacles,
+    check_spurious_connections,
+) -> Optional[List[float]]:
+    """Find a perpendicular 2-segment corner in *chain* and add a 2.54mm
+    stub perpendicular to one of the corner wires.  Returns the stub
+    end (mm) on success, else None.
+    """
+    # Build endpoint → list-of-(wire_idx, other_endpoint).
+    endpoint_to_segs: Dict[Tuple[int, int], List[Tuple[int, Tuple[int, int]]]] = {}
+    for i, (a, b) in enumerate(chain.segments):
+        endpoint_to_segs.setdefault(a, []).append((i, b))
+        endpoint_to_segs.setdefault(b, []).append((i, a))
+
+    L_IU = round(2.54 * _IU_PER_MM)
+    candidates = sorted(endpoint_to_segs.keys())
+    for pt in candidates:
+        if pt in pin_ius:
+            continue
+        incident = endpoint_to_segs[pt]
+        if len(incident) != 2:
+            continue  # not a corner
+        (_, other_a), (_, other_b) = incident
+        d1 = (other_a[0] - pt[0], other_a[1] - pt[1])
+        d2 = (other_b[0] - pt[0], other_b[1] - pt[1])
+        # Require perpendicular meeting.
+        if d1[0] * d2[0] + d1[1] * d2[1] != 0:
+            continue
+        # Branch direction = perpendicular to ONE of the two segments.
+        # Pick the axis NOT used by d1 (i.e. branch off perpendicular
+        # to the first incident wire's direction).
+        if d1[0] != 0:  # d1 is horizontal → branch vertical
+            options = [(0, +L_IU), (0, -L_IU)]
+        else:  # d1 is vertical → branch horizontal
+            options = [(+L_IU, 0), (-L_IU, 0)]
+        for dx_iu, dy_iu in options:
+            stub_end_iu = (pt[0] + dx_iu, pt[1] + dy_iu)
+            branch_mm = _mm(pt)
+            stub_mm = _mm(stub_end_iu)
+            bad = check_spurious_connections(
+                [(tuple(branch_mm), tuple(stub_mm))],
+                obstacles,
+                resolved_net,
+                own_endpoints=(tuple(branch_mm), tuple(stub_mm)),
+            )
+            if bad is not None:
+                continue
+            # Merge guard: if stub_end already lies on some existing
+            # wire chain that is NOT this chain, adding the stub would
+            # T-junction them together — i.e. silently fuse two
+            # orphan chains of the same target net into one and leave
+            # us labelling both.  Refuse and try another direction.
+            from commands.wire_connectivity import walk_wire_chain as _wwc
+            preexisting = _wwc(
+                (stub_mm[0], stub_mm[1]), schematic_path
+            )
+            if (
+                preexisting is not None
+                and preexisting.points.isdisjoint(chain.points)
+            ):
+                continue
+            if WireManager.add_wire(
+                schematic_path, list(branch_mm), list(stub_mm)
+            ):
+                return list(stub_mm)
+    return None
+
+
 class ConnectionManager:
     """Manage connections between components in schematics"""
 
@@ -673,6 +939,10 @@ class ConnectionManager:
         wired_pin_set: set = set()
         wired_pairs: List[Dict[str, Any]] = []
         routing_failures: List[Dict[str, Any]] = []
+        # Always bound so Phase 5's call site doesn't rely on lazy
+        # `and` short-circuiting through the power-net path.
+        pin_endpoints: Dict[str, Tuple[float, float]] = {}
+        exclude: Set[Tuple[str, str]] = set()
 
         try_wire = style in ("wire", "auto")
         if try_wire:
@@ -896,198 +1166,12 @@ class ConnectionManager:
                 ),
             }
 
-        # Phase 5 — auto-label orphan chains.  Runs BEFORE Phase 3 in
-        # the file but accounts for Phase 3's future contributions:
-        # any pin that Phase 3 will stub-and-label (= unwired + not
-        # already on a different net) is treated as a "future label"
-        # whose stub will sit on the chain's pin endpoint, so that
-        # chain doesn't need a Phase 5 label.  Without this lookahead,
-        # nets like FET_MID (where Phase 3 labels Q1's duplicate-pad
-        # pins Q1/7+8 and Q1/5+6) end up with both Phase 5 AND Phase 3
-        # labels on the same chain.
+        # Auto-label state.  Populated by Phase 5 (runs after Phase 3
+        # below) which walks the real wire graph from each wired pin
+        # endpoint and adds a label to any chain that isn't already
+        # labelled with resolved_net.
         auto_labels_added: List[List[float]] = []
         auto_label_added: Optional[List[float]] = None
-        if wired_pairs and resolved_net:
-            from commands.schematic_router import (
-                _classify_wires_by_net,
-                collect_obstacles as _re_collect_obs,
-            )
-
-            def _key(p):
-                return (round(p[0] * 100), round(p[1] * 100))
-
-            def _label_reachable_endpoints() -> Set[Tuple[int, int]]:
-                """Endpoints currently reachable from a `resolved_net` label
-                via wire/T-junction connectivity.  Re-computed each time we
-                add a label so subsequent iterations benefit."""
-                post_obs = _re_collect_obs(schematic_path, exclude_pins=exclude)
-                label_reachable = _classify_wires_by_net(
-                    post_obs, resolved_net, own_pin_endpoints=()
-                )
-                endpoints: Set[Tuple[int, int]] = set()
-                for idx in label_reachable:
-                    wa, wb = post_obs.other_wires[idx]
-                    endpoints.add(_key(wa))
-                    endpoints.add(_key(wb))
-                for (lpos, lname) in post_obs.other_labels:
-                    if lname == resolved_net:
-                        endpoints.add(_key(lpos))
-                return endpoints
-
-            reachable_endpoints = _label_reachable_endpoints()
-
-            # Future Phase 3 labels: pins that Phase 3 will stub-and-
-            # label (not in wired_pin_set, not already on a different
-            # net).  Each such pin's endpoint becomes a label-reachable
-            # cell after Phase 3 runs, so a chain touching that pin
-            # endpoint doesn't need a Phase 5 label of its own.  We
-            # use the same coord-key normalisation as reachable_endpoints
-            # so the chain-reachability check below treats them
-            # uniformly.
-            phase3_future_labels: Set[Tuple[int, int]] = set()
-            if _locator_for_endpoints is not None:
-                for p in pins:
-                    ref, pin = p.get("ref", ""), p.get("pin", "")
-                    if not (ref and pin):
-                        continue
-                    key = f"{ref}/{pin}"
-                    if key in wired_pin_set:
-                        continue
-                    cur = existing.get(key)
-                    if cur is not None and cur != resolved_net:
-                        # Will fail in Phase 3, not labelled.
-                        continue
-                    pt = pin_endpoints.get(key)
-                    if pt is not None:
-                        phase3_future_labels.add(_key(pt))
-            reachable_endpoints |= phase3_future_labels
-
-            # Group wired_pairs into chains.  MST routing typically
-            # produces one connected wire-graph per net (every pair
-            # shares an endpoint with the previous one), but we have
-            # to detect that explicitly so Phase 5 doesn't label every
-            # *pair* as a separate orphan when they're really one
-            # chain.  Use union-find over pair indices, unioning two
-            # pairs whenever they share a wire endpoint coord.
-            n_pairs = len(wired_pairs)
-            _parent = list(range(n_pairs))
-
-            def _find(x: int) -> int:
-                while _parent[x] != x:
-                    _parent[x] = _parent[_parent[x]]
-                    x = _parent[x]
-                return x
-
-            def _union(a: int, b: int) -> None:
-                ra, rb = _find(a), _find(b)
-                if ra != rb:
-                    _parent[ra] = rb
-
-            ep_to_pair: Dict[Tuple[int, int], int] = {}
-            for i, wp in enumerate(wired_pairs):
-                for (a, b) in wp["segments"]:
-                    for ep in (a, b):
-                        k = _key(ep)
-                        if k in ep_to_pair:
-                            _union(i, ep_to_pair[k])
-                        else:
-                            ep_to_pair[k] = i
-
-            # Group pairs by chain root.
-            chains: Dict[int, List[Dict[str, Any]]] = {}
-            for i, wp in enumerate(wired_pairs):
-                chains.setdefault(_find(i), []).append(wp)
-
-            # For each chain, decide if it's reachable from an existing
-            # target_net label (no relabel needed) or an orphan.
-            orphan_chains: List[List[Dict[str, Any]]] = []
-            for chain_pairs in chains.values():
-                chain_reachable = False
-                for wp in chain_pairs:
-                    for (a, b) in wp["segments"]:
-                        for ep in (a, b):
-                            if _key(ep) in reachable_endpoints:
-                                chain_reachable = True
-                                break
-                        if chain_reachable:
-                            break
-                    if chain_reachable:
-                        break
-                if not chain_reachable:
-                    orphan_chains.append(chain_pairs)
-
-            use_branch_stubs = len(orphan_chains) >= 2
-            from commands.schematic_router import (
-                check_spurious_connections,
-            )
-
-            for chain_pairs in orphan_chains:
-                # Pick a representative pair: prefer one with multiple
-                # segments (gives a corner to branch off), else fall
-                # back to the first.
-                wp = next(
-                    (wp for wp in chain_pairs if len(wp["segments"]) >= 2),
-                    chain_pairs[0],
-                )
-                segs = wp["segments"]
-                if not segs:
-                    continue
-                label_pos: Optional[List[float]] = None
-                # Branch-stub only when (a) there are multiple orphan
-                # chains needing visual distinction, AND (b) the chain
-                # has a corner to branch off (single-segment chains
-                # have only pin endpoints, where a perpendicular branch
-                # is confusing).
-                if use_branch_stubs and len(segs) >= 2:
-                    seg_a, seg_b = segs[0]
-                    seg_dx = seg_b[0] - seg_a[0]
-                    seg_dy = seg_b[1] - seg_a[1]
-                    L = 2.54
-                    if abs(seg_dx) > abs(seg_dy):
-                        cands = [(0.0, +L), (0.0, -L)]
-                    else:
-                        cands = [(+L, 0.0), (-L, 0.0)]
-                    branch_pt: Tuple[float, float] = (
-                        float(seg_b[0]), float(seg_b[1]),
-                    )
-                    for dx, dy in cands:
-                        stub_end = (
-                            round(branch_pt[0] + dx, 4),
-                            round(branch_pt[1] + dy, 4),
-                        )
-                        bad = check_spurious_connections(
-                            [(branch_pt, stub_end)],
-                            obstacles,
-                            resolved_net,
-                            own_endpoints=(branch_pt, stub_end),
-                        )
-                        if bad is None:
-                            if WireManager.add_wire(
-                                schematic_path,
-                                list(branch_pt),
-                                list(stub_end),
-                            ):
-                                label_pos = list(stub_end)
-                                break
-                if label_pos is None:
-                    # Fallback: in-line label at segs[0][1].
-                    label_pos = list(segs[0][1])
-                if WireManager.add_label(
-                    schematic_path, resolved_net, label_pos, label_type="label"
-                ):
-                    auto_labels_added.append(label_pos)
-                    # Refresh both: reachable_endpoints (for next pair's
-                    # orphan check — the new label may now make a
-                    # subsequent chain reachable) and obstacles (for
-                    # the next branch-stub guard).
-                    reachable_endpoints = _label_reachable_endpoints()
-                    obstacles = collect_obstacles(
-                        schematic_path, exclude_pins=exclude
-                    )
-
-        # Backwards-compat key — first auto-label only.  The full list is
-        # exposed via auto_labels_added.
-        auto_label_added = auto_labels_added[0] if auto_labels_added else None
 
         # Phase 3: per-pin label loop for everything not already wired
         connected: List[str] = []
@@ -1128,6 +1212,22 @@ class ConnectionManager:
                 connected.append(key)
             else:
                 failed.append({"pin": key, "reason": result.get("message", "unknown")})
+
+        # Phase 5 — auto-label any wire chain that still has no
+        # resolved_net label after Phase 3.  Walks the real wire graph
+        # (handles mid-segment T-junctions correctly) so chains that
+        # share a wire endpoint or T-junction are one group, not many.
+        if try_wire and wired_pairs and resolved_net and pin_endpoints:
+            auto_labels_added.extend(
+                _phase5_label_orphan_chains(
+                    schematic_path=schematic_path,
+                    resolved_net=resolved_net,
+                    pins=pins,
+                    pin_endpoints=pin_endpoints,
+                    exclude_pins=exclude,
+                )
+            )
+            auto_label_added = auto_labels_added[0] if auto_labels_added else None
 
         parts: List[str] = []
         if wired_pairs:
