@@ -7,6 +7,7 @@ Uses S-expression parsing to extract pin data from symbol definitions.
 
 import logging
 import math
+import re
 import tempfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
@@ -17,15 +18,125 @@ from skip import Schematic
 
 logger = logging.getLogger("kicad_interface")
 
+# KiCad lib_symbols sub-symbol naming: "<base>_<unit>_<convert>".
+# unit=0 is "common to all units" (rare); convert is body style for de-Morgan.
+_SUBSYM_UNIT_RE = re.compile(r"_(\d+)_\d+$")
+
 
 class PinLocator:
     """Locate pins on symbol instances in KiCad schematics"""
 
     def __init__(self) -> None:
         """Initialize pin locator with empty cache"""
-        self.pin_definition_cache = {}  # Cache: "lib_id:symbol_name" -> pin_data
+        self.pin_definition_cache = {}  # Cache: "path:lib_id" -> pin_data
         self._schematic_cache: Dict[str, object] = {}  # Cache: path -> loaded Schematic
         self._sexp_cache: Dict[str, Any] = {}  # Cache: path -> parsed sexpdata (mirror-aware)
+        # Per-path mtime watch; entries cleared when the file changes on disk.
+        # Without this, ConnectionManager's class-level singleton holds stale state
+        # across writes done outside the MCP request that populated the cache
+        # (e.g. DynamicSymbolLoader.add_component called from a script while the
+        # server is running, or a second tool that wrote via a different code path).
+        self._mtime_cache: Dict[str, float] = {}
+
+    def _invalidate_if_changed(self, schematic_path: Path) -> None:
+        """Drop cached state for ``schematic_path`` if its mtime advanced."""
+        path_key = str(schematic_path)
+        try:
+            mtime = schematic_path.stat().st_mtime
+        except OSError:
+            return  # missing file → leave caches alone, the open() will surface the error
+        prev = self._mtime_cache.get(path_key)
+        if prev is not None and mtime <= prev:
+            return
+        # File changed (or first time we've seen it post-write): clear all path-keyed entries.
+        self._schematic_cache.pop(path_key, None)
+        self._sexp_cache.pop(path_key, None)
+        prefix = f"{path_key}:"
+        for k in [k for k in self.pin_definition_cache if k.startswith(prefix)]:
+            self.pin_definition_cache.pop(k, None)
+        self._mtime_cache[path_key] = mtime
+
+    @staticmethod
+    def parse_pins_per_unit(symbol_def: list) -> Dict[int, Dict[str, Dict[str, Any]]]:
+        """Walk a lib_symbols (symbol "Foo" …) node and return
+        ``{unit_number: {pin_number: pin_data}}``.
+
+        KiCad lib_symbols groups pins by sub-symbol named like
+        ``<base>_<unit>_<convert>`` (e.g. ``FDS9926A_1_1``,
+        ``FDS9926A_2_1``).  The (unit N) on each placed (symbol …)
+        block selects one of these.  Single-unit symbols use unit 1
+        with sub-symbol name like ``R_0_1`` / ``R_1_1``; convert is
+        body style for symbols with de-Morgan variants.
+
+        Sub-symbols whose unit field is "0" hold graphics common to
+        all units — their pins (rare) are mirrored into every unit's
+        dict so callers don't have to special-case them.
+        """
+        by_unit: Dict[int, Dict[str, Dict[str, Any]]] = {}
+        if not (isinstance(symbol_def, list) and len(symbol_def) > 1):
+            return by_unit
+
+        def collect_pins_direct(sub: list) -> Dict[str, Dict[str, Any]]:
+            out: Dict[str, Dict[str, Any]] = {}
+            for child in sub[2:]:
+                if not (isinstance(child, list) and child and child[0] == Symbol("pin")):
+                    continue
+                pin_data: Dict[str, Any] = {
+                    "x": 0.0,
+                    "y": 0.0,
+                    "angle": 0.0,
+                    "length": 0.0,
+                    "name": "",
+                    "number": "",
+                    "type": str(child[1]) if len(child) > 1 else "passive",
+                }
+                for sp in child[2:]:
+                    if not (isinstance(sp, list) and sp):
+                        continue
+                    if sp[0] == Symbol("at") and len(sp) >= 3:
+                        try:
+                            pin_data["x"] = float(sp[1])
+                            pin_data["y"] = float(sp[2])
+                            if len(sp) >= 4:
+                                pin_data["angle"] = float(sp[3])
+                        except (TypeError, ValueError):
+                            pass
+                    elif sp[0] == Symbol("length") and len(sp) >= 2:
+                        try:
+                            pin_data["length"] = float(sp[1])
+                        except (TypeError, ValueError):
+                            pass
+                    elif sp[0] == Symbol("name") and len(sp) >= 2:
+                        pin_data["name"] = str(sp[1]).strip('"')
+                    elif sp[0] == Symbol("number") and len(sp) >= 2:
+                        pin_data["number"] = str(sp[1]).strip('"')
+                if pin_data["number"]:
+                    out[pin_data["number"]] = pin_data
+            return out
+
+        for sub in symbol_def[2:]:
+            if not (isinstance(sub, list) and len(sub) > 1 and sub[0] == Symbol("symbol")):
+                continue
+            sub_name = str(sub[1]).strip('"') if isinstance(sub[1], str) else ""
+            m = _SUBSYM_UNIT_RE.search(sub_name)
+            unit = int(m.group(1)) if m else 1
+            sub_pins = collect_pins_direct(sub)
+            if sub_pins:
+                by_unit.setdefault(unit, {}).update(sub_pins)
+
+        if 0 in by_unit:
+            shared = by_unit.pop(0)
+            for u in by_unit:
+                for pn, pd in shared.items():
+                    by_unit[u].setdefault(pn, pd)
+
+        if not by_unit:
+            # Fallback: no sub-symbol unit suffix matched (older / hand-rolled
+            # symbol defs).  Treat every pin found anywhere as unit 1.
+            all_pins = PinLocator.parse_symbol_definition(symbol_def)
+            if all_pins:
+                by_unit[1] = all_pins
+        return by_unit
 
     @staticmethod
     def parse_symbol_definition(symbol_def: list) -> Dict[str, Dict]:
@@ -103,6 +214,7 @@ class PinLocator:
         Returns:
             Dictionary mapping pin number -> pin data
         """
+        self._invalidate_if_changed(schematic_path)
         # Check cache
         cache_key = f"{schematic_path}:{lib_id}"
         if cache_key in self.pin_definition_cache:
@@ -174,6 +286,140 @@ class PinLocator:
             logger.error(traceback.format_exc())
             return {}
 
+    def get_pins_per_unit(
+        self, schematic_path: Path, lib_id: str
+    ) -> Dict[int, Dict[str, Dict[str, Any]]]:
+        """Cached wrapper around ``parse_pins_per_unit``: locate the
+        lib_symbols definition matching ``lib_id`` and return its pins
+        grouped by unit.  See ``parse_pins_per_unit`` for the format.
+
+        Uses the same name-matching as ``get_symbol_pins`` (exact
+        match, then bare-name prefix) so e.g. instance lib_id
+        ``stat-tis-custom:BAT_18650`` resolves to lib_symbols entry
+        ``BAT_18650_3``.
+        """
+        self._invalidate_if_changed(schematic_path)
+        cache_key = f"{schematic_path}:per_unit:{lib_id}"
+        if cache_key in self.pin_definition_cache:
+            return self.pin_definition_cache[cache_key]
+        try:
+            with open(schematic_path, "r", encoding="utf-8") as f:
+                sch_data = sexpdata.loads(f.read())
+            lib_symbols = None
+            for item in sch_data:
+                if isinstance(item, list) and item and item[0] == Symbol("lib_symbols"):
+                    lib_symbols = item
+                    break
+            if not lib_symbols:
+                return {}
+            bare_name = lib_id.split(":")[-1] if ":" in lib_id else lib_id
+            best_match = None
+            for item in lib_symbols[1:]:
+                if not (isinstance(item, list) and len(item) > 1 and item[0] == Symbol("symbol")):
+                    continue
+                symbol_name = str(item[1]).strip('"')
+                if symbol_name == lib_id:
+                    best_match = item
+                    break
+                if best_match is None:
+                    sn_bare = symbol_name.split(":")[-1] if ":" in symbol_name else symbol_name
+                    if sn_bare == bare_name or (
+                        sn_bare.startswith(bare_name)
+                        and len(sn_bare) > len(bare_name)
+                        and sn_bare[len(bare_name)] == "_"
+                        and sn_bare[len(bare_name) + 1 :].isdigit()
+                    ):
+                        best_match = item
+            if best_match is None:
+                return {}
+            by_unit = PinLocator.parse_pins_per_unit(best_match)
+            self.pin_definition_cache[cache_key] = by_unit
+            return by_unit
+        except Exception as e:
+            logger.error(f"get_pins_per_unit({lib_id}): {e}")
+            return {}
+
+    def _find_placed_instances(
+        self, schematic_path: Path, symbol_reference: str
+    ) -> List[Tuple[float, float, float, bool, bool, str, int]]:
+        """Return every placed (symbol …) block whose Reference matches
+        ``symbol_reference``, as ``(x, y, rotation, mirror_x, mirror_y,
+        lib_id, unit)``.  Used to disambiguate multi-unit components
+        where the same reference appears on multiple placed blocks.
+        """
+        self._invalidate_if_changed(schematic_path)
+        sch_key = str(schematic_path)
+        try:
+            if sch_key not in self._sexp_cache:
+                with open(schematic_path, "r", encoding="utf-8") as f:
+                    self._sexp_cache[sch_key] = sexpdata.loads(f.read())
+        except Exception as e:
+            logger.error(f"_find_placed_instances: failed to parse {schematic_path}: {e}")
+            return []
+
+        sexp = self._sexp_cache[sch_key]
+        results: List[Tuple[float, float, float, bool, bool, str, int]] = []
+        for top in sexp:
+            if not (isinstance(top, list) and len(top) > 1 and top[0] == Symbol("symbol")):
+                continue
+            ref = None
+            x = y = rot = 0.0
+            mx = my = False
+            lib_id = ""
+            unit = 1
+            for sub in top[1:]:
+                if not (isinstance(sub, list) and sub):
+                    continue
+                tag = sub[0]
+                if tag == Symbol("at"):
+                    if len(sub) >= 3:
+                        try:
+                            x = float(sub[1])
+                            y = float(sub[2])
+                        except (TypeError, ValueError):
+                            pass
+                    if len(sub) >= 4:
+                        try:
+                            rot = float(sub[3])
+                        except (TypeError, ValueError):
+                            pass
+                elif tag == Symbol("lib_id") and len(sub) >= 2:
+                    lib_id = str(sub[1]).strip('"')
+                elif tag == Symbol("mirror") and len(sub) >= 2:
+                    mv = str(sub[1])
+                    if mv == "x":
+                        mx = True
+                    elif mv == "y":
+                        my = True
+                elif tag == Symbol("unit") and len(sub) >= 2:
+                    try:
+                        unit = int(sub[1])
+                    except (TypeError, ValueError):
+                        pass
+                elif tag == Symbol("property") and len(sub) >= 3:
+                    if str(sub[1]).strip('"') == "Reference":
+                        ref = str(sub[2]).strip('"').rstrip("_")
+            if ref == symbol_reference:
+                results.append((x, y, rot, mx, my, lib_id, unit))
+        return results
+
+    @staticmethod
+    def _resolve_pin_in_units(
+        per_unit: Dict[int, Dict[str, Dict[str, Any]]], pin_number: str
+    ) -> Tuple[Optional[int], Optional[str], Optional[Dict[str, Any]]]:
+        """Find which (unit, resolved-pin-number, pin_data) the lookup
+        key resolves to.  Tries exact pin-number match first, then pin
+        name match across units.  Returns ``(None, None, None)`` if not
+        found."""
+        for u, pins in per_unit.items():
+            if pin_number in pins:
+                return u, pin_number, pins[pin_number]
+        for u, pins in per_unit.items():
+            for num, data in pins.items():
+                if data.get("name") == pin_number:
+                    return u, num, data
+        return None, None, None
+
     @staticmethod
     def rotate_point(x: float, y: float, angle_degrees: float) -> Tuple[float, float]:
         """
@@ -206,6 +452,7 @@ class PinLocator:
     def _get_lib_id(self, schematic_path: Path, symbol_reference: str) -> Optional[str]:
         """Helper: return the lib_id string for a placed symbol"""
         try:
+            self._invalidate_if_changed(schematic_path)
             sch_key = str(schematic_path)
             if sch_key not in self._schematic_cache:
                 self._schematic_cache[sch_key] = Schematic(sch_key)
@@ -230,6 +477,7 @@ class PinLocator:
         import sexpdata as _sexpdata
         from commands.wire_dragger import WireDragger
 
+        self._invalidate_if_changed(schematic_path)
         sch_key = str(schematic_path)
         try:
             if sch_key not in self._sexp_cache:
@@ -253,31 +501,50 @@ class PinLocator:
         Get the outward angle of a pin endpoint in degrees (0=right, 90=up, 180=left, 270=down).
         This is the direction a wire stub must extend to stay connected to the pin.
 
-        Accounts for mirror flags read directly from the .kicad_sch file.
+        Accounts for mirror flags read directly from the .kicad_sch file,
+        and selects the placed unit that owns the requested pin (so
+        multi-unit symbols give the right answer for unit-N pins).
 
         Returns angle in degrees, or None if pin not found.
         """
         try:
-            transform = self._get_symbol_transform(schematic_path, symbol_reference)
-            if transform is None:
+            instances = self._find_placed_instances(schematic_path, symbol_reference)
+            if not instances:
                 return None
-
-            _, _, symbol_rotation, mirror_x, mirror_y, lib_id = transform
+            lib_id = next((inst[5] for inst in instances if inst[5]), None)
             if not lib_id:
                 return None
 
-            pins = self.get_symbol_pins(schematic_path, lib_id)
-            if pin_number not in pins:
-                matched_num = next(
-                    (num for num, data in pins.items() if data.get("name") == pin_number),
-                    None,
-                )
-                if matched_num:
-                    pin_number = matched_num
-                else:
+            per_unit = self.get_pins_per_unit(schematic_path, lib_id)
+            owning_unit, _resolved_num, pin_data = self._resolve_pin_in_units(
+                per_unit, pin_number
+            )
+            if pin_data is None:
+                # Fallback: lib_symbols had no per-unit structure we
+                # could parse — use whole-symbol pin set + first instance.
+                pins = self.get_symbol_pins(schematic_path, lib_id)
+                if pin_number not in pins:
+                    matched_num = next(
+                        (num for num, data in pins.items() if data.get("name") == pin_number),
+                        None,
+                    )
+                    if matched_num:
+                        pin_number = matched_num
+                    else:
+                        return None
+                pin_data = pins[pin_number]
+                inst = instances[0]
+            else:
+                inst = next((i for i in instances if i[6] == owning_unit), None)
+                if inst is None:
+                    logger.warning(
+                        f"Pin {pin_number} on {symbol_reference} is owned by unit "
+                        f"{owning_unit}, which is not placed"
+                    )
                     return None
 
-            pin_def_angle = pins[pin_number].get("angle", 0)
+            _, _, symbol_rotation, mirror_x, mirror_y, _, _ = inst
+            pin_def_angle = pin_data.get("angle", 0)
 
             # NOTE: pin_world_xy Y-flips POSITIONS (lib Y-up → screen Y-down).
             # We do NOT Y-flip the angle here. Callers use the formula
@@ -320,7 +587,13 @@ class PinLocator:
         self, schematic_path: Path, symbol_reference: str, pin_number: str
     ) -> Optional[List[float]]:
         """
-        Get the absolute location of a pin on a symbol instance
+        Get the absolute location of a pin on a symbol instance.
+
+        For multi-unit symbols (one reference, multiple placed (symbol …)
+        blocks each with their own (unit N)), the locator identifies
+        which unit owns the requested pin (via lib_symbols' sub-symbol
+        naming `<base>_<unit>_<convert>`) and transforms against THAT
+        unit's placed instance — not the first one found.
 
         Args:
             schematic_path: Path to .kicad_sch file
@@ -331,69 +604,68 @@ class PinLocator:
             [x, y] absolute coordinates of the pin, or None if not found
         """
         try:
-            # Load schematic with kicad-skip to get symbol instance
-            # Use cache to avoid reloading the file for every pin lookup
-            sch_key = str(schematic_path)
-            if sch_key not in self._schematic_cache:
-                self._schematic_cache[sch_key] = Schematic(sch_key)
-            sch = self._schematic_cache[sch_key]
-
-            # Find the symbol instance.
-            # skip may write references with a trailing "_" (e.g. "R1_") — strip it when comparing.
-            target_symbol = None
-            for symbol in sch.symbol:
-                ref = symbol.property.Reference.value.rstrip("_")
-                if ref == symbol_reference:
-                    target_symbol = symbol
-                    break
-
-            if not target_symbol:
+            self._invalidate_if_changed(schematic_path)
+            instances = self._find_placed_instances(schematic_path, symbol_reference)
+            if not instances:
                 logger.error(f"Symbol {symbol_reference} not found in schematic")
                 return None
 
-            # Get symbol transform from sexpdata (authoritative: reflects mirror state
-            # after rotate_schematic_component, which kicad-skip cache does not).
-            transform = self._get_symbol_transform(schematic_path, symbol_reference)
-            if transform is None:
-                logger.error(f"Could not read transform for {symbol_reference}")
-                return None
-            symbol_x, symbol_y, symbol_rotation, mirror_x, mirror_y, lib_id = transform
-
+            lib_id = next((inst[5] for inst in instances if inst[5]), None)
             if not lib_id:
                 logger.error(f"Symbol {symbol_reference} has no lib_id")
                 return None
 
-            logger.debug(
-                f"Symbol {symbol_reference}: pos=({symbol_x}, {symbol_y}), rot={symbol_rotation}, "
-                f"mirror_x={mirror_x}, mirror_y={mirror_y}, lib_id={lib_id}"
+            per_unit = self.get_pins_per_unit(schematic_path, lib_id)
+            owning_unit, resolved_num, pin_data = self._resolve_pin_in_units(
+                per_unit, pin_number
             )
-
-            # Get pin definitions for this symbol
-            pins = self.get_symbol_pins(schematic_path, lib_id)
-            if not pins:
-                logger.error(f"No pin definitions found for {lib_id}")
-                return None
-
-            # Find the requested pin — match by number first, then by name
-            if pin_number not in pins:
-                # Try matching by pin name (e.g. "VCC1", "SDA", "GND")
-                matched_num = next(
-                    (num for num, data in pins.items() if data.get("name") == pin_number),
-                    None,
-                )
-                if matched_num:
-                    logger.debug(
-                        f"Resolved pin name '{pin_number}' to pin number '{matched_num}' on {symbol_reference}"
+            if pin_data is None:
+                # Per-unit parse came back empty (e.g. an unusual lib_symbol);
+                # fall back to whole-symbol pin set + first placed instance.
+                pins = self.get_symbol_pins(schematic_path, lib_id)
+                if not pins:
+                    logger.error(f"No pin definitions found for {lib_id}")
+                    return None
+                if pin_number not in pins:
+                    matched_num = next(
+                        (num for num, data in pins.items() if data.get("name") == pin_number),
+                        None,
                     )
-                    pin_number = matched_num
-                else:
-                    logger.error(
-                        f"Pin {pin_number} not found on {symbol_reference}. Available pins: {list(pins.keys())} "
-                        f"(names: {[d.get('name','') for d in pins.values()]})"
+                    if matched_num:
+                        logger.debug(
+                            f"Resolved pin name '{pin_number}' to '{matched_num}' on {symbol_reference}"
+                        )
+                        pin_number = matched_num
+                    else:
+                        logger.error(
+                            f"Pin {pin_number} not found on {symbol_reference}. "
+                            f"Available pins: {list(pins.keys())} "
+                            f"(names: {[d.get('name','') for d in pins.values()]})"
+                        )
+                        return None
+                pin_data = pins[pin_number]
+                inst = instances[0]
+            else:
+                if resolved_num != pin_number:
+                    logger.debug(
+                        f"Resolved pin name '{pin_number}' to '{resolved_num}' on {symbol_reference}"
+                    )
+                    pin_number = resolved_num
+                inst = next((i for i in instances if i[6] == owning_unit), None)
+                if inst is None:
+                    logger.warning(
+                        f"Pin {pin_number} on {symbol_reference} is owned by unit "
+                        f"{owning_unit}, which has no placed instance"
                     )
                     return None
 
-            pin_data = pins[pin_number]
+            symbol_x, symbol_y, symbol_rotation, mirror_x, mirror_y, _, unit_n = inst
+            logger.debug(
+                f"Symbol {symbol_reference} unit {unit_n}: pos=({symbol_x}, {symbol_y}), "
+                f"rot={symbol_rotation}, mirror_x={mirror_x}, mirror_y={mirror_y}, "
+                f"lib_id={lib_id}"
+            )
+
             from commands.wire_dragger import WireDragger
 
             abs_x, abs_y = WireDragger.pin_world_xy(
@@ -406,7 +678,9 @@ class PinLocator:
                 mirror_y,
             )
 
-            logger.info(f"Pin {symbol_reference}/{pin_number} located at ({abs_x}, {abs_y})")
+            logger.info(
+                f"Pin {symbol_reference}/{pin_number} (unit {unit_n}) located at ({abs_x}, {abs_y})"
+            )
             return [abs_x, abs_y]
 
         except Exception as e:
@@ -431,6 +705,7 @@ class PinLocator:
         """
         try:
             # Load schematic (use cache)
+            self._invalidate_if_changed(schematic_path)
             sch_key = str(schematic_path)
             if sch_key not in self._schematic_cache:
                 self._schematic_cache[sch_key] = Schematic(sch_key)

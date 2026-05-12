@@ -431,6 +431,18 @@ class KiCADInterface:
             "add_schematic_text": self._handle_add_schematic_text,
             "list_schematic_texts": self._handle_list_schematic_texts,
             "add_sheet_pin": self._handle_add_sheet_pin,
+            "add_schematic_sheet": self._handle_add_schematic_sheet,
+            "autoplacer_load": self._handle_autoplacer_load,
+            "autoplacer_set_params": self._handle_autoplacer_set_params,
+            "autoplacer_iterate": self._handle_autoplacer_iterate,
+            "autoplacer_run": self._handle_autoplacer_run,
+            "autoplacer_recipe": self._handle_autoplacer_recipe,
+            "autoplacer_state": self._handle_autoplacer_state,
+            "autoplacer_preview": self._handle_autoplacer_preview,
+            "autoplacer_apply": self._handle_autoplacer_apply,
+            "diagnose_chains": self._handle_diagnose_chains,
+            "compare_netlists": self._handle_compare_netlists,
+            "find_unrelated_wire_crossings": self._handle_find_unrelated_wire_crossings,
             "import_svg_logo": self._handle_import_svg_logo,
             # UI/Process management commands
             "check_kicad_ui": self._handle_check_kicad_ui,
@@ -2009,7 +2021,13 @@ class KiCADInterface:
             net_name = params.get("netName")
             position = params.get("position")
             label_type = params.get("labelType", "label")
-            orientation = params.get("orientation", 0)
+            # When componentRef+pinNumber are given AND orientation isn't
+            # explicit, default the label orientation to the pin's outward
+            # angle so the label points away from the symbol body.  This is
+            # detected with a sentinel because we want explicit orientation=0
+            # (caller asked for right-pointing) to override the auto behaviour.
+            orientation_param = params.get("orientation")
+            orientation = 0 if orientation_param is None else orientation_param
             component_ref = params.get("componentRef")
             pin_number = params.get("pinNumber")
 
@@ -2040,34 +2058,57 @@ class KiCADInterface:
                         ),
                     }
 
-                # Connector pins (J* reference prefix) need a wire stub or the label
-                # won't make an electrical connection (ERC "not connected" false positive).
-                # Use the pin's outward angle to extend the stub 2.54mm away from the body.
-                is_connector = component_ref.upper().startswith("J")
-                if is_connector:
+                # Look up the pin's outward angle once.  Used both for the
+                # connector stub direction and (further down) the auto-
+                # orientation default.
+                angle = locator.get_pin_angle(
+                    Path(schematic_path), component_ref, str(pin_number)
+                )
+
+                # Add a 2.54mm wire stub from the pin endpoint outward and
+                # place the label at the stub's far end.  Without a stub
+                # KiCad's ERC reports "Label not connected to anything" —
+                # the pin and label are co-located but KiCad needs a wire
+                # segment between them to register the electrical
+                # connection (also matters for kicad-cli netlist export).
+                # Originally only connectors got this treatment; the
+                # rationale didn't actually depend on connector-ness, just
+                # on whether the pin had any wire at all.
+                if angle is not None:
                     import math
 
-                    angle = locator.get_pin_angle(
-                        Path(schematic_path), component_ref, str(pin_number)
+                    stub_len = 2.54
+                    rad = math.radians(angle)
+                    stub_end = [
+                        round(pin_loc[0] + stub_len * math.cos(rad), 4),
+                        round(pin_loc[1] - stub_len * math.sin(rad), 4),
+                    ]
+                    WM.add_wire(
+                        Path(schematic_path), pin_loc, stub_end,
+                        expected_net=net_name,
                     )
-                    if angle is not None:
-                        stub_len = 2.54
-                        rad = math.radians(angle)
-                        stub_end = [
-                            round(pin_loc[0] + stub_len * math.cos(rad), 4),
-                            round(pin_loc[1] - stub_len * math.sin(rad), 4),
-                        ]
-                        WM.add_wire(Path(schematic_path), pin_loc, stub_end)
-                        position = stub_end
-                        auto_stub_added = True
-                        logger.info(
-                            f"Added auto wire stub for connector {component_ref}/{pin_number}: "
-                            f"{pin_loc} → {stub_end} (angle={angle}°)"
-                        )
-                    else:
-                        position = pin_loc
+                    position = stub_end
+                    auto_stub_added = True
+                    logger.info(
+                        f"Added auto wire stub for {component_ref}/{pin_number}: "
+                        f"{pin_loc} → {stub_end} (angle={angle}°)"
+                    )
                 else:
+                    # Fallback: no pin angle available (multi-unit edge cases
+                    # or unsupported lib symbol).  Place the label at the
+                    # pin endpoint with no stub — better than refusing.
                     position = pin_loc
+
+                # Auto-orientation: when the caller didn't pass orientation
+                # explicitly AND the pin angle is known, default the label
+                # orientation to the pin's outward direction.  Reason: a
+                # label always rendering rightward looks fine on a right-
+                # facing pin, but on a left/up/down-facing pin it overlaps
+                # the symbol body and is hard to trace.  Pin angle and
+                # label orientation use the same convention (0=right,
+                # 90=up, 180=left, 270=down) so the value passes through.
+                if orientation_param is None and angle is not None:
+                    orientation = int(angle) % 360
 
                 snapped_to_pin = {"component": component_ref, "pin": str(pin_number)}
                 logger.info(
@@ -2125,6 +2166,7 @@ class KiCADInterface:
                 "success": True,
                 "message": f"Added net label '{net_name}' at {position}",
                 "actual_position": position,
+                "orientation": orientation,
             }
             if snapped_to_pin:
                 response["snapped_to_pin"] = snapped_to_pin
@@ -2134,7 +2176,10 @@ class KiCADInterface:
                 )
                 if auto_stub_added:
                     response["auto_wire_stub"] = True
-                    response["message"] += " (wire stub auto-added for connector pin)"
+                    response["message"] += " (wire stub auto-added)"
+                if orientation_param is None and orientation != 0:
+                    response["auto_orientation"] = True
+                    response["message"] += f" (orientation auto-set to {orientation}°)"
             if case_warnings:
                 response["case_warnings"] = case_warnings
             return response
@@ -2522,7 +2567,14 @@ class KiCADInterface:
             return {"success": False, "message": str(e)}
 
     def _handle_get_schematic_view(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Get a rasterised image of the schematic (SVG export → optional PNG conversion)"""
+        """Get a rasterised image of the schematic (SVG export → optional PNG conversion).
+
+        New default (cropToContent=True) crops the SVG viewBox to the bounding
+        box of placed symbols / wires / labels and drops the A4 drawing sheet
+        (page frame + title block), so the schematic fills the output instead
+        of floating in a sea of whitespace.  Set cropToContent=False to get
+        the legacy whole-page render.
+        """
         logger.info("Getting schematic view")
         import base64
         import subprocess
@@ -2539,10 +2591,13 @@ class KiCADInterface:
             fmt = params.get("format", "png")
             width = params.get("width", 1200)
             height = params.get("height", 900)
+            crop_to_content = params.get("cropToContent", True)
+            margin_frac = params.get("margin", 0.05)
 
-            # Step 1: Export schematic to SVG via kicad-cli
+            # Step 1: Export schematic to SVG via kicad-cli.  When cropping,
+            # also pass `--exclude-drawing-sheet` so the page frame doesn't
+            # widen the bbox we'd compute and doesn't render outside the crop.
             with tempfile.TemporaryDirectory() as tmpdir:
-                svg_path = os.path.join(tmpdir, "schematic.svg")
                 cmd = [
                     "kicad-cli",
                     "sch",
@@ -2551,8 +2606,10 @@ class KiCADInterface:
                     "--output",
                     tmpdir,
                     "--no-background-color",
-                    schematic_path,
                 ]
+                if crop_to_content:
+                    cmd.append("--exclude-drawing-sheet")
+                cmd.append(schematic_path)
                 result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
 
                 if result.returncode != 0:
@@ -2561,16 +2618,35 @@ class KiCADInterface:
                         "message": f"kicad-cli SVG export failed: {result.stderr}",
                     }
 
-                # kicad-cli may name the file after the schematic, find it
                 import glob
 
-                svg_files = glob.glob(os.path.join(tmpdir, "*.svg"))
-                if not svg_files:
-                    return {
-                        "success": False,
-                        "message": "No SVG file produced by kicad-cli",
-                    }
-                svg_path = svg_files[0]
+                # kicad-cli writes <schematic_stem>.svg for the top-level
+                # sheet plus <schematic_stem>-<sub-sheet-name>.svg for each
+                # child.  Pick the bare-stem one — picking arbitrarily would
+                # render a sub-sheet as if it were the requested top-level.
+                stem = os.path.splitext(os.path.basename(schematic_path))[0]
+                preferred = os.path.join(tmpdir, stem + ".svg")
+                if os.path.exists(preferred):
+                    svg_path = preferred
+                else:
+                    svg_files = glob.glob(os.path.join(tmpdir, "*.svg"))
+                    if not svg_files:
+                        return {
+                            "success": False,
+                            "message": "No SVG file produced by kicad-cli",
+                        }
+                    svg_path = svg_files[0]
+
+                # Step 1.5: optionally crop the SVG viewBox to the content bbox.
+                if crop_to_content:
+                    bbox = self._schematic_content_bbox_mm(schematic_path)
+                    if bbox is not None:
+                        with open(svg_path, "r", encoding="utf-8") as f:
+                            svg_text = f.read()
+                        from commands.board.view import BoardViewCommands
+                        svg_text = BoardViewCommands._svg_set_viewbox(svg_text, bbox, margin_frac)
+                        with open(svg_path, "w", encoding="utf-8") as f:
+                            f.write(svg_text)
 
                 if fmt == "svg":
                     with open(svg_path, "r", encoding="utf-8") as f:
@@ -2609,6 +2685,135 @@ class KiCADInterface:
 
             logger.error(traceback.format_exc())
             return {"success": False, "message": str(e)}
+
+    @staticmethod
+    def _schematic_content_bbox_mm(
+        schematic_path: str,
+    ) -> Optional[Tuple[float, float, float, float]]:
+        """Compute the bounding box of placed schematic content in mm.
+
+        Walks the .kicad_sch file for the (at x y …) coords on placed
+        symbols, wires, labels, junctions, no_connects, sheets, and
+        hierarchical labels.  Skips lib_symbols (those are off-canvas
+        definitions) and sheet_instances metadata.  Returns
+        (x_min, y_min, width, height) or None if the schematic has
+        no placed content.
+
+        Used by get_schematic_view to crop the SVG viewBox so the
+        schematic actually fills the rendered image.
+        """
+        import re
+        try:
+            import sexpdata
+            from sexpdata import Symbol
+        except ImportError:
+            return None
+
+        try:
+            with open(schematic_path, "r", encoding="utf-8") as f:
+                sexp = sexpdata.loads(f.read())
+        except Exception:
+            return None
+
+        if not isinstance(sexp, list):
+            return None
+
+        xs: List[float] = []
+        ys: List[float] = []
+
+        # Top-level placed-content blocks we care about.  `lib_symbols` is
+        # excluded so we don't pick up library-relative pin offsets, and
+        # `sheet_instances`/`symbol_instances` are metadata, not geometry.
+        wanted_first_token = {
+            "symbol",
+            "wire",
+            "polyline",
+            "label",
+            "global_label",
+            "hierarchical_label",
+            "junction",
+            "no_connect",
+            "bus",
+            "bus_entry",
+            "text",
+            "sheet",
+            "image",
+        }
+
+        def collect_at(node):
+            """Collect all (at x y …) coords inside *node*."""
+            if not isinstance(node, list) or not node:
+                return
+            tag = node[0]
+            tag_str = str(tag) if isinstance(tag, Symbol) else None
+            if tag_str == "at" and len(node) >= 3:
+                try:
+                    xs.append(float(node[1]))
+                    ys.append(float(node[2]))
+                except (TypeError, ValueError):
+                    pass
+                return  # at-blocks have no nested at-blocks
+            if tag_str == "xy" and len(node) >= 3:
+                # wire/polyline use (xy x y) for each endpoint
+                try:
+                    xs.append(float(node[1]))
+                    ys.append(float(node[2]))
+                except (TypeError, ValueError):
+                    pass
+                return
+            for child in node[1:]:
+                collect_at(child)
+
+        for item in sexp[1:]:
+            if not isinstance(item, list) or not item:
+                continue
+            head = item[0]
+            head_str = str(head) if isinstance(head, Symbol) else None
+            if head_str in wanted_first_token:
+                collect_at(item)
+                # Sheet blocks have an explicit (size w h) — extend the
+                # bbox by the sheet rectangle's extent, not just its
+                # top-left anchor, so the rendered viewBox covers the
+                # whole sheet body.
+                if head_str == "sheet":
+                    sheet_x = sheet_y = None
+                    sheet_w = sheet_h = None
+                    for sub in item[1:]:
+                        if not isinstance(sub, list) or not sub:
+                            continue
+                        if sub[0] == Symbol("at") and len(sub) >= 3:
+                            try:
+                                sheet_x = float(sub[1])
+                                sheet_y = float(sub[2])
+                            except (TypeError, ValueError):
+                                pass
+                        elif sub[0] == Symbol("size") and len(sub) >= 3:
+                            try:
+                                sheet_w = float(sub[1])
+                                sheet_h = float(sub[2])
+                            except (TypeError, ValueError):
+                                pass
+                    if sheet_x is not None and sheet_w is not None:
+                        xs.append(sheet_x + sheet_w)
+                    if sheet_y is not None and sheet_h is not None:
+                        ys.append(sheet_y + sheet_h)
+
+        if not xs or not ys:
+            return None
+
+        x_min, x_max = min(xs), max(xs)
+        y_min, y_max = min(ys), max(ys)
+        # Pad slightly so labels at the extreme edges aren't clipped.
+        # (margin_frac applied in _svg_set_viewbox handles the visible
+        # margin; this padding is just a hedge against text overflowing
+        # the bounding box of the (at) anchor.)
+        pad = 5.0  # mm, ~one symbol-width
+        return (
+            x_min - pad,
+            y_min - pad,
+            (x_max - x_min) + 2 * pad,
+            (y_max - y_min) + 2 * pad,
+        )
 
     def _handle_list_schematic_components(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """List all components in a schematic"""
@@ -3763,6 +3968,274 @@ class KiCADInterface:
             logger.error(f"Error adding sheet pin: {e}")
             import traceback
 
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_add_schematic_sheet(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Place a hierarchical sheet block on a parent schematic that
+        references a child .kicad_sch file.
+
+        Required: schematicPath, sheetName, sheetFile, position [x, y].
+        Optional: size [w, h] (default 25.4 × 25.4 mm), page (string,
+        default = next available), sheetUuid (default random).
+        """
+        logger.info("Adding schematic sheet block")
+        try:
+            from commands.sheet_manager import add_sheet_block
+
+            schematic_path = params.get("schematicPath")
+            sheet_name = params.get("sheetName")
+            sheet_file = params.get("sheetFile")
+            position = params.get("position")
+            size = params.get("size", [25.4, 25.4])
+            page = params.get("page")
+            sheet_uuid = params.get("sheetUuid")
+
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            if not sheet_name:
+                return {"success": False, "message": "sheetName is required"}
+            if not sheet_file:
+                return {"success": False, "message": "sheetFile is required"}
+            if not position or len(position) != 2:
+                return {"success": False, "message": "position [x, y] is required"}
+            if len(size) != 2:
+                return {"success": False, "message": "size must be [width, height]"}
+
+            return add_sheet_block(
+                Path(schematic_path),
+                sheet_name,
+                sheet_file,
+                x=position[0],
+                y=position[1],
+                width=size[0],
+                height=size[1],
+                page=page,
+                sheet_uuid=sheet_uuid,
+            )
+
+        except Exception as e:
+            logger.error(f"Error adding schematic sheet: {e}")
+            import traceback
+
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    # ------------------------------------------------------------------
+    # Autoplacer handlers — see commands/autoplacer.py for the model.
+    # The placer keeps in-memory state per schematic_path so callers
+    # iterate without re-loading.
+    # ------------------------------------------------------------------
+
+    def _handle_autoplacer_load(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            return {"success": True, **PLACER.load(schematic_path)}
+        except Exception as e:
+            logger.error(f"Error in autoplacer_load: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_set_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            knobs = {k: v for k, v in params.items() if k != "schematicPath"}
+            return PLACER.set_params(schematic_path, **knobs)
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_iterate(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            n = int(params.get("n", 1))
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            return PLACER.iterate(schematic_path, n=n)
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_run(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Iterate until either max_iterations reached or max force drops below
+        the threshold."""
+        try:
+            from commands.autoplacer import PLACER, iterate as _iter
+
+            schematic_path = params.get("schematicPath")
+            max_iter = int(params.get("maxIterations", 200))
+            threshold = float(params.get("forceThreshold", 0.5))
+            batch = int(params.get("batchSize", 10))
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            sess = PLACER.get(schematic_path)
+            if sess is None:
+                return {"success": False, "message": "session not loaded"}
+            done = 0
+            while done < max_iter:
+                step = min(batch, max_iter - done)
+                _iter(sess, step)
+                done += step
+                if sess.last_max_force < threshold:
+                    break
+            return {
+                "success": True,
+                "iterations_run": done,
+                "iteration": sess.iteration,
+                "temperature": round(sess.temperature, 4),
+                "max_force": round(sess.last_max_force, 4),
+                "converged": sess.last_max_force < threshold,
+            }
+        except Exception as e:
+            logger.error(f"Error in autoplacer_run: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_recipe(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Run the four-stage anneal recipe (cluster → spread →
+        polarize → settle) on a loaded session.  Tuned for schematic
+        layout where attraction-first clustering produces tighter
+        groupings than the default cooling-based annealing.
+
+        Optional overrides: cluster_iters, spread_stages, polarize_stages,
+        settle_iters, iters_per_stage, step_temperature, base_attraction_k,
+        base_rotation_k, repulsion_base, repulsion_growth, polarity_k,
+        polarity_torque_k.  Each defaults to the recipe constants.
+        """
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            overrides: Dict[str, Any] = {}
+            for key in (
+                "cluster_iters", "spread_stages", "polarize_stages",
+                "settle_iters", "iters_per_stage", "step_temperature",
+                "base_attraction_k", "base_rotation_k",
+                "repulsion_base", "repulsion_growth",
+                "polarity_k", "polarity_torque_k",
+            ):
+                if key in params:
+                    overrides[key] = params[key]
+            return PLACER.recipe(schematic_path, **overrides)
+        except Exception as e:
+            logger.error(f"Error in autoplacer_recipe: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_state(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            return PLACER.state(schematic_path)
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_preview(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            target_path = params.get("targetPath")
+            strip = bool(params.get("stripConnections", False))
+            if not (schematic_path and target_path):
+                return {"success": False, "message": "schematicPath + targetPath required"}
+            return PLACER.preview(schematic_path, target_path, strip_connections=strip)
+        except Exception as e:
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_apply(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            rewire = bool(params.get("rewire", True))
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            return PLACER.apply(schematic_path, rewire=rewire)
+        except Exception as e:
+            logger.error(f"Error in autoplacer_apply: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_diagnose_chains(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Enumerate physical wire chains in a .kicad_sch, list each
+        chain's labels and pin endpoints, and flag chains as
+        DUPLICATE_LABELS / CROSS_NET / LOOP.
+
+        Use post-routing to triage layout output.  ``filterNets``
+        (optional list) narrows the result to chains carrying any of
+        those net names (plus any CROSS_NET chains regardless of
+        filter)."""
+        try:
+            from pathlib import Path
+            from commands.schematic_inspect import diagnose_chains
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            filter_nets = params.get("filterNets") or []
+            return diagnose_chains(Path(schematic_path), filter_nets=filter_nets)
+        except Exception as e:
+            logger.error(f"Error in diagnose_chains: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_find_unrelated_wire_crossings(
+        self, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Find perpendicular wire crossings between unrelated nets
+        that have no junction at the crossing point.  Use as a post-
+        routing sanity check; each finding is electrically harmless
+        on its own but flags a place where any future endpoint
+        landing there would silently merge two nets (the failure
+        mode behind issue #74)."""
+        try:
+            from pathlib import Path
+            from commands.schematic_inspect import find_unrelated_wire_crossings
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            return find_unrelated_wire_crossings(Path(schematic_path))
+        except Exception as e:
+            logger.error(f"Error in find_unrelated_wire_crossings: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_compare_netlists(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Assert per-pin net assignments are preserved between two
+        .kicad_sch files.  Use to verify a layout-mutating operation
+        (autoplacer apply, manual edits, etc.) didn't drop or merge
+        any named-net connections.  Returns ``preserved=True`` and
+        empty mismatch lists when the netlists are equivalent."""
+        try:
+            from pathlib import Path
+            from commands.schematic_inspect import compare_netlists
+
+            orig_path = params.get("origPath")
+            new_path = params.get("newPath")
+            if not orig_path or not new_path:
+                return {
+                    "success": False,
+                    "message": "origPath and newPath are required",
+                }
+            return compare_netlists(Path(orig_path), Path(new_path))
+        except Exception as e:
+            logger.error(f"Error in compare_netlists: {e}")
+            import traceback
             logger.error(traceback.format_exc())
             return {"success": False, "message": str(e)}
 

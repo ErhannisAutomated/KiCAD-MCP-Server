@@ -138,6 +138,40 @@ def _segments_collinear_overlap(s1: Segment, s2: Segment) -> bool:
     return False
 
 
+def _segments_strictly_cross(s1: Segment, s2: Segment) -> bool:
+    """True iff two orthogonal segments cross at a point strictly interior
+    to BOTH segments.
+
+    Used by ``check_spurious_connections`` rule 6 to reject candidate wires
+    that would visually pass through an unrelated wire (a perpendicular
+    crossing without a junction).  Endpoint touches and collinear overlaps
+    return False — those are caught by other rules (T-junction rule 3,
+    collinear rule 4) so we don't double-count them here.
+    """
+    (a1x, a1y), (b1x, b1y) = s1
+    (a2x, a2y), (b2x, b2y) = s2
+
+    s1_horiz = _approx(a1y, b1y)
+    s1_vert = _approx(a1x, b1x)
+    s2_horiz = _approx(a2y, b2y)
+    s2_vert = _approx(a2x, b2x)
+
+    # Both must be orthogonal AND in opposite orientations to cross.
+    if s1_horiz and s2_vert:
+        y0 = a1y
+        x0 = a2x
+        x_lo, x_hi = sorted((a1x, b1x))
+        y_lo, y_hi = sorted((a2y, b2y))
+        return x_lo + EPS < x0 < x_hi - EPS and y_lo + EPS < y0 < y_hi - EPS
+    if s1_vert and s2_horiz:
+        x0 = a1x
+        y0 = a2y
+        y_lo, y_hi = sorted((a1y, b1y))
+        x_lo, x_hi = sorted((a2x, b2x))
+        return y_lo + EPS < y0 < y_hi - EPS and x_lo + EPS < x0 < x_hi - EPS
+    return False
+
+
 def _segment_length(s: Segment) -> float:
     (ax, ay), (bx, by) = s
     return math.hypot(bx - ax, by - ay)
@@ -367,6 +401,7 @@ def _build_grid_obstacles(
     pad_cells: int = 25,
     own_refs: Tuple[str, str] = ("", ""),
     same_net_wire_indices: Optional[Set[int]] = None,
+    own_pin_angles: Tuple[Optional[float], Optional[float]] = (None, None),
 ) -> Tuple[GridObstacles, Tuple[int, int], Tuple[int, int]]:
     """Build a `GridObstacles` covering the bbox of (p1, p2) plus *pad_cells*
     of margin in each direction.
@@ -401,8 +436,14 @@ def _build_grid_obstacles(
                 ref = sym.get("reference", "")
                 if not ref or ref.startswith("_TEMPLATE"):
                     continue
-                if ref in own_refs:
-                    continue  # own symbols' bodies aren't obstacles for their own pins
+                # NOTE: own_refs is *not* skipped — the route must not pass
+                # through its own component's body even though it starts/
+                # ends on its pins.  cell_p1 and cell_p2 (the actual pin
+                # endpoints) are re-allowed at the end of this function so
+                # the start/goal cells stay reachable.  Without this rule,
+                # a route from pin A of a tall symbol can take a path
+                # back over the symbol body to reach a remote pin —
+                # legal electrically but ugly.
                 lib_data = lib_defs.get(sym.get("lib_id", ""), {})
                 pin_defs = lib_data.get("pins", {})
                 graphics_points = lib_data.get("graphics_points", [])
@@ -425,11 +466,36 @@ def _build_grid_obstacles(
         except Exception as e:
             logger.warning(f"_build_grid_obstacles: bbox pass failed: {e}")
 
-    # 2) Other-component pin endpoints — block their cell.
+    # 2) Other-component pin endpoints — block their cell AND reserve a
+    # "stub zone" of 2 cells in the pin's outward direction.  Without
+    # the stub-zone reservation, a route can pass through cells where
+    # a future label-stub will go (Phase 3 of connect_pins lays a
+    # 2.54mm stub straight outward from each labeled pin).  The result
+    # is "wire crossing stub" geometry — electrically OK on its own,
+    # but if any subsequent edit lands an endpoint on the crossing
+    # point, sync_junctions will merge two unrelated nets.  Reserving
+    # the cells up-front prevents the crossing from forming.
     for pin_pt in obstacles.other_pins:
         cell = _world_to_cell(pin_pt, origin, snap)
         if min_x <= cell[0] <= max_x and min_y <= cell[1] <= max_y:
             grid.blocked_cells.add(cell)
+        angle = obstacles.pin_angles.get(
+            (round(pin_pt[0] * 1000), round(pin_pt[1] * 1000))
+        )
+        if angle is None:
+            continue
+        # Outward direction in screen coords.  pin_locator returns angle
+        # in lib convention (0=right, 90=up); screen formula is
+        # (cos α, -sin α).  We round to ±1/0 to get a unit grid step.
+        rad = math.radians(angle)
+        dx_step = round(math.cos(rad))
+        dy_step = -round(math.sin(rad))
+        if dx_step == 0 and dy_step == 0:
+            continue
+        for steps in (1, 2):
+            sz_cell = (cell[0] + dx_step * steps, cell[1] + dy_step * steps)
+            if min_x <= sz_cell[0] <= max_x and min_y <= sz_cell[1] <= max_y:
+                grid.blocked_cells.add(sz_cell)
 
     # 3) Other-net labels — block the cell. Same-net labels are fine.
     for (lpos, lname) in obstacles.other_labels:
@@ -467,11 +533,82 @@ def _build_grid_obstacles(
     # The two pins we are intentionally connecting must be valid endpoints,
     # so make sure they are not in blocked_cells. (They might have been added
     # via the other_pins or symbol-bbox passes if the caller didn't exclude
-    # them.) Re-allow them.
+    # them.) Re-allow them — AND the cell one step in the pin's outward
+    # direction, which is the route's lead-in / lead-out (initial_dir from
+    # cell_p1 and final-step predecessor of cell_p2).  Without this
+    # adjacent-cell unblock, components whose bbox extends past the pin
+    # endpoint (Device:C with bbox half-width 6.35mm and pin at 3.81mm) make
+    # the lead-in cell blocked by the bbox pass, and A* can never approach
+    # the pin from outside the body.
     grid.blocked_cells.discard(cell_p1)
     grid.blocked_cells.discard(cell_p2)
+    a1, a2 = own_pin_angles
+    for ep_cell, angle in ((cell_p1, a1), (cell_p2, a2)):
+        if angle is None:
+            continue
+        rad = math.radians(angle)
+        dx_step = round(math.cos(rad))
+        dy_step = -round(math.sin(rad))
+        if dx_step == 0 and dy_step == 0:
+            continue
+        for steps in (1, 2):
+            adj = (ep_cell[0] + dx_step * steps, ep_cell[1] + dy_step * steps)
+            grid.blocked_cells.discard(adj)
 
     return grid, (min_x, min_y), (max_x, max_y)
+
+
+def _wire_reachable_cells_from_start(
+    obstacles: Obstacles,
+    same_net_indices: Set[int],
+    *,
+    origin: Point,
+    snap: float,
+    bounds_min: Tuple[int, int],
+    bounds_max: Tuple[int, int],
+) -> Set[Tuple[int, int]]:
+    """Cells reachable from start cell (0, 0) (= p1) by walking the
+    same-net wire graph: collect every wire that touches any cell in
+    the current frontier and union its cells in.  Used to filter
+    `extra_goal_cells` so A* doesn't "tee" onto a wire that's already
+    connected to p1.  Out-of-bounds cells are still walked through but
+    not returned.
+    """
+    def _wire_cells(idx: int) -> Set[Tuple[int, int]]:
+        a, b = obstacles.other_wires[idx]
+        a_cell = _world_to_cell(a, origin, snap)
+        b_cell = _world_to_cell(b, origin, snap)
+        cells: Set[Tuple[int, int]] = set()
+        if a_cell == b_cell:
+            cells.add(a_cell)
+        elif a_cell[0] == b_cell[0]:
+            lo, hi = min(a_cell[1], b_cell[1]), max(a_cell[1], b_cell[1])
+            cells.update((a_cell[0], iy) for iy in range(lo, hi + 1))
+        elif a_cell[1] == b_cell[1]:
+            lo, hi = min(a_cell[0], b_cell[0]), max(a_cell[0], b_cell[0])
+            cells.update((ix, a_cell[1]) for ix in range(lo, hi + 1))
+        return cells
+
+    wire_cell_sets = [_wire_cells(i) for i in same_net_indices]
+    reachable: Set[Tuple[int, int]] = {(0, 0)}
+    changed = True
+    while changed:
+        changed = False
+        for wcs in wire_cell_sets:
+            if wcs and (wcs & reachable) and not (wcs <= reachable):
+                reachable |= wcs
+                changed = True
+
+    in_bounds: Set[Tuple[int, int]] = set()
+    for cell in reachable:
+        if cell == (0, 0):
+            continue
+        if (
+            bounds_min[0] <= cell[0] <= bounds_max[0]
+            and bounds_min[1] <= cell[1] <= bounds_max[1]
+        ):
+            in_bounds.add(cell)
+    return in_bounds
 
 
 def _same_net_cells_in_bounds(
@@ -739,15 +876,26 @@ class Obstacles:
     other_bboxes: List[Tuple[Tuple[float, float, float, float], str]] = field(
         default_factory=list
     )
+    # Pin outward angles, keyed by pin endpoint (rounded to int micrometres
+    # for hashability).  Used to reserve "stub zones": the 1-2 grid cells
+    # outward of each pin where a label-stub would go if connect_to_net
+    # ran on that pin.  Blocking those cells in the routing grid prevents
+    # routes from crossing potential stubs even before the stubs exist.
+    pin_angles: Dict[Tuple[int, int], float] = field(default_factory=dict)
 
 
 def _collect_pin_endpoints(
     schematic_path: Path, exclude: Set[Tuple[str, str]]
-) -> List[Point]:
-    """Return endpoints of every pin on every component, except those in *exclude*.
+) -> Tuple[List[Point], Dict[Tuple[int, int], float]]:
+    """Return endpoints + outward-angle map for every pin on every component,
+    except those in *exclude*.
 
     *exclude* is a set of (ref, pin_number_string) tuples — typically the two
     pins we are intentionally connecting.
+
+    The angles dict maps the pin's int-micrometre cell key to its outward
+    angle in degrees (lib convention, 0=right/90=up/180=left/270=down).
+    Used by `_build_grid_obstacles` to reserve stub zones.
     """
     # Lazy import to avoid a circular dep at module load time.
     from commands.pin_locator import PinLocator
@@ -755,11 +903,12 @@ def _collect_pin_endpoints(
 
     locator = PinLocator()
     out: List[Point] = []
+    angles: Dict[Tuple[int, int], float] = {}
     try:
         sch = Schematic(str(schematic_path))
     except Exception as e:
         logger.warning(f"_collect_pin_endpoints: could not load {schematic_path}: {e}")
-        return out
+        return out, angles
 
     for symbol in getattr(sch, "symbol", []):
         if not hasattr(symbol.property, "Reference"):
@@ -774,8 +923,15 @@ def _collect_pin_endpoints(
         for pin_num, coords in (pins or {}).items():
             if (ref, str(pin_num)) in exclude:
                 continue
-            out.append((float(coords[0]), float(coords[1])))
-    return out
+            pt = (float(coords[0]), float(coords[1]))
+            out.append(pt)
+            try:
+                angle = locator.get_pin_angle(schematic_path, ref, str(pin_num))
+            except Exception:
+                angle = None
+            if angle is not None:
+                angles[(round(pt[0] * 1000), round(pt[1] * 1000))] = float(angle)
+    return out, angles
 
 
 def _collect_labels(schematic_path: Path) -> List[Tuple[Point, str]]:
@@ -866,11 +1022,13 @@ def _collect_bboxes(
 def collect_obstacles(
     schematic_path: Path, exclude_pins: Set[Tuple[str, str]]
 ) -> Obstacles:
+    pins, angles = _collect_pin_endpoints(schematic_path, exclude_pins)
     return Obstacles(
-        other_pins=_collect_pin_endpoints(schematic_path, exclude_pins),
+        other_pins=pins,
         other_labels=_collect_labels(schematic_path),
         other_wires=_collect_wires(schematic_path),
         other_bboxes=_collect_bboxes(schematic_path),
+        pin_angles=angles,
     )
 
 
@@ -1100,6 +1258,42 @@ def check_spurious_connections(
             if _bbox_strict_intersects(seg, bbox):
                 return f"candidate wire crosses symbol {ref} body"
 
+        # 6. No segment may strictly cross an unrelated wire (perpendicular
+        #    crossing without a junction).  Such crossings are electrically
+        #    valid in KiCad — wires only connect when a junction or coincident
+        #    endpoint is present — but they're hard for a human to read.
+        #    Rule 3 (T-junction) and 4 (collinear overlap) already cover the
+        #    same-axis cases; this rule covers the perpendicular case.
+        for idx, ow in enumerate(obstacles.other_wires):
+            if idx in same_net_wires:
+                continue  # crossing same-net is intended (a tee/junction goes here)
+            if _segments_strictly_cross(seg, ow):
+                return "candidate wire perpendicularly crosses unrelated wire"
+
+        # 7. Stub-zone crossing.  Each unrelated pin has an implicit 2.54mm
+        # stub running outward (Phase 3 of connect_pins lays it as a
+        # label-stub).  Routes shouldn't cross where that stub will be —
+        # the post-route stub would otherwise overlay the route, creating
+        # the "wire crosses stub" pattern even before the stub is laid.
+        for opin in obstacles.other_pins:
+            if _is_own(opin):
+                continue
+            angle = obstacles.pin_angles.get(
+                (round(opin[0] * 1000), round(opin[1] * 1000))
+            )
+            if angle is None:
+                continue
+            rad = math.radians(angle)
+            stub_end = (
+                opin[0] + 2.54 * math.cos(rad),
+                opin[1] - 2.54 * math.sin(rad),
+            )
+            if _segments_strictly_cross(seg, (opin, stub_end)):
+                return (
+                    f"candidate wire crosses stub zone of pin at "
+                    f"({opin[0]:.2f},{opin[1]:.2f})"
+                )
+
     return None
 
 
@@ -1232,6 +1426,7 @@ class SchematicRouter:
             obstacles,
             origin=p1,
             own_refs=(ref1, ref2),
+            own_pin_angles=(a1, a2),
             same_net_wire_indices=same_net_wires,
         )
         # Phase 4 — same-net cells are valid tee targets. Drop the goal
@@ -1242,6 +1437,19 @@ class SchematicRouter:
             origin=p1, snap=_GRID, bounds_min=bmin, bounds_max=bmax,
         )
         extra_goals.discard(goal_cell)
+        # Drop cells already wire-reachable from p1: tee'ing onto a
+        # same-net wire that's already connected to p1 doesn't add
+        # connectivity, and it lets A* "succeed" after one step by
+        # walking onto the very wire whose endpoint coincides with
+        # p1.  Bug repro: connect_pins(auto, [A, B, C]) where A→B
+        # wired in pair 1 ends at B; pair 2 (B→C) finds B's wire is
+        # adjacent to its start cell and terminates there, never
+        # reaching C.
+        reachable = _wire_reachable_cells_from_start(
+            obstacles, same_net_wires,
+            origin=p1, snap=_GRID, bounds_min=bmin, bounds_max=bmax,
+        )
+        extra_goals -= reachable
         # The start cell can't be a tee target.
         extra_goals.discard((0, 0))
 

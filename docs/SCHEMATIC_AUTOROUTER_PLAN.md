@@ -1,6 +1,40 @@
 # Schematic Autorouter — Design Plan
 
-Status: **Phase 5 (auto-label) SHIPPED (2026-05-07).**
+Status: **Phase 5 (auto-label) — orphan-chain fix SHIPPED (2026-05-09).**
+- The original Phase 5 added ONE auto-label at the first wired pair under
+  the assumption that any other wired chain would be reachable from that
+  label via the wire graph. That breaks when the autorouter forms two
+  disjoint chains (cluster 1 wires, middle pair label-fallbacks, cluster 2
+  wires): only cluster 1 gets a label, cluster 2's pins end up on a
+  floating sub-net which KiCad auto-names `Net-(Cn-Pad1)`. Surfaced when
+  partitioning the power_module flat schematic into hierarchical sheets
+  — three cap-pair orphan chains (BAT+, BB_VCC, V12_OUT).
+- Phase 5 now iterates EVERY wired pair, classifies whether its segment
+  endpoints are reachable from a `resolved_net` label via the wire/T-
+  junction graph, and adds an auto-label per orphaned chain. After each
+  label is placed, the reachability set is recomputed so other pairs
+  sharing the just-labeled chain don't double-label.
+- Result dict gains `auto_label_positions: List[List[float]]`; legacy
+  singular `auto_label_position` retained as the first entry for
+  back-compat.
+- Tests: `test_auto_labels_each_orphaned_chain` builds two clusters far
+  apart, sets `max_len=30` so the inter-cluster pair fails, asserts
+  every pin resolves to the target net (not just the first cluster).
+
+**Rule 6 added to spurious-connection guard (2026-05-09).**
+- Previously the 5 rules covered pin-on-segment, label-on-segment,
+  T-junction (other-net wire endpoint inside our interior), collinear
+  overlap with another wire, and symbol body crossing — but NOT
+  perpendicular crossings of unrelated wires. Such crossings are
+  electrically valid in KiCad (no junction → no connection) but visually
+  confusing.
+- New rule 6 + helper `_segments_strictly_cross` rejects any candidate
+  where the intersection is strictly interior to BOTH segments
+  (T-junctions and shared endpoints return False — those are caught by
+  rules 3 and 4 already). Same-net crossings still allowed via the
+  existing `same_net_wire_indices` exemption.
+
+Status: **Phase 5 (auto-label) initial version SHIPPED (2026-05-07).**
 - After `connect_pins` lays any wire, it ensures the connected wire fragment
   carries the `resolved_net` as a label. Without this, KiCad auto-names
   unlabeled wires (`Net-(R1-Pad2)` etc.) and named nets silently fragment
@@ -43,13 +77,18 @@ Status: **Phase 4 (same-net tee detection) SHIPPED (2026-05-07).**
 - **Restart the MCP server** to pick up Phase 4.
 
 **Still deferred:**
-- Per-step crossing penalty (`cost_model.crossing=3` reserved but unused);
-  perpendicular crossings of unrelated-net wires currently incur no extra
-  cost beyond the normal step.
 - Multi-terminal Steiner tree (route 3+ pins on one net at once with
   optimal joins). Currently we do N-1 sequential pair routings with
-  same-net awareness, which is good but not Steiner-optimal.
+  same-net awareness, which is good but not Steiner-optimal — and per
+  the orphan-chain fix above, when this falls into disjoint chains we
+  need an auto-label per chain rather than treating it as one tree.
 - Agent feedback loop with `viaPoints` for manual hints.
+
+**Resolved deferred items:**
+- ~~Per-step crossing penalty (`cost_model.crossing=3` reserved but
+  unused); perpendicular crossings of unrelated-net wires currently
+  incur no extra cost beyond the normal step.~~ Replaced by hard
+  rejection in rule 6 (2026-05-09).
 
 Phase 1 (shipped 2026-05-06): straight-line + spurious-connection guard +
 `connect_pins(style=...)`. Phase 2 (shipped 2026-05-07): L and U shapes.

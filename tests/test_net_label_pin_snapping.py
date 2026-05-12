@@ -109,8 +109,21 @@ class TestHandleAddSchematicNetLabelSnapping:
     # -- happy-path: snap to pin -----------------------------------------
 
     @patch("commands.wire_manager.WireManager.add_label", return_value=True)
+    @patch("commands.wire_manager.WireManager.add_wire", return_value=True)
+    @patch("commands.pin_locator.PinLocator.get_pin_angle", return_value=0.0)
     @patch("commands.pin_locator.PinLocator.get_pin_location", return_value=[42.0, 13.5])
-    def test_snap_uses_pin_coords(self, mock_pin_loc: Any, mock_add_label: Any) -> None:
+    def test_snap_adds_wire_stub_and_label_at_stub_end(
+        self,
+        mock_pin_loc: Any,
+        mock_pin_ang: Any,
+        mock_add_wire: Any,
+        mock_add_label: Any,
+    ) -> None:
+        """Snap path must add a 2.54mm wire stub from the pin endpoint
+        outward and place the label at the stub's far end — without the
+        stub KiCad's ERC reports "Label not connected to anything".
+        Pin angle 0 means stub extends +x by 2.54mm.
+        """
         result = self.iface._handle_add_schematic_net_label(
             {
                 "schematicPath": "/fake/sch.kicad_sch",
@@ -120,16 +133,29 @@ class TestHandleAddSchematicNetLabelSnapping:
             }
         )
         assert result["success"] is True
-        assert result["actual_position"] == [42.0, 13.5]
+        # Stub end at angle 0 from (42, 13.5) of length 2.54 → (44.54, 13.5)
+        assert result["actual_position"] == [44.54, 13.5]
         assert result["snapped_to_pin"] == {"component": "U1", "pin": "1"}
-        # WireManager.add_label must have been called with the pin coords
+        # add_wire was called from pin endpoint to stub end
+        mock_add_wire.assert_called_once()
+        wire_args = mock_add_wire.call_args[0]
+        assert wire_args[1] == [42.0, 13.5]  # source = pin endpoint
+        assert wire_args[2] == [44.54, 13.5]  # destination = stub end
+        # add_label was called at the stub end, not the pin endpoint
         mock_add_label.assert_called_once()
-        call_args = mock_add_label.call_args
-        assert call_args[0][2] == [42.0, 13.5]  # position positional arg
+        assert mock_add_label.call_args[0][2] == [44.54, 13.5]
 
     @patch("commands.wire_manager.WireManager.add_label", return_value=True)
+    @patch("commands.wire_manager.WireManager.add_wire", return_value=True)
+    @patch("commands.pin_locator.PinLocator.get_pin_angle", return_value=180.0)
     @patch("commands.pin_locator.PinLocator.get_pin_location", return_value=[10.0, 20.0])
-    def test_snap_ignores_provided_position(self, mock_pin_loc: Any, mock_add_label: Any) -> None:
+    def test_snap_ignores_provided_position(
+        self,
+        mock_pin_loc: Any,
+        mock_pin_ang: Any,
+        mock_add_wire: Any,
+        mock_add_label: Any,
+    ) -> None:
         """If both position and componentRef/pinNumber are given, pin coords win."""
         result = self.iface._handle_add_schematic_net_label(
             {
@@ -141,7 +167,34 @@ class TestHandleAddSchematicNetLabelSnapping:
             }
         )
         assert result["success"] is True
-        assert result["actual_position"] == [10.0, 20.0]
+        # Pin at (10, 20), angle 180 → stub extends -x by 2.54 → (7.46, 20).
+        assert result["actual_position"] == [7.46, 20.0]
+
+    @patch("commands.wire_manager.WireManager.add_label", return_value=True)
+    @patch("commands.wire_manager.WireManager.add_wire", return_value=True)
+    @patch("commands.pin_locator.PinLocator.get_pin_angle", return_value=None)
+    @patch("commands.pin_locator.PinLocator.get_pin_location", return_value=[100.0, 50.0])
+    def test_snap_falls_back_to_pin_endpoint_when_angle_unknown(
+        self,
+        mock_pin_loc: Any,
+        mock_pin_ang: Any,
+        mock_add_wire: Any,
+        mock_add_label: Any,
+    ) -> None:
+        """If get_pin_angle returns None (rare lib edge case), the
+        handler should still place the label — at the pin endpoint
+        with no stub — rather than failing the call."""
+        result = self.iface._handle_add_schematic_net_label(
+            {
+                "schematicPath": "/fake/sch.kicad_sch",
+                "netName": "NET",
+                "componentRef": "U1",
+                "pinNumber": "1",
+            }
+        )
+        assert result["success"] is True
+        assert result["actual_position"] == [100.0, 50.0]
+        mock_add_wire.assert_not_called()
 
     # -- error: pin not found --------------------------------------------
 

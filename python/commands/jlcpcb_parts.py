@@ -206,20 +206,26 @@ class JLCPCBPartsManager:
         ("Sensor", "Sensors"),
     ]
 
-    # ASCII → Unicode unit aliases for query rewriting.
-    # FTS5's unicode61 tokenizer treats e.g. "150Ω" as a single token, so
-    # users typing "150ohms" or "150 ohm" never match — the data has no
-    # ASCII alias.  Rewrite the query so unit-bearing values land on the
-    # tokens that actually exist in the index.
+    # ASCII → catalog-actual unit aliases for query rewriting.
+    # The jlcsearch dataset stores resistance with Greek Ω (Omega U+03A9),
+    # but capacitance/inductance with ASCII "uF"/"uH" — verified by counts:
+    # description LIKE '%Ω%' has hits, '%μF%' / '%µF%' have zero, '%uF%' has
+    # ~210K hits.  So we rewrite ohms → Ω but leave uF/uH alone (they already
+    # match), and also strip an optional space between value and unit so
+    # "150 ohms" lands on the same token as "150Ω".
     _QUERY_UNIT_SUBS: List[Tuple[str, str]] = [
-        # Resistance: handle prefix + unit, then bare unit, longer first so
-        # "kohms" doesn't get partially substituted before "ohms".
+        # Resistance: prefix + unit, longest first so "kohms" doesn't match
+        # the bare ohms pattern.
         (r"(\d+(?:\.\d+)?)\s*[Mm]ohms?\b", r"\1MΩ"),
         (r"(\d+(?:\.\d+)?)\s*[Kk]ohms?\b", r"\1kΩ"),
         (r"(\d+(?:\.\d+)?)\s*ohms?\b", r"\1Ω"),
-        # Capacitance / inductance prefixes.
-        (r"(\d+(?:\.\d+)?)\s*[Uu][Ff]\b", r"\1μF"),
-        (r"(\d+(?:\.\d+)?)\s*[Uu][Hh]\b", r"\1μH"),
+        # Capacitance / inductance prefixes: collapse the optional space so
+        # "10 uF" -> "10uF" matches the actual indexed token.  No
+        # ASCII→Unicode rewrite — data is ASCII.
+        (r"(\d+(?:\.\d+)?)\s+([Uu][Ff])\b", r"\1\2"),
+        (r"(\d+(?:\.\d+)?)\s+([Uu][Hh])\b", r"\1\2"),
+        (r"(\d+(?:\.\d+)?)\s+([Nn][Ff])\b", r"\1\2"),
+        (r"(\d+(?:\.\d+)?)\s+([Pp][Ff])\b", r"\1\2"),
     ]
 
     @classmethod

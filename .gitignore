@@ -97,3 +97,8 @@ CLAUDE.md
 
 inspect-tools.mjs
 resources/images/icon_b64.txt
+
+# kicad-cli erc output drops a JSON report alongside the schematic;
+# regenerable, not source.
+*-erc.json
+

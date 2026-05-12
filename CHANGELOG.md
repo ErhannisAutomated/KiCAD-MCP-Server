@@ -4,6 +4,640 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Housekeeping (this branch: fixes/improvements_2, 2026-05-13 part 8)
+
+- **New MCP tool: `find_unrelated_wire_crossings`.**  Moved the
+  `_scan_unrelated_wire_crossings` implementation from
+  `commands.autoplacer` to `commands.schematic_inspect` and exposed
+  it as a standalone MCP tool so post-routing crossing checks can
+  be invoked outside the autoplacer's rewire flow.  `autoplacer.py`
+  keeps a thin alias for backwards compatibility with `rewire_session`'s
+  `unrelated_crossings` return field.  Three tests in
+  `TestFindUnrelatedWireCrossings`; route registration locked in.
+- Added `*-erc.json` to `.gitignore` and removed the regenerable
+  `parent-erc.json` from the worktree (kicad-cli's ERC drops these
+  next to the schematic by default).
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 7)
+
+- **Issue #74 fixed: cross-net merge in WireManager wire splits.**
+  `_break_wires_at_point` and `_existing_endpoints_on_segment` were
+  net-blind — splitting an existing wire at a point that became a
+  junction would silently fuse the wire's net into the new wire's
+  net, regardless of intent.  Surfaced earlier on the BMS sheet's
+  VC1 + VC2 merge before the Phase 5 + load_session + duplicate-pad
+  fixes neutralised the symptom.
+
+  Fix: `WireManager.add_wire` and `WireManager.add_polyline_wire`
+  now accept an optional `expected_net=` argument.  When set, the
+  two helpers use `walk_wire_chain` to inspect each candidate
+  existing wire's chain labels; if any label is foreign (any label
+  other than `expected_net`), the split is refused.  The new wire
+  then sits on the foreign wire's interior with no junction →
+  KiCad's connectivity engine treats it as not connected, which is
+  the safe failure mode.  All four call sites pass the expected
+  net:
+    - `connect_pins` Phase 1-2 (resolved_net per net).
+    - `connect_pins` Phase 5 `_try_branch_stub_at_corner`.
+    - `connect_to_net` (target net).
+    - `_handle_add_schematic_net_label`'s auto-stub.
+  Default `expected_net=None` preserves the pre-#74 net-blind
+  behavior for callers that don't know the net.
+
+  Two regression tests in `tests/test_wire_manager_cross_net.py`:
+    - `test_add_wire_does_not_silently_merge_two_unrelated_nets`
+      (was xfail; now passes — checks the kicad_sch file directly
+      for a junction at the crossing point).
+    - `test_add_wire_without_expected_net_preserves_old_split_behavior`
+      (new — locks in the backwards-compat default).
+
+  End-to-end on the three power_module child sheets after this fix:
+  netlist equivalence and 0 DUP / 0 CROSS / clean LOOP counts
+  preserved.
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 6)
+
+- **WireManager.add_wire is now idempotent.**  Two mechanisms were
+  producing duplicate wire entries in autorouted schematics:
+
+  1. *Convergent route final segments.*  When two `route_pair` calls
+     terminate at the same pin coord, the routes can end up sharing
+     their final segment.  Both calls then invoked `add_wire` with
+     identical `(start, end)` args, stacking parallel wire entries.
+     Surfaced as 3x copies of the same wire near U3/1 on charger.
+     Fix: outer-call dedupe before the split logic — if a wire
+     with the same endpoints (modulo direction) is already on the
+     sheet, return success without re-laying.
+
+  2. *Sub-segment duplicates from split logic.*  When the new wire
+     passes through an existing endpoint, the split logic divides
+     it into sub-segments.  One sub-segment can exactly duplicate
+     an existing wire (e.g., new wire (10,10)→(10,0) split at
+     (10,5) produces (10,10)→(10,5) which IS the existing
+     (10,5)→(10,10) wire).  Fix: post-split dedupe — skip any
+     sub-segment whose endpoint pair is already present.
+
+  Across the three power_module child sheets, this brought the
+  duplicate-wire count from {12, 7, 4} → {0, 0, 0}.  Netlist
+  equivalence + chain pathology checks unchanged.
+
+  - One existing test
+    (`test_new_wire_through_existing_endpoint_splits_at_endpoint`)
+    asserted a wire-count of ≥4 after the T-junction split case;
+    that's now 3 because the redundant upper-half sub-segment gets
+    deduplicated against the existing corner wire.  Test rewritten
+    to assert the semantic invariant — wire endpoint at (10,5) and
+    a junction at (10,5) — instead of counting raw wire entries.
+  - One new test
+    (`test_add_wire_is_idempotent_for_identical_repeated_calls`)
+    in `tests/test_wire_manager_cross_net.py`.
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 5)
+
+- **Autoplacer: `_scan_unrelated_wire_crossings` resolves nets via
+  the wire-graph BFS, not just endpoint-positioned labels.**  The
+  previous `_wire_label(w)` shortcut only inspected labels at a
+  wire's own two endpoints; it missed labels positioned anywhere
+  else on the wire's chain.  Result: when the autorouter laid two
+  segments of one labelled chain that happened to cross each other,
+  `_scan_unrelated_wire_crossings` reported "1 unrelated crossing"
+  even though both wires were the same net.  Surfaced on the
+  charger sheet (USB_VBUS, two segments crossing NW of C17).  Fix:
+  replace the endpoint-only check with `walk_wire_chain` (cached
+  per wire endpoint, so the BFS runs at most once per distinct
+  wire).  Two new regression tests in
+  ``TestScanUnrelatedCrossings``: same-net crossing not flagged,
+  cross-net crossing still flagged.
+
+### Documentation + Reproducer (this branch: fixes/improvements_2, 2026-05-13 part 4)
+
+- ``docs/AUTOPLACER_GUIDE.md`` — new standalone guide for the
+  autoplacer.  Covers the four-stage recipe, the per-stage knobs,
+  the Jupyter + viz workflow, ``compare_netlists`` / ``diagnose_chains``
+  as post-apply validation, and the two known limitations
+  (multi-unit duplicate pads, issue #74).
+- ``docs/TOOL_INVENTORY.md`` — added the 8 autoplacer tools
+  (previously unlisted) and the 2 new validation tools.
+  Updated counts.
+- ``docs/INDEX.md`` — linked the new guide; tool-count bump.
+- ``tests/test_wire_manager_cross_net.py`` — new xfail test
+  reproducing the cross-net merge in
+  ``WireManager._break_wires_at_point`` (issue #74).  Fails today
+  with a clear description in the xfail reason; once add_wire
+  refuses net-blind splits, remove the marker.
+
+### New MCP Tools (this branch: fixes/improvements_2, 2026-05-13 part 3)
+
+- **`diagnose_chains`** — enumerate physical wire chains in a
+  .kicad_sch, with per-chain labels, pins, bbox, and pathology flags
+  (``DUPLICATE_LABELS`` / ``CROSS_NET`` / ``LOOP``).  Uses the same
+  ``walk_wire_chain``-based BFS as ``connect_pins`` Phase 5 so chain
+  detection is consistent across tools.  Optional ``filterNets``
+  param narrows the result to chains carrying any of those names
+  (plus any CROSS_NET chains regardless of filter).
+
+- **`compare_netlists`** — given two .kicad_sch files (a "before"
+  and "after"), assert every component pin's named-net assignment is
+  preserved.  Reports ``missing_pins``, ``extra_pins``, and per-net
+  ``lost``/``added`` mismatches.  Use as a regression guard after any
+  layout-mutating operation; this is the check that caught the
+  C23/BB_SW1 dropped-pin regression in load_session.
+
+Both live in the new ``commands.schematic_inspect`` module and have
+unit tests in ``tests/test_schematic_inspect.py`` (10 tests).
+Originally developed as throwaway /tmp scripts during the BMS-sheet
+debug cycle; promoted here so they're durable + LLM-callable.
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 2)
+
+- **connect_pins: multi-unit duplicate-pad dedupe.**  Two related bugs
+  on nets that span multi-unit symbols with duplicate pads (FDS9926A
+  pins 5+6 on a source pad; J1 USB-C's A1+A12+B1+B12 GND pads at one
+  symbol pin):
+
+  - *Phase 1-2 union on zero-distance pairs.*  When the MST picked a
+    pair at distance 0 (two pin keys resolving to the same world
+    coord), the existing degenerate-route handling skipped the wire
+    but never `_union`'d the two MST nodes.  Subsequent MST candidates
+    from either of those pins then got tried as separate edges, laying
+    parallel wires to the same destination — the LOOP source on
+    FET_MID and similar nets.
+  - *Phase 3 dedupe by IU coord.*  When Phase 3 stub-and-labels each
+    unwired pin separately, N duplicate-pad pins at one coord
+    produced N stacked overlapping labels (DUPLICATE_LABELS).  Now
+    Phase 3 tracks a ``covered_pin_ius`` set (seeded from
+    ``wired_pin_set``'s pin coords) and skips any pin whose coord is
+    already covered.
+  - Side effect: ``pin_endpoints`` is now populated for every
+    ``try_wire`` call, not just non-power-net ones, so Phase 3's
+    coord dedupe also catches GND chains under #PWR_GND (multiple
+    GND pads at one symbol coord).
+
+  End-to-end on the three power_module child sheets: all three now
+  pass netlist-equivalence + chain-pathology validation
+  (``diagnose_chains.py``) with 0 DUPLICATE_LABELS and 0 CROSS_NET.
+
+  New regression test:
+  ``TestPhase5ChainFinder::test_duplicate_pad_pins_dedupe_in_phase3``.
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13)
+
+- **Autoplacer: net discovery via the real wire graph (T-junction
+  aware, no depth limit).**  ``load_session`` was using a hand-rolled
+  BFS over wire endpoints with a depth-5 hop limit and no T-junction
+  handling.  Pins whose nearest label was more than five wire-segments
+  away — or reachable only through a mid-segment T-junction — got no
+  net assignment, were missing from the session's net membership,
+  and then dropped permanently when ``apply_to_schematic`` stripped
+  the wiring before ``rewire_session`` re-routed.  Surfaced on the
+  buckboost sheet where C23/2 (bootstrap cap on BB_SW1) was 8 hops
+  from any BB_SW1 label and ended up disconnected in the rewired
+  file.  Replaced the BFS with ``walk_wire_chain`` so net discovery
+  uses the same robust wire-graph traversal as Phase 5 in
+  ``connect_pins``.  One new test
+  (``TestLoad.test_load_discovers_net_via_long_wire_chain``).
+
+### New MCP Tools (this branch: fixes/improvements_2, 2026-05-13)
+
+- **`autoplacer_recipe`** — runs a four-stage anneal (cluster →
+  spread → polarize → settle) on a loaded session.  Tuned on the BMS
+  sheet: stage 1 uses attraction-only to cluster components by their
+  net connections, stage 2 ramps repulsion up geometrically over
+  11 sub-stages to fan clusters apart without losing the grouping,
+  stage 3 steps repulsion down two notches while turning on polarity
+  bias + polarity torque, stage 4 lets the configuration settle
+  under natural temperature decay.  Throughout stages 1-3 the
+  per-iteration temperature cap is clamped to a small fixed value
+  (default 5 mm) so displacement control comes from force scheduling
+  rather than the default cooling schedule.  Defaults match the
+  user's BMS-tested recipe; all twelve knobs (cluster_iters,
+  spread_stages, polarize_stages, settle_iters, iters_per_stage,
+  step_temperature, base_attraction_k, base_rotation_k,
+  repulsion_base, repulsion_growth, polarity_k, polarity_torque_k)
+  are optional MCP overrides.
+
+  Python API: `commands.autoplacer.run_staged_anneal(sess, **kw)` and
+  `PLACER.recipe(schematic_path, on_step=..., **kw)` (the latter
+  threads a per-iteration callback for matplotlib viz hookup).
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-12 part 2)
+
+- **connect_pins Phase 5: stub-style label now triggers on total
+  chain count, not just orphan count.**  Previously
+  ``use_stub_style = len(orphan_chains) >= 2``, which missed the case
+  where Phase 3 had already stubbed one of the net's chains.  Result
+  on a net like VC3 (multi-pin chain at U1+C4 plus an R4 single-pin
+  stub Phase 3 contributed): the multi-pin chain got an in-line label
+  on a free wire endpoint, the R4 chain had a proper Phase-3 stub
+  label, and the two read asymmetrically.  Fix:
+  ``use_stub_style = len(this_net_chains) >= 2`` where
+  ``this_net_chains`` includes both orphan AND already-labelled-with-
+  resolved_net chains.
+
+- **connect_pins Phase 5: merge guard in branch-stub placement.**
+  ``_try_branch_stub_at_corner`` could lay a 2.54 mm perpendicular
+  stub whose end-point coincided with another disjoint orphan chain
+  of the same target net — KiCad's sync_junctions then added a
+  junction and the chains merged.  Result on REGOUT / SRP on the
+  BMS sheet: two separate 4-6 pin sub-chains got branch-stub labels,
+  then merged into a single chain carrying both labels (a LOOP-flagged
+  duplicate-label state).  Fix: before laying a candidate stub, walk
+  the wire chain at the stub-end position; if it returns a chain
+  whose ``points`` set is disjoint from our chain's points, refuse
+  and try another perpendicular direction.
+
+- **connect_pins Phase 5: re-walk each chain just before labelling
+  it.**  An earlier iteration's branch-stub may have merged this
+  chain with another or labelled it through some unforeseen path.
+  Re-walking with the freshest file state catches both cases and
+  lets us skip a chain that no longer needs a label (or that has
+  acquired a foreign-net label, indicating cross-net contamination
+  to be left for ERC).
+
+Two new tests:
+``TestPhase5ChainFinder::test_stub_style_kicks_in_when_phase3_already_stubbed_one_chain``,
+``TestPhase5ChainFinder::test_branch_stub_refuses_to_bridge_to_another_chain``.
+Diagnostic helper at ``/tmp/claude-1000/claude/diagnose_chains.py``
+enumerates chains/labels/pins per chain and flags
+``DUPLICATE_LABELS``/``CROSS_NET``/``LOOP`` — handy for verifying
+fixes on real schematics.
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-12)
+
+- **connect_pins Phase 5: rewrite on top of the real wire graph.**  The
+  previous Phase 5 auto-label code did chain grouping by union-find over
+  `wired_pairs` segment endpoints — a proxy that missed mid-segment
+  T-junctions and produced two labels per net when two routed pairs
+  connected only through a wire-interior hit.  A `phase3_future_labels`
+  lookahead was added as a band-aid but didn't cover all cases.
+  Replaced with a new public helper
+  `commands.wire_connectivity.walk_wire_chain(point_mm, schematic_path)`
+  that BFSes the actual wire graph (reusing the T-junction-aware
+  `_build_adjacency`).  Phase 5 now runs AFTER Phase 3 (so the file's
+  wire graph already reflects every label Phase 3 added) and walks
+  chains directly from each wired pin endpoint, deduplicating by
+  `wire_indices`.  Single orphan chains get an in-line label on a free
+  wire endpoint; multi-orphan-chain nets get a perpendicular branch-stub
+  at a corner.  Defensive: a chain that already carries a foreign-net
+  label is skipped (don't compound a cross-net merge defect — see issue
+  #74).  Fixes the duplicate-label cases observed on BMS-sheet runs
+  (FET_MID, REGOUT, VC3 double-labels).  10 new tests
+  (`TestWalkWireChain` × 9, `TestPhase5ChainFinder` × 4); the union-find
+  pair-grouping path and the `phase3_future_labels` lookahead are gone.
+
+### New MCP Tools (this branch: fixes/improvements_2, 2026-05-09)
+
+- **Schematic autoplacer** (7 tools: `autoplacer_load`, `autoplacer_set_params`,
+  `autoplacer_iterate`, `autoplacer_run`, `autoplacer_state`,
+  `autoplacer_preview`, `autoplacer_apply`).  Force-directed
+  Fruchterman-Reingold with schematic-specific extras: real bbox
+  computation from `lib_symbols` graphics, pin-orientation torque,
+  polarity bias (GND-down, V+-up by name pattern), per-unit
+  components for multi-unit symbols (Q1's two FET units move
+  independently).  Lifecycle: load schematic → tune params →
+  iterate / run-until-stable → preview to a temp file → apply
+  (snap-to-grid, write back, re-route via stub+label per pin).
+  Implementation in `commands/autoplacer.py`.  9 tests in
+  `tests/test_autoplacer.py`.  Restart MCP server to pick up.
+
+  As of 2026-05-10 the `apply` step's re-routing uses
+  `connect_pins(style="auto")` per net, so the autorouter draws real
+  inter-pin wires when feasible and falls back to label-with-stub on
+  each pin otherwise.  This is gated on the multi-unit PinLocator fix
+  below — without that, pin coords for unit-2 pins on multi-unit
+  symbols resolved to unit-1's location.
+
+- **`add_schematic_sheet`** — instantiates a hierarchical sheet block on a
+  parent .kicad_sch that references a child .kicad_sch file. Until now
+  the hierarchical-schematic story had a hole: `add_sheet_pin` adds a pin
+  to an existing sheet block, `add_schematic_hierarchical_label` adds a
+  label to a sub-sheet, and `create_schematic` creates an empty
+  .kicad_sch — but no tool placed the actual sheet rectangle on the
+  parent. Doing it required hand-editing the .kicad_sch. The new tool
+  takes parent path, sheet name, child filename, position, optional
+  size/page/uuid; computes the parent's project name + root UUID; emits
+  the full S-expression with the per-page `(instances …)` entry;
+  refuses duplicates by name. Implementation in
+  `commands/sheet_manager.py`. Tests in `tests/test_sheet_manager.py`
+  (5 unit + 1 kicad-cli round-trip).
+
+### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-09)
+
+- **`add_schematic_net_label` auto-rotates the label to the pin's
+  outward direction by default.** Previously the label always read
+  rightward (orientation 0), which is fine for right-facing pins but
+  overlaps the symbol body on left/up/down-facing pins — making the
+  schematic harder to trace by eye than it had to be. Now when the
+  caller supplies `componentRef`+`pinNumber` and doesn't pass an
+  explicit `orientation`, the handler reads the pin's outward angle
+  via `PinLocator.get_pin_angle` and uses that for the label.
+  Explicit `orientation=N` still wins. Response gains
+  `orientation` (the angle that was applied) and
+  `auto_orientation: true` when the default kicked in. Tests in
+  `tests/test_label_auto_orientation.py` (4 cases: pin 1 / pin 2 /
+  explicit override / position-only fallback).
+
+- **`get_schematic_view` now crops to placed-content bbox + drops the
+  page frame by default.** Mirror of the recent `get_board_2d_view`
+  treatment — previously the SVG was the whole A4 page including title
+  block, leaving the schematic as a tiny island in a sea of whitespace.
+  New defaults (`cropToContent=true`, `margin=0.05`) compute the bbox
+  of placed symbols / wires / labels / sheet blocks (sheets contribute
+  their full rectangle, not just the top-left anchor) and pass
+  `--exclude-drawing-sheet` to kicad-cli so the page frame doesn't
+  render outside the crop. Pass `cropToContent=false` for the legacy
+  full-page render. Also fixed: kicad-cli on a hierarchical design
+  writes one SVG per sheet (`<stem>.svg` for top, `<stem>-<sub>.svg`
+  for each child); the handler now picks the bare-stem file by name
+  instead of `glob.glob[0]` which was returning a child arbitrarily.
+
+### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-10)
+
+- **Autoplacer: multi-unit pin/stub-end collision safety.**
+  `snap_positions`'s same-ref blanket exemption let two units of one
+  multi-unit symbol overlap, and the pin-coord-collision pass only
+  checked pin endpoints (not stub-end positions).  Surfaced on a BMS
+  run where Q1 unit 1's drain stub-end (pin endpoint + 2.54mm outward,
+  where Phase 3 lays the label) landed exactly on Q1 unit 2's source
+  pin endpoint, which was on net SRP — so the rewire merged FET_MID
+  and SRP nets through the stub.  Two changes:
+  1. Bbox-overlap and pin-coord passes now exempt pairs by `(ref,
+     unit)` rather than `ref` alone.  Different units of one symbol
+     are physically distinct components and must separate.
+  2. Pin-coord pass now considers each pin's *stub-end* position
+     (pin + 2.54mm in the outward direction) in addition to the pin
+     endpoint, so endpoint↔stub-end collisions are caught.
+  Test in `test_autoplacer.py::TestSnapPositions::
+  test_multi_unit_pin_stub_end_collision_resolved` (verified to fail
+  on the pre-fix code).
+
+- **Autoplacer real-time visualizer** (`commands/autoplacer_viz.py`):
+  matplotlib-backed live view of an autoplacer Session.  Designed for
+  interactive parameter tuning in an iPython session — open with
+  `viz = AutoplacerViz(sess)`, iterate the placer, call `viz.update()`
+  to redraw.  Components render as bbox rectangles with the ref text
+  in the centre and pins as cyan dots.  Force overlays:
+  - Red lines per pin-pair attraction edge, intensity scaled to
+    magnitude (so weak pulls fade and strong ones are bright).
+  - Blue lines per component-pair repulsion, top-30 by magnitude
+    (configurable; N(N−1)/2 pairs would be too noisy on a 30-comp
+    sheet).
+  - Green sum-of-forces stub from each component centre, scaled so
+    the largest force vector reads ~8 mm.
+  Toggleable per-layer at construction time
+  (`show_attraction=False`, `show_repulsion=False`, etc.).  Schematic
+  Y-axis is inverted so the view matches what KiCad shows.  Works
+  headless under the Agg backend (`viz.save("/tmp/state.png")`) for
+  CI / batch runs.  `matplotlib>=3.7` added to requirements.txt as an
+  optional viz-only dep; the import is lazy so non-viz callers
+  aren't affected.  5 smoke tests in `tests/test_autoplacer_viz.py`.
+
+- **Schematic router rule 7: stub-zone reservation.**  Every pin now
+  has an implicit 2.54 mm "stub zone" running outward from its
+  endpoint along the pin's outward angle.  Routes for OTHER nets
+  can't traverse the stub zone — they'd otherwise create the "wire
+  crosses stub" pattern when Phase 3 of `connect_pins` lays the
+  label-stub.  Implementation:
+  1. `Obstacles` gains a `pin_angles: Dict[(int_um_x, int_um_y), float]`
+     field.  `_collect_pin_endpoints` populates it via
+     `PinLocator.get_pin_angle` for every collected pin.
+  2. `_build_grid_obstacles` blocks 1 and 2 cells outward of every
+     non-own pin — A* routes can't enter the stub zone.
+  3. `check_spurious_connections` adds rule 7: candidate segment
+     must not strictly cross any pin's outward stub segment.  Covers
+     the shape-router (straight/L/U) which doesn't go through the A*
+     grid.  Tests in
+     `tests/test_schematic_router.py::TestCheckSpuriousRule7_StubZoneCrossing`
+     (4 cases: cross-rejected, far-allowed, no-angle-skips, own-pin-exempt).
+
+  Knock-on: `connect_to_net` (Phase 3 of connect_pins) now runs the
+  prospective stub through the spurious-connection guard before
+  laying it.  If a 2.54 mm stub would create a crossing, lengths up
+  to 6.35 mm are tried in turn; falls back to 2.54 mm with an info
+  log if no length fits (pre-existing behaviour preserved).
+
+  Also: `rewire_session` now scans the final schematic for
+  unrelated-net wire crossings without junctions and returns a list
+  of findings as `unrelated_crossings` in the result dict.  Each
+  is electrically harmless on its own (KiCad treats no-junction
+  crossings as not connected) but flags places where any future
+  endpoint landing at the crossing point would silently merge two
+  unrelated nets.  Verified end-to-end: BMS, charger, and buckboost
+  all produce 0 crossings post-fix (down from 4 / 1 / 1).
+
+- **Autoplacer: preserve no_connect markers + centre bbox on page.**
+  Two complementary tweaks at apply time:
+
+  1. *no_connect preservation*: `apply_to_schematic` strips every
+     `(no_connect)` marker along with wires/labels/junctions, so
+     deliberately-unconnected pins (NC pins on ICs) come back as
+     ERC "Pin not connected" errors after the placer runs.  Fix:
+     in `load_session`, find every no_connect's pin owner (by world-
+     coord match) and store `(comp_key, pin)` in
+     `Session.no_connects`.  In `rewire_session`, after the per-net
+     wiring, re-emit a no_connect marker at each (now-translated)
+     pin's world coord.  Coincident markers (FDS9926A duplicate-pad
+     pins 5/6 and 7/8) are deduped so KiCad doesn't see redundant
+     entries.
+
+  2. *centre on page*: new `center_components_on_page` runs after
+     `snap_positions` in `PLACER.apply` (gated on `center_on_page=True`
+     by default).  Applies a rigid translation to ALL components
+     (including pinned) so the bbox of the placed assembly is centred
+     on the A4 page centre (≈ 148.59, 104.78 mm).  The translation
+     preserves relative positions, so pinned components shift along
+     with mobile ones — without that, a pinned connector at the
+     schematic's original anchor would stay put while the rest moves
+     to the page centre, breaking routing across them.
+
+  Tests in `tests/test_autoplacer.py`:
+  `test_no_connect_marker_recorded_on_load`,
+  `test_apply_re_emits_no_connect_at_new_pin_position`,
+  `test_centers_bbox_on_page`,
+  `test_rigid_translation_preserves_relative_positions`.
+
+- **Autoplacer: pin-aware attraction + multi-pass snap with pin-collision
+  safety check.** Three related improvements that change how the
+  placer thinks about connected components:
+
+  1. *Pin-aware attraction*: the attractive force on a net edge now
+     pulls the SPECIFIC pins on each end together (via
+     `_attractive_force_pinwise`), not the component centres.  Without
+     this, decoupling caps on a large IC's perimeter pile on the IC's
+     centre.  With it, components naturally line up edge-to-edge with
+     connections short and visible — verified on the BMS sheet where
+     the run-time wires went from ~17 to ~23 (out of 19 named nets,
+     so multi-pin nets are now mostly fully wired).
+  2. *Multi-pass `snap_positions`*: the bbox-overlap nudge sweep now
+     runs until a full pass produces no movement (vs single-pass
+     before).  Single-pass missed chain reactions where pair (i, j)
+     nudged j into a new overlap with k where k < i — k had already
+     been processed, so the overlap was never resolved.
+  3. *Pin-coord-collision safety pass*: after bbox resolution, scan
+     every pin's world coord and nudge any component whose pin lands
+     on another component's pin.  This is the last line of defence
+     against net merges: connect_pins(auto) wires same-net pins
+     together, and if two different-net pins sit at the same coord
+     the wires merge those nets.  Verified on the BMS sheet where the
+     pre-fix polish run produced spurious BAT+/CELL1_TOP and
+     REGOUT/VC2 net merges; post-fix produces 0 merges.
+
+  Tests in `tests/test_autoplacer.py`: `test_pinwise_attraction_*`,
+  `test_pin_coord_collision_resolved`,
+  `test_multipass_resolves_chained_overlaps`.
+
+- **Autoplacer `snap_positions` exempts same-ref multi-unit pairs from
+  overlap resolution.** Without this exemption, two units of the same
+  multi-unit symbol (e.g. Q1 unit 1 + Q1 unit 2) could trip the
+  bbox-aware overlap resolution and get nudged apart even though
+  they're meant to occupy distinct lib coordinates by design.  Now the
+  resolver `continue`s on `a.ref == b.ref`, leaving the per-unit
+  components where the iteration force model placed them.
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-10)
+
+- **`connect_pins(auto)` lost the net label entirely on duplicate-pad
+  multi-unit pins.**  `connect_pins` for a net like FET_MID
+  (FDS9926A drain pads where pin 7 = pin 8 at the same lib coord)
+  returned `success=True` for the degenerate Q1/7→Q1/8 route with
+  `segments=[]`, then added both pins to `wired_pin_set`.  Phase 3
+  skipped them ("already wired"), and Phase 5 had no segments to
+  operate on (`if not segs: continue`).  Net result: the entire
+  FET_MID name vanished from the schematic.  Same root cause hit
+  charger USB_VBUS where J1's A4/A9/B4/B9 are all at the same coord.
+  Fix: when `result.success and not result.segments`, `continue`
+  without adding pins to `wired_pin_set`; Phase 3 then labels each
+  pin individually so the net name is preserved.
+
+- **Schematic router could route through its own component's bbox.**
+  `_build_grid_obstacles` skipped the route's own ref-pair from the
+  bbox-blocking pass, so a wire leaving pin A of a tall symbol could
+  double back through the symbol body on its way to pin B.  Drop the
+  skip — the actual pin-endpoint cells are still re-allowed at the
+  end of the function (`discard(cell_p1)` / `discard(cell_p2)`), so
+  start/goal stay reachable but the body proper now blocks traversal.
+
+- **`WireManager.add_wire` didn't split a new wire at existing wire
+  endpoints on its interior.** The existing logic split *existing*
+  wires at the new wire's endpoints, but the symmetric case — a new
+  wire passing through an existing endpoint — wasn't handled.  The
+  new wire stayed one long segment passing over the existing endpoint
+  with no T-junction marker.  KiCad's wire-graph then treated the
+  wires as crossing-not-joining (visually "touching but not
+  connected"), and sync_junctions never saw ≥3 endpoints at the
+  crossing point so it didn't add a junction either.  Repro on
+  `projects/autoplacer_test` D_BUS: pair-1's bus corner at
+  (152.4, 90.17) was on the interior of pair-2's vertical run.  Fix:
+  in `add_wire`, after splitting existing wires at the new endpoints,
+  collect every existing wire/pin endpoint that falls strictly on the
+  new segment's interior and emit the new wire as multiple segments
+  meeting at those points — sync_junctions then sees ≥3 endpoints
+  there and adds the junction.  New helpers
+  `_existing_endpoints_on_segment` and `_segments_split_at`.  Test:
+  `tests/test_wire_junction_changes.py::TestSyncJunctionsIntegration::
+  test_new_wire_through_existing_endpoint_splits_at_endpoint`.
+
+- **`add_schematic_net_label` only added a wire stub for connector
+  refs.** Every other pin got a bare label at the pin endpoint —
+  KiCad ERC then reported "Label not connected to anything" because
+  it couldn't see the pin↔label connection without a wire segment
+  between them.  Surfaced 2026-05-10 on `projects/autoplacer_test`
+  while verifying the multi-unit fix (5 of 6 ERC errors were this).
+  Fix: always emit the 2.54mm outward stub and put the label at the
+  stub's far end (the logic that already existed for `J*` refs,
+  applied to every snap-to-pin call).  Falls back to bare-label-at-
+  pin only when `get_pin_angle` returns None.  Tests in
+  `tests/test_net_label_pin_snapping.py` (3 cases: stub position+wire
+  call, stub respects pin angle, fallback when angle unknown).
+
+- **`connect_pins(style="auto")` astar-tee terminated after one cell
+  when its start pin was already on a same-net wire.** Repro on a
+  3-pin connect_pins call where pair-1's wire ends at pair-2's
+  starting pin: A* walked from cell (0,0) onto cell (0,-1), saw it
+  was on a same-net "tee target", and stopped — the run-out leg to
+  the third pin never got emitted.  Caller saw `success: true` with
+  a 1.27mm stub instead of a real route.  Surfaced 2026-05-10 on
+  `projects/autoplacer_test` D_BUS (Q1/8 + Q1/6 + R3/2): pair-1
+  ended at Q1/6 = pair-2's p1, pair-2 stub'd in place.  Fix: in
+  `_route_pair_with_astar`, BFS the same-net wire graph from p1 and
+  exclude every reachable cell from `extra_goal_cells` — the router
+  can't "tee" onto a wire that's already connected to its own
+  start.  New helper `_wire_reachable_cells_from_start`.  Test in
+  `tests/test_schematic_router.py::TestConnectPinsStyle::
+  test_astar_tee_doesnt_terminate_on_wire_already_at_p1`.
+
+- **`PinLocator` multi-unit pin lookup returned wrong coords.** When a
+  schematic placed two units of the same multi-unit symbol (e.g.
+  `Q1 unit 1` + `Q1 unit 2` of a dual N-FET), `get_pin_location`
+  found the first placed instance by reference and transformed every
+  pin number against ITS `(at)` — even pins owned by a different
+  unit's sub-symbol.  Result: queries for unit-2 pins returned
+  unit-1's world coord, breaking `connect_pins(style="auto")`,
+  `get_schematic_pin_locations`, and any other tool that resolves
+  pins through PinLocator.  Fix: parse the lib_symbols sub-symbol
+  naming `<base>_<unit>_<convert>` (new
+  `PinLocator.parse_pins_per_unit` + cached `get_pins_per_unit`),
+  enumerate every placed instance by reference (new
+  `_find_placed_instances` returns x/y/rotation/mirror/lib_id/unit),
+  match each requested pin to its owning unit, and transform against
+  THAT instance's `(at)`.  `get_pin_angle` and `get_all_symbol_pins`
+  use the same path.  Tests in `tests/test_pin_locator_multi_unit.py`
+  (4 cases: unit-1 sanity, unit-2 unique coord, get_all_symbol_pins
+  unit-aware, rotation differs per unit).  Knock-on: autoplacer's
+  `rewire_session` switched back from "labels+stubs only" to
+  `connect_pins(style="auto")` per net, so it draws real inter-pin
+  wires when feasible.  Restart MCP server to pick up.
+
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-09)
+
+- **`connect_pins(style="auto")` left orphaned wired chains on a floating
+  ghost sub-net.** The autorouter wires consecutive pin pairs and
+  Phase 5 added one auto-label at the first wired pair. If the
+  autorouter formed two disjoint chains (cluster 1 wires, middle pair
+  fails to label-fallback, cluster 2 wires), only cluster 1 got a
+  label — cluster 2's pins were reported as "connected" but in reality
+  sat on an unlabeled sub-net which KiCad auto-named `Net-(Cn-Pad1)`,
+  silently fragmenting the named net. Surfaced when partitioning the
+  power_module flat schematic into hierarchical sheets — three cap-pair
+  orphan chains had to be patched manually. Fix: Phase 5 iterates every
+  wired pair, classifies whether its endpoints are reachable from a
+  target_net label via the wire graph, and labels each orphaned chain
+  (re-computing reachability after each label so we don't
+  double-label). Result dict gains
+  `auto_label_positions: List[List[float]]`; legacy
+  `auto_label_position` preserved as the first entry. Test:
+  `test_auto_labels_each_orphaned_chain`.
+
+- **Autorouter allowed perpendicular wire crossings.**
+  `check_spurious_connections` had 5 rules — pin / label / T-junction /
+  collinear overlap / symbol body — but no rule against two unrelated
+  wires crossing at right angles. Such crossings are electrically valid
+  in KiCad (no junction → no connection) but visually confusing, and
+  they made the buck-boost layout unreadable. Added rule 6 plus helper
+  `_segments_strictly_cross` (orthogonal pairs intersecting strictly
+  inside both segments; T-junctions and shared endpoints return False
+  so other rules don't double-fire). Same-net crossings still allowed
+  (the same-net relaxation set already covered tee/joins). Tests:
+  `TestSegmentsStrictlyCross` (6 cases),
+  `TestCheckSpuriousRule6_WireCrossing` (4 cases); the previously-
+  inverted `test_wire_crossing_perpendicular_allowed` was renamed
+  and flipped to `…_rejected_by_rule_6`.
+
+- **`PinLocator` cached schematic state without invalidation.**
+  `ConnectionManager._pin_locator` is a class-level singleton; the
+  underlying `PinLocator` instance held three caches keyed by file
+  path (`_schematic_cache`, `_sexp_cache`, `pin_definition_cache`)
+  that were populated on first access and never invalidated. A
+  subsequent write through a different code path (e.g.
+  `DynamicSymbolLoader.add_component` from a script while the server
+  is running) left the locator looking at the old component list —
+  `connect_pins` then reported "N failed" for every pin on a
+  freshly-added component while `add_schematic_net_label` (reads
+  fresh) worked. Fix: `_invalidate_if_changed(schematic_path)` stats
+  the file at every public entry point and clears all path-keyed
+  cache entries when mtime advances. Tests:
+  `tests/test_pin_locator_cache_invalidation.py` (positive + negative).
+
 ### Tool Enhancements (this branch: fixes/improvements_2, 2026-05-08)
 
 - **`get_board_2d_view` now crops to the board outline and renders per-layer
