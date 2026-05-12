@@ -4,6 +4,38 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 2)
+
+- **connect_pins: multi-unit duplicate-pad dedupe.**  Two related bugs
+  on nets that span multi-unit symbols with duplicate pads (FDS9926A
+  pins 5+6 on a source pad; J1 USB-C's A1+A12+B1+B12 GND pads at one
+  symbol pin):
+
+  - *Phase 1-2 union on zero-distance pairs.*  When the MST picked a
+    pair at distance 0 (two pin keys resolving to the same world
+    coord), the existing degenerate-route handling skipped the wire
+    but never `_union`'d the two MST nodes.  Subsequent MST candidates
+    from either of those pins then got tried as separate edges, laying
+    parallel wires to the same destination — the LOOP source on
+    FET_MID and similar nets.
+  - *Phase 3 dedupe by IU coord.*  When Phase 3 stub-and-labels each
+    unwired pin separately, N duplicate-pad pins at one coord
+    produced N stacked overlapping labels (DUPLICATE_LABELS).  Now
+    Phase 3 tracks a ``covered_pin_ius`` set (seeded from
+    ``wired_pin_set``'s pin coords) and skips any pin whose coord is
+    already covered.
+  - Side effect: ``pin_endpoints`` is now populated for every
+    ``try_wire`` call, not just non-power-net ones, so Phase 3's
+    coord dedupe also catches GND chains under #PWR_GND (multiple
+    GND pads at one symbol coord).
+
+  End-to-end on the three power_module child sheets: all three now
+  pass netlist-equivalence + chain-pathology validation
+  (``diagnose_chains.py``) with 0 DUPLICATE_LABELS and 0 CROSS_NET.
+
+  New regression test:
+  ``TestPhase5ChainFinder::test_duplicate_pad_pins_dedupe_in_phase3``.
+
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13)
 
 - **Autoplacer: net discovery via the real wire graph (T-junction

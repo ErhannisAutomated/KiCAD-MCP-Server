@@ -2008,6 +2008,52 @@ class TestPhase5ChainFinder:
             "the merge guard should have refused the candidate"
         )
 
+    def test_duplicate_pad_pins_dedupe_in_phase3(self, tmp_path: Path):
+        """When N pins on the same net resolve to the same physical
+        coord (multi-unit duplicate pads — Q1's pins 5+6 sharing a
+        source pad on FDS9926A), Phase 3 must emit ONE stub+label at
+        that coord, not N stacked overlapping labels.  The remaining
+        pins at the same coord are marked connected via the existing
+        stub.
+
+        Regression for the FET_MID / V12_INT / BB_SW2 DUPLICATE_LABELS
+        flagged on multi-unit FET drains and sources after recipe runs."""
+        from commands.connection_schematic import _phase5_label_orphan_chains
+
+        # We don't need an actual multi-unit symbol to exercise the
+        # dedupe — _phase5_label_orphan_chains operates on the
+        # pin_endpoints dict.  But the dedupe lives in Phase 3, which
+        # is inside ConnectionManager.connect_pins.  So we have to
+        # exercise the full path with a real multi-unit-ish setup.
+        # Simulate by building two minimum-distance R's whose pins
+        # we report as living at the same coord via direct call.
+        # Easier: just exercise connect_pins on a synthetic 4-pin net
+        # where two pins per pair share a coord.
+        from commands.connection_schematic import ConnectionManager
+        # Use the helper that writes a tiny schematic with two R's.
+        sch = _write(tmp_path, "dupcoord.kicad_sch", _make_two_resistors_sch())
+        # Call connect_pins with the same pin listed twice — that
+        # simulates the multi-unit duplicate-pad case (Q1/5 and Q1/6
+        # at one coord resolve to the same pin_endpoint via the
+        # multi-unit pin locator).
+        result = ConnectionManager.connect_pins(
+            sch,
+            [
+                {"ref": "R1", "pin": "2"},
+                {"ref": "R1", "pin": "2"},  # same pin reported twice
+                {"ref": "R2", "pin": "1"},
+            ],
+            net_name="DUP",
+            style="auto",
+        )
+        assert result["success"], result.get("message")
+        text = sch.read_text()
+        # Only ONE DUP label, not two.
+        assert text.count('(label "DUP"') == 1, (
+            f"duplicate-pad pins should dedupe to one label, got "
+            f"{text.count('(label \"DUP\"')}"
+        )
+
     def test_chain_with_foreign_label_skipped(self, tmp_path: Path):
         """Defensive: if a chain already carries a foreign-net label
         (indicating a cross-net merge bug elsewhere), Phase 5 must NOT

@@ -954,6 +954,26 @@ class ConnectionManager:
             )
             from commands.wire_manager import WireManager
 
+            # Pre-locate every pin in the call.  Used by:
+            #   - the MST routing path for non-power nets,
+            #   - Phase 3's duplicate-pad coord dedupe (which runs for
+            #     power nets too — multiple #PWR_GND on the same J1
+            #     USB-C pad coord would otherwise stack labels).
+            _locator_for_endpoints = ConnectionManager.get_pin_locator()
+            if _locator_for_endpoints is not None:
+                for p in pins:
+                    ref, pin = p.get("ref", ""), p.get("pin", "")
+                    if not (ref and pin):
+                        continue
+                    loc = _locator_for_endpoints.get_pin_location(
+                        schematic_path, ref, pin
+                    )
+                    if loc:
+                        pin_endpoints[f"{ref}/{pin}"] = (
+                            float(loc[0]),
+                            float(loc[1]),
+                        )
+
             if resolved_net and is_power_net(resolved_net, power_nets):
                 # Power nets default to labels; in "wire" mode this is a hard fail.
                 if style == "wire":
@@ -971,27 +991,6 @@ class ConnectionManager:
                 # never trips the "pin lies on candidate wire" check.
                 exclude = {(p.get("ref", ""), str(p.get("pin", ""))) for p in pins}
                 obstacles = collect_obstacles(schematic_path, exclude_pins=exclude)
-
-                # Phase 4 — pre-locate every pin in the call. The router uses
-                # these as `extra_own_endpoints` to classify wires connected
-                # to any of our pins as same-net (so a freshly-laid wire from
-                # an earlier pair is recognised on the next pair without a
-                # label).
-                pin_endpoints: Dict[str, Tuple[float, float]] = {}
-                _locator_for_endpoints = ConnectionManager.get_pin_locator()
-                if _locator_for_endpoints is not None:
-                    for p in pins:
-                        ref, pin = p.get("ref", ""), p.get("pin", "")
-                        if not (ref and pin):
-                            continue
-                        loc = _locator_for_endpoints.get_pin_location(
-                            schematic_path, ref, pin
-                        )
-                        if loc:
-                            pin_endpoints[f"{ref}/{pin}"] = (
-                                float(loc[0]),
-                                float(loc[1]),
-                            )
 
                 # Pair iteration order: shortest physical distance first
                 # (Kruskal-style minimum-spanning-tree).  This means the
@@ -1107,7 +1106,15 @@ class ConnectionManager:
                             # multi-unit symbol like FDS9926A 5/6, 7/8).  No
                             # wire was emitted, so don't claim the pins as
                             # "wired" — let Phase 3 add a label-with-stub
-                            # for each pin so the net is named.
+                            # at the shared coord, dedupe-by-coord covers
+                            # the other pin.
+                            #
+                            # Still _union the two MST nodes so subsequent
+                            # MST candidates from any same-cluster pin
+                            # don't get tried (which would lay parallel
+                            # wires to the same destination — the LOOP
+                            # source on multi-unit FET nets like FET_MID).
+                            _union(_i, _j)
                             continue
                         # Apply the wire segments. Re-collect obstacles after
                         # so subsequent pairs see the new wire as an obstacle.
@@ -1178,6 +1185,20 @@ class ConnectionManager:
         already_connected: List[str] = []
         failed: List[Dict] = []
 
+        # Multi-unit duplicate-pad coords are already covered by wires
+        # laid in Phase 1-2: if Q1/5 and Q1/6 both sit at the same pad
+        # coord and a wire was laid from there, Q1/6 is electrically
+        # on the net even though its pin key isn't in wired_pin_set.
+        # Track these covered coords (IU-snapped) so Phase 3 doesn't
+        # emit a redundant stub+label per duplicate pin — that's the
+        # source of DUPLICATE_LABELS-at-same-position flagged on
+        # multi-unit FET drains / sources.
+        covered_pin_ius: Set[Tuple[int, int]] = set()
+        for k in wired_pin_set:
+            pt = pin_endpoints.get(k)
+            if pt is not None:
+                covered_pin_ius.add(_iu(pt))
+
         for p in pins:
             ref, pin = p.get("ref", ""), p.get("pin", "")
             if not ref or not pin:
@@ -1195,6 +1216,14 @@ class ConnectionManager:
                 already_connected.append(key)
                 continue
 
+            # Same-coord dedupe: if a previous pin at this exact IU
+            # coord already had its stub+label added (or was wired in
+            # Phase 1-2), this pin is electrically on the net too.
+            pt = pin_endpoints.get(key)
+            if pt is not None and _iu(pt) in covered_pin_ius:
+                connected.append(key)
+                continue
+
             if current is not None:
                 failed.append(
                     {
@@ -1210,6 +1239,8 @@ class ConnectionManager:
             result = ConnectionManager.connect_to_net(schematic_path, ref, pin, resolved_net)
             if result.get("success"):
                 connected.append(key)
+                if pt is not None:
+                    covered_pin_ius.add(_iu(pt))
             else:
                 failed.append({"pin": key, "reason": result.get("message", "unknown")})
 
