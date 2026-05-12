@@ -278,7 +278,8 @@ def _try_branch_stub_at_corner(
             ):
                 continue
             if WireManager.add_wire(
-                schematic_path, list(branch_mm), list(stub_mm)
+                schematic_path, list(branch_mm), list(stub_mm),
+                expected_net=resolved_net,
             ):
                 return list(stub_mm)
     return None
@@ -419,8 +420,12 @@ class ConnectionManager:
             except Exception as e:
                 logger.debug(f"connect_to_net: stub guard skipped ({e})")
 
-            # Create wire stub using WireManager
-            wire_success = WireManager.add_wire(schematic_path, pin_loc, stub_end)
+            # Create wire stub using WireManager.  Pass expected_net so
+            # _break_wires_at_point refuses cross-net splits (issue #74).
+            wire_success = WireManager.add_wire(
+                schematic_path, pin_loc, stub_end,
+                expected_net=net_name,
+            )
             if not wire_success:
                 msg = "Failed to create wire stub for net connection"
                 logger.error(msg)
@@ -1118,9 +1123,12 @@ class ConnectionManager:
                             continue
                         # Apply the wire segments. Re-collect obstacles after
                         # so subsequent pairs see the new wire as an obstacle.
+                        # expected_net guards against cross-net merges via
+                        # _break_wires_at_point splits (issue #74).
                         for (start, end) in result.segments:
                             if not WireManager.add_wire(
-                                schematic_path, list(start), list(end)
+                                schematic_path, list(start), list(end),
+                                expected_net=resolved_net,
                             ):
                                 routing_failures.append(
                                     {

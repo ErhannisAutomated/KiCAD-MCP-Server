@@ -55,69 +55,107 @@ def _write_with_one_labelled_wire(tmp: Path) -> Path:
     return p
 
 
+def _has_junction_at(sch_path: Path, x: float, y: float) -> bool:
+    """Inspect the file for a (junction (at X Y) …) entry at the
+    given coord.  KiCad's connectivity engine only treats T-junction
+    points as electrically connected when a junction marker is
+    present; absence of one means the wires visually cross but are
+    NOT on the same net."""
+    import sexpdata
+    from sexpdata import Symbol
+    sexp = sexpdata.loads(sch_path.read_text())
+    for item in sexp:
+        if not (isinstance(item, list) and item and item[0] == Symbol("junction")):
+            continue
+        for sub in item[1:]:
+            if (isinstance(sub, list) and sub and sub[0] == Symbol("at")
+                    and len(sub) >= 3):
+                if (abs(float(sub[1]) - x) < 1e-6
+                        and abs(float(sub[2]) - y) < 1e-6):
+                    return True
+    return False
+
+
+def _count_wires_split_at(sch_path: Path, x: float, y: float) -> int:
+    """How many wires have an endpoint EXACTLY at (x, y).  Used to
+    detect whether ``_break_wires_at_point`` actually split."""
+    import sexpdata
+    from sexpdata import Symbol
+    sexp = sexpdata.loads(sch_path.read_text())
+    n = 0
+    for item in sexp:
+        if not (isinstance(item, list) and item and item[0] == Symbol("wire")):
+            continue
+        for sub in item:
+            if isinstance(sub, list) and sub and sub[0] == Symbol("pts"):
+                for xy in sub[1:]:
+                    if (isinstance(xy, list) and len(xy) >= 3
+                            and xy[0] == Symbol("xy")
+                            and abs(float(xy[1]) - x) < 1e-6
+                            and abs(float(xy[2]) - y) < 1e-6):
+                        n += 1
+    return n
+
+
 @pytest.mark.unit
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "Issue #74: WireManager._break_wires_at_point is net-blind. "
-        "Adding a wire whose endpoint lands on the interior of a "
-        "wire belonging to NET_A causes a junction to be inserted "
-        "and KiCad merges the two nets.  Fix is to thread "
-        "expected_net through add_wire and refuse cross-net splits."
-    ),
-)
 def test_add_wire_does_not_silently_merge_two_unrelated_nets(
     tmp_path: Path,
 ) -> None:
+    """Issue #74: with ``expected_net`` passed,
+    ``_break_wires_at_point`` refuses to split an existing wire whose
+    chain carries a foreign-net label.  Without the split the new
+    wire's endpoint sits on the foreign wire's interior without a
+    junction — KiCad treats the two wires as not electrically
+    connected, which is the safe outcome.
+
+    Verification via the kicad_sch file directly: no junction at the
+    crossing point, and the original NET_A wire is intact (no split
+    endpoint at (105, 100))."""
     sch = _write_with_one_labelled_wire(tmp_path)
 
-    # Sanity: the pre-existing wire has both endpoints on NET_A.
-    # (We can't easily probe via get_pin_net without a component, so
-    # we'll rely on the post-condition check after adding the new
-    # wire.  This step is just for the reader.)
-
-    # Add a new wire from (105, 95) to (105, 100).  The endpoint
-    # (105, 100) lands strictly on the INTERIOR of the existing
-    # (100,100)→(110,100) wire.
-    #
-    # The caller intends this new wire to be on NET_B (and will
-    # follow up with a NET_B label at (105, 95)).  But before the
-    # caller can even add that label, _break_wires_at_point will
-    # split the NET_A wire at (105, 100) and sync_junctions will
-    # add a junction — fusing the two endpoints onto a single
-    # KiCad net.
+    # New wire from (105, 95) → (105, 100); the endpoint (105, 100)
+    # lands on the interior of the existing NET_A wire.  With
+    # expected_net="NET_B", the split should be refused.
     assert WireManager.add_wire(
         sch, [105.0, 95.0], [105.0, 100.0],
+        expected_net="NET_B",
     )
-
-    # Now add the NET_B label at the new wire's free end.  At this
-    # point a correct add_wire would have prevented the merge (or
-    # the new wire would have been refused, returning False, in
-    # which case the assertion above would have failed first).
     assert WireManager.add_label(
         sch, "NET_B", [105.0, 95.0], label_type="label",
     )
 
-    # Post-condition: query the inferred net for several points.
-    # Any one of NET_A's original wire endpoints should remain on
-    # NET_A; the new wire's free end (105, 95) should be on NET_B.
-    # If the merge happened, all four query points come back on the
-    # SAME net (whichever label resolves first — likely NET_A as
-    # the earlier label).
-    from commands.wire_connectivity import walk_wire_chain
+    # KiCad-faithful check: no junction at the crossing point.
+    assert not _has_junction_at(sch, 105.0, 100.0), (
+        "A junction at (105, 100) means the foreign NET_A wire was "
+        "split there and KiCad will treat both nets as merged.  "
+        "Issue #74."
+    )
+    # And the NET_A wire endpoints are still (100, 100) and (110, 100)
+    # only — no extra wire endpoint at the would-be split point.
+    assert _count_wires_split_at(sch, 105.0, 100.0) <= 1, (
+        "Existing NET_A wire was split at (105, 100) — _break_wires_at_point "
+        "didn't refuse the cross-net split."
+    )
 
-    chain_a = walk_wire_chain((100.0, 100.0), sch)
-    chain_b = walk_wire_chain((105.0, 95.0), sch)
 
-    assert chain_a is not None and chain_b is not None
-    # The whole bug: with the net-blind split, chain_a and chain_b
-    # share wire indices (they're the same physical component).
-    # With a net-aware add_wire, the two chains stay disjoint.
-    assert chain_a.wire_indices.isdisjoint(chain_b.wire_indices), (
-        "Cross-net merge: new wire ended on NET_A's interior and got "
-        "junction'd to it.  See issue #74.  Once add_wire refuses "
-        "this kind of split, the chains stay disjoint and this "
-        "assertion passes."
+@pytest.mark.unit
+def test_add_wire_without_expected_net_preserves_old_split_behavior(
+    tmp_path: Path,
+) -> None:
+    """Default ``expected_net=None`` preserves the pre-#74 behavior:
+    ``_break_wires_at_point`` splits regardless of net.  Locks in the
+    backwards-compatibility contract — callers that don't opt into the
+    net-aware refusal still see the old (net-blind) splits.  Any
+    cross-net merge that results is the caller's responsibility."""
+    sch = _write_with_one_labelled_wire(tmp_path)
+
+    assert WireManager.add_wire(sch, [105.0, 95.0], [105.0, 100.0])
+
+    # Pre-#74: the split happened and sync_junctions added a junction.
+    assert _has_junction_at(sch, 105.0, 100.0), (
+        "Without expected_net the pre-#74 net-blind split should still "
+        "happen and produce a junction; if not, the default behavior "
+        "has changed unexpectedly."
     )
 
 

@@ -2082,7 +2082,10 @@ class KiCADInterface:
                         round(pin_loc[0] + stub_len * math.cos(rad), 4),
                         round(pin_loc[1] - stub_len * math.sin(rad), 4),
                     ]
-                    WM.add_wire(Path(schematic_path), pin_loc, stub_end)
+                    WM.add_wire(
+                        Path(schematic_path), pin_loc, stub_end,
+                        expected_net=net_name,
+                    )
                     position = stub_end
                     auto_stub_added = True
                     logger.info(

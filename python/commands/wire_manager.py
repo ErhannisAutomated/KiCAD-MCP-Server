@@ -141,6 +141,7 @@ class WireManager:
         end_point: List[float],
         stroke_width: float = 0,
         stroke_type: str = "default",
+        expected_net: Optional[str] = None,
     ) -> bool:
         """
         Add a wire to the schematic using S-expression manipulation
@@ -151,6 +152,17 @@ class WireManager:
             end_point: [x, y] coordinates for wire end
             stroke_width: Wire width (default 0 for standard)
             stroke_type: Stroke type (default, solid, dashed, etc.)
+            expected_net: Optional name of the net this wire is being
+                laid on.  When set, ``_break_wires_at_point`` and
+                ``_existing_endpoints_on_segment`` refuse to split any
+                existing wire whose labels include a foreign net (not
+                ``expected_net``).  Without the split the new wire
+                lands on the foreign wire's interior without a
+                junction, so KiCad treats it as not connected — far
+                safer than silently fusing two nets via
+                ``sync_junctions``.  Default ``None`` preserves the
+                old net-blind behavior for callers that don't know
+                the net.  This is the fix for issue #74.
 
         Returns:
             True if successful, False otherwise
@@ -190,9 +202,15 @@ class WireManager:
                     )
                     return True
 
-            # Break any existing wire that passes through a new endpoint (T-junction support)
+            # Break any existing wire that passes through a new endpoint (T-junction support).
+            # When expected_net is set, refuses splits that would fuse a
+            # foreign-net wire (issue #74 defense).
             for pt in (start_point, end_point):
-                splits = WireManager._break_wires_at_point(sch_data, pt)
+                splits = WireManager._break_wires_at_point(
+                    sch_data, pt,
+                    schematic_path=schematic_path if expected_net is not None else None,
+                    expected_net=expected_net,
+                )
                 if splits:
                     logger.info(f"Broke {splits} wire(s) at new wire endpoint {pt}")
 
@@ -204,7 +222,9 @@ class WireManager:
             # (sync_junctions only sees ≥3 endpoints, so a wire-passes-
             # through-endpoint case never gets a junction marker added).
             split_points = WireManager._existing_endpoints_on_segment(
-                sch_data, start_point, end_point
+                sch_data, start_point, end_point,
+                schematic_path=schematic_path if expected_net is not None else None,
+                expected_net=expected_net,
             )
 
             # Find insertion point (before sheet_instances)
@@ -289,6 +309,7 @@ class WireManager:
         points: List[List[float]],
         stroke_width: float = 0,
         stroke_type: str = "default",
+        expected_net: Optional[str] = None,
     ) -> bool:
         """
         Add a multi-segment wire (polyline) to the schematic
@@ -298,6 +319,8 @@ class WireManager:
             points: List of [x, y] coordinates for each point in the path
             stroke_width: Wire width
             stroke_type: Stroke type
+            expected_net: See :meth:`add_wire`; default None preserves
+                net-blind splits.
 
         Returns:
             True if successful, False otherwise
@@ -315,7 +338,11 @@ class WireManager:
 
             # Break any existing wire at the outer endpoints of the new path
             for pt in (points[0], points[-1]):
-                splits = WireManager._break_wires_at_point(sch_data, pt)
+                splits = WireManager._break_wires_at_point(
+                    sch_data, pt,
+                    schematic_path=schematic_path if expected_net is not None else None,
+                    expected_net=expected_net,
+                )
                 if splits:
                     logger.info(f"Broke {splits} wire(s) at new polyline endpoint {pt}")
 
@@ -506,11 +533,23 @@ class WireManager:
         ]
 
     @staticmethod
-    def _break_wires_at_point(sch_data: list, position: List[float]) -> int:
+    def _break_wires_at_point(
+        sch_data: list,
+        position: List[float],
+        schematic_path: Optional[Path] = None,
+        expected_net: Optional[str] = None,
+    ) -> int:
         """
         Split any wire segment that passes through *position* as a strict
         midpoint (i.e. position is not an existing endpoint).  Mirrors
         KiCAD's SCH_LINE_WIRE_BUS_TOOL::BreakSegments behaviour.
+
+        When ``expected_net`` and ``schematic_path`` are both provided,
+        refuses to split an existing wire whose labels include a foreign
+        net (any label other than ``expected_net``).  This is the
+        defence against cross-net merges via sync_junctions: without
+        the split, the new endpoint sits on the foreign wire's interior
+        with no junction → KiCad treats it as not connected.
 
         Returns the number of wires split.
         """
@@ -522,6 +561,23 @@ class WireManager:
             if parsed is not None:
                 (x1, y1), (x2, y2), stroke_width, stroke_type = parsed
                 if WireManager._point_strictly_on_wire(px, py, x1, y1, x2, y2):
+                    # Net-aware refusal (issue #74): walk the existing
+                    # wire's chain and refuse the split if it carries a
+                    # label of any net other than expected_net.
+                    if expected_net is not None and schematic_path is not None:
+                        from commands.wire_connectivity import walk_wire_chain
+                        chain = walk_wire_chain((x1, y1), schematic_path)
+                        if chain is not None and chain.labels:
+                            foreign = set(chain.labels) - {expected_net}
+                            if foreign:
+                                logger.info(
+                                    f"_break_wires_at_point refused split at "
+                                    f"({px},{py}): existing wire on net(s) "
+                                    f"{sorted(foreign)}, new wire intended "
+                                    f"for {expected_net!r}"
+                                )
+                                i += 1
+                                continue
                     seg_a = WireManager._make_wire_sexp(
                         [x1, y1], [px, py], stroke_width, stroke_type
                     )
@@ -538,7 +594,11 @@ class WireManager:
 
     @staticmethod
     def _existing_endpoints_on_segment(
-        sch_data: list, start: List[float], end: List[float]
+        sch_data: list,
+        start: List[float],
+        end: List[float],
+        schematic_path: Optional[Path] = None,
+        expected_net: Optional[str] = None,
     ) -> List[Tuple[float, float]]:
         """Return existing wire endpoints (and pin endpoints) that fall
         STRICTLY on the interior of the segment ``start → end``.  Used
@@ -547,6 +607,12 @@ class WireManager:
 
         Endpoints exactly at ``start`` or ``end`` are excluded — they
         already coincide with the new wire's own endpoints.
+
+        When ``expected_net`` and ``schematic_path`` are provided,
+        filters out endpoints belonging to a foreign-net wire chain
+        (any label other than ``expected_net``) — splitting the new
+        wire at such an endpoint would T-junction the two unrelated
+        nets together.  Issue #74 defense.
         """
         sx, sy = float(start[0]), float(start[1])
         ex, ey = float(end[0]), float(end[1])
@@ -568,6 +634,25 @@ class WireManager:
                 and (round(px * _IU_PER_MM), round(py * _IU_PER_MM)) not in seen
             ):
                 seen.add((round(px * _IU_PER_MM), round(py * _IU_PER_MM)))
+
+        if expected_net is not None and schematic_path is not None and seen:
+            from commands.wire_connectivity import walk_wire_chain
+            filtered: set = set()
+            for iu in seen:
+                pt_mm = (iu[0] / _IU_PER_MM, iu[1] / _IU_PER_MM)
+                chain = walk_wire_chain(pt_mm, schematic_path)
+                if chain is not None and chain.labels:
+                    foreign = set(chain.labels) - {expected_net}
+                    if foreign:
+                        logger.info(
+                            f"_existing_endpoints_on_segment dropped split "
+                            f"point at {pt_mm}: foreign net(s) {sorted(foreign)} "
+                            f"vs expected {expected_net!r}"
+                        )
+                        continue
+                filtered.add(iu)
+            seen = filtered
+
         return [(iu_x / _IU_PER_MM, iu_y / _IU_PER_MM) for iu_x, iu_y in seen]
 
     @staticmethod

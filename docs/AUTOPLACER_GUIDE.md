@@ -146,13 +146,17 @@ The recipe is opinionated.  Reach for manual tuning when:
   physical point.  `connect_pins` Phase 3 dedupes by coord so only
   one stub+label is emitted per coord, but the resulting wire graph
   may still flag `LOOP` if multiple wires share the merged endpoint.
-- **Cross-net merge defect (#74)**: `WireManager._break_wires_at_point`
-  is net-blind — if an autorouted wire's endpoint happens to land on
-  the interior of an existing wire belonging to a different net, the
-  two get fused.  `connect_pins` Phase 5 won't *amplify* the bug (it
-  refuses to label cross-net chains), but the merge itself is still
-  latent.  See `tests/test_wire_manager_cross_net.py` for the
-  reproducer (currently `xfail`).
+- **(Fixed)** Cross-net merge defect (#74) — `WireManager.add_wire`
+  now takes an optional `expected_net=` argument.  When set,
+  `_break_wires_at_point` and `_existing_endpoints_on_segment` use
+  `walk_wire_chain` to determine the existing wire's net before
+  splitting; foreign-net splits are refused (the new wire then sits
+  on the foreign wire's interior with no junction → KiCad treats
+  it as not connected).  All `connect_pins` / `connect_to_net` /
+  Phase 5 / `add_schematic_net_label` call sites pass
+  `expected_net`.  Default `None` preserves the old net-blind
+  behavior for callers that don't know the net.  Regression test
+  in `tests/test_wire_manager_cross_net.py`.
 - **Power nets aren't pulled together**.  Polarity bias still applies
   (GND-connected components migrate down, V+-connected up), but the
   spring attraction is off for power rails — they'd otherwise distort

@@ -4,6 +4,43 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 7)
+
+- **Issue #74 fixed: cross-net merge in WireManager wire splits.**
+  `_break_wires_at_point` and `_existing_endpoints_on_segment` were
+  net-blind — splitting an existing wire at a point that became a
+  junction would silently fuse the wire's net into the new wire's
+  net, regardless of intent.  Surfaced earlier on the BMS sheet's
+  VC1 + VC2 merge before the Phase 5 + load_session + duplicate-pad
+  fixes neutralised the symptom.
+
+  Fix: `WireManager.add_wire` and `WireManager.add_polyline_wire`
+  now accept an optional `expected_net=` argument.  When set, the
+  two helpers use `walk_wire_chain` to inspect each candidate
+  existing wire's chain labels; if any label is foreign (any label
+  other than `expected_net`), the split is refused.  The new wire
+  then sits on the foreign wire's interior with no junction →
+  KiCad's connectivity engine treats it as not connected, which is
+  the safe failure mode.  All four call sites pass the expected
+  net:
+    - `connect_pins` Phase 1-2 (resolved_net per net).
+    - `connect_pins` Phase 5 `_try_branch_stub_at_corner`.
+    - `connect_to_net` (target net).
+    - `_handle_add_schematic_net_label`'s auto-stub.
+  Default `expected_net=None` preserves the pre-#74 net-blind
+  behavior for callers that don't know the net.
+
+  Two regression tests in `tests/test_wire_manager_cross_net.py`:
+    - `test_add_wire_does_not_silently_merge_two_unrelated_nets`
+      (was xfail; now passes — checks the kicad_sch file directly
+      for a junction at the crossing point).
+    - `test_add_wire_without_expected_net_preserves_old_split_behavior`
+      (new — locks in the backwards-compat default).
+
+  End-to-end on the three power_module child sheets after this fix:
+  netlist equivalence and 0 DUP / 0 CROSS / clean LOOP counts
+  preserved.
+
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 6)
 
 - **WireManager.add_wire is now idempotent.**  Two mechanisms were
