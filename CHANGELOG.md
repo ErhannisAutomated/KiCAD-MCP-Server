@@ -4,6 +4,28 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### New MCP Tools (this branch: fixes/improvements_2, 2026-05-13 part 3)
+
+- **`diagnose_chains`** — enumerate physical wire chains in a
+  .kicad_sch, with per-chain labels, pins, bbox, and pathology flags
+  (``DUPLICATE_LABELS`` / ``CROSS_NET`` / ``LOOP``).  Uses the same
+  ``walk_wire_chain``-based BFS as ``connect_pins`` Phase 5 so chain
+  detection is consistent across tools.  Optional ``filterNets``
+  param narrows the result to chains carrying any of those names
+  (plus any CROSS_NET chains regardless of filter).
+
+- **`compare_netlists`** — given two .kicad_sch files (a "before"
+  and "after"), assert every component pin's named-net assignment is
+  preserved.  Reports ``missing_pins``, ``extra_pins``, and per-net
+  ``lost``/``added`` mismatches.  Use as a regression guard after any
+  layout-mutating operation; this is the check that caught the
+  C23/BB_SW1 dropped-pin regression in load_session.
+
+Both live in the new ``commands.schematic_inspect`` module and have
+unit tests in ``tests/test_schematic_inspect.py`` (10 tests).
+Originally developed as throwaway /tmp scripts during the BMS-sheet
+debug cycle; promoted here so they're durable + LLM-callable.
+
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 2)
 
 - **connect_pins: multi-unit duplicate-pad dedupe.**  Two related bugs

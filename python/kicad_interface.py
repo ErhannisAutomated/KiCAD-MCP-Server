@@ -440,6 +440,8 @@ class KiCADInterface:
             "autoplacer_state": self._handle_autoplacer_state,
             "autoplacer_preview": self._handle_autoplacer_preview,
             "autoplacer_apply": self._handle_autoplacer_apply,
+            "diagnose_chains": self._handle_diagnose_chains,
+            "compare_netlists": self._handle_compare_netlists,
             "import_svg_logo": self._handle_import_svg_logo,
             # UI/Process management commands
             "check_kicad_ui": self._handle_check_kicad_ui,
@@ -4158,6 +4160,54 @@ class KiCADInterface:
             return PLACER.apply(schematic_path, rewire=rewire)
         except Exception as e:
             logger.error(f"Error in autoplacer_apply: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_diagnose_chains(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Enumerate physical wire chains in a .kicad_sch, list each
+        chain's labels and pin endpoints, and flag chains as
+        DUPLICATE_LABELS / CROSS_NET / LOOP.
+
+        Use post-routing to triage layout output.  ``filterNets``
+        (optional list) narrows the result to chains carrying any of
+        those net names (plus any CROSS_NET chains regardless of
+        filter)."""
+        try:
+            from pathlib import Path
+            from commands.schematic_inspect import diagnose_chains
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            filter_nets = params.get("filterNets") or []
+            return diagnose_chains(Path(schematic_path), filter_nets=filter_nets)
+        except Exception as e:
+            logger.error(f"Error in diagnose_chains: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_compare_netlists(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Assert per-pin net assignments are preserved between two
+        .kicad_sch files.  Use to verify a layout-mutating operation
+        (autoplacer apply, manual edits, etc.) didn't drop or merge
+        any named-net connections.  Returns ``preserved=True`` and
+        empty mismatch lists when the netlists are equivalent."""
+        try:
+            from pathlib import Path
+            from commands.schematic_inspect import compare_netlists
+
+            orig_path = params.get("origPath")
+            new_path = params.get("newPath")
+            if not orig_path or not new_path:
+                return {
+                    "success": False,
+                    "message": "origPath and newPath are required",
+                }
+            return compare_netlists(Path(orig_path), Path(new_path))
+        except Exception as e:
+            logger.error(f"Error in compare_netlists: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return {"success": False, "message": str(e)}
