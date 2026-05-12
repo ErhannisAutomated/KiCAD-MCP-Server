@@ -887,3 +887,82 @@ class TestRewire:
             # net must end up with the SIG name reachable from R1/2 + R2/1.
             text = sch.read_text()
             assert '"SIG"' in text, "SIG label missing after rewire"
+
+
+@pytest.mark.unit
+class TestStagedAnneal:
+    """Smoke tests for run_staged_anneal — the four-stage recipe."""
+
+    def test_iteration_count_matches_schedule(self):
+        from commands.autoplacer import load_session, run_staged_anneal
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = _make_two_r_with_net(Path(tmp))
+            sess = load_session(sch)
+            start = sess.iteration
+            # Tiny knobs so the test is fast.
+            result = run_staged_anneal(
+                sess,
+                cluster_iters=5,
+                spread_stages=3,
+                polarize_stages=2,
+                settle_iters=4,
+                iters_per_stage=2,
+            )
+            # Total = cluster + spread × iters_per_stage + polarize × iters_per_stage + settle
+            #       = 5 + 3*2 + 2*2 + 4 = 19
+            assert sess.iteration - start == 19
+            assert result["iteration"] == sess.iteration
+
+    def test_final_params_reflect_polarize_stage(self):
+        """After the recipe runs, polarity_k and polarity_torque_k must
+        be ON (they're enabled in stage 3 and not unset), and
+        repulsion_k must be the polarize-stage last value."""
+        from commands.autoplacer import (
+            _RECIPE_DEFAULTS,
+            load_session,
+            run_staged_anneal,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = _make_two_r_with_net(Path(tmp))
+            sess = load_session(sch)
+            run_staged_anneal(
+                sess,
+                cluster_iters=1,
+                spread_stages=3,
+                polarize_stages=2,
+                settle_iters=1,
+                iters_per_stage=1,
+                polarity_k=0.42,
+                polarity_torque_k=2.71,
+                repulsion_base=0.1,
+                repulsion_growth=2.0,
+            )
+            assert sess.params.polarity_k == 0.42
+            assert sess.params.polarity_torque_k == 2.71
+            # Polarize stage runs t=0..1: rep = base * growth ** (spread_peak - t)
+            # spread_peak = 3 - 1 = 2.  t=0 → 0.1 * 4 = 0.4.  t=1 → 0.1 * 2 = 0.2.
+            assert sess.params.repulsion_k == 0.2
+
+    def test_on_step_callback_invoked(self):
+        from commands.autoplacer import load_session, run_staged_anneal
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = _make_two_r_with_net(Path(tmp))
+            sess = load_session(sch)
+            calls = []
+            run_staged_anneal(
+                sess,
+                cluster_iters=2,
+                spread_stages=1,
+                polarize_stages=1,
+                settle_iters=2,
+                iters_per_stage=1,
+                on_step=lambda s: calls.append(s.iteration),
+            )
+            # Called once per iteration across all four stages.
+            # Total iters = 2 + 1*1 + 1*1 + 2 = 6.
+            assert len(calls) == 6
+            # Strictly monotonic.
+            assert calls == sorted(calls)

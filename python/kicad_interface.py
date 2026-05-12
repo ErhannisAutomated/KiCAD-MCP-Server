@@ -436,6 +436,7 @@ class KiCADInterface:
             "autoplacer_set_params": self._handle_autoplacer_set_params,
             "autoplacer_iterate": self._handle_autoplacer_iterate,
             "autoplacer_run": self._handle_autoplacer_run,
+            "autoplacer_recipe": self._handle_autoplacer_recipe,
             "autoplacer_state": self._handle_autoplacer_state,
             "autoplacer_preview": self._handle_autoplacer_preview,
             "autoplacer_apply": self._handle_autoplacer_apply,
@@ -4088,6 +4089,38 @@ class KiCADInterface:
             }
         except Exception as e:
             logger.error(f"Error in autoplacer_run: {e}")
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplacer_recipe(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Run the four-stage anneal recipe (cluster → spread →
+        polarize → settle) on a loaded session.  Tuned for schematic
+        layout where attraction-first clustering produces tighter
+        groupings than the default cooling-based annealing.
+
+        Optional overrides: cluster_iters, spread_stages, polarize_stages,
+        settle_iters, iters_per_stage, step_temperature, base_attraction_k,
+        base_rotation_k, repulsion_base, repulsion_growth, polarity_k,
+        polarity_torque_k.  Each defaults to the recipe constants.
+        """
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            overrides: Dict[str, Any] = {}
+            for key in (
+                "cluster_iters", "spread_stages", "polarize_stages",
+                "settle_iters", "iters_per_stage", "step_temperature",
+                "base_attraction_k", "base_rotation_k",
+                "repulsion_base", "repulsion_growth",
+                "polarity_k", "polarity_torque_k",
+            ):
+                if key in params:
+                    overrides[key] = params[key]
+            return PLACER.recipe(schematic_path, **overrides)
+        except Exception as e:
+            logger.error(f"Error in autoplacer_recipe: {e}")
             return {"success": False, "message": str(e)}
 
     def _handle_autoplacer_state(self, params: Dict[str, Any]) -> Dict[str, Any]:

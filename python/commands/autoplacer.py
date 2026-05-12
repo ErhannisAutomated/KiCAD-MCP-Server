@@ -1382,6 +1382,133 @@ def _scan_unrelated_wire_crossings(schematic_path: Path) -> List[Dict[str, Any]]
 
 
 # ----------------------------------------------------------------------
+# Staged anneal recipe
+# ----------------------------------------------------------------------
+
+
+# Defaults reflect the recipe the user tuned on the BMS sheet
+# (2026-05-13).  Field meanings documented on `run_staged_anneal`.
+_RECIPE_DEFAULTS = {
+    "cluster_iters": 100,
+    "spread_stages": 11,
+    "polarize_stages": 2,
+    "settle_iters": 100,
+    "iters_per_stage": 10,
+    "step_temperature": 5.0,
+    "base_attraction_k": 0.2,
+    "base_rotation_k": 4.0,
+    "repulsion_base": 0.05,
+    "repulsion_growth": 2.0,
+    "polarity_k": 0.2,
+    "polarity_torque_k": 3.0,
+}
+
+
+def run_staged_anneal(
+    sess: Session,
+    *,
+    cluster_iters: int = _RECIPE_DEFAULTS["cluster_iters"],
+    spread_stages: int = _RECIPE_DEFAULTS["spread_stages"],
+    polarize_stages: int = _RECIPE_DEFAULTS["polarize_stages"],
+    settle_iters: int = _RECIPE_DEFAULTS["settle_iters"],
+    iters_per_stage: int = _RECIPE_DEFAULTS["iters_per_stage"],
+    step_temperature: float = _RECIPE_DEFAULTS["step_temperature"],
+    base_attraction_k: float = _RECIPE_DEFAULTS["base_attraction_k"],
+    base_rotation_k: float = _RECIPE_DEFAULTS["base_rotation_k"],
+    repulsion_base: float = _RECIPE_DEFAULTS["repulsion_base"],
+    repulsion_growth: float = _RECIPE_DEFAULTS["repulsion_growth"],
+    polarity_k: float = _RECIPE_DEFAULTS["polarity_k"],
+    polarity_torque_k: float = _RECIPE_DEFAULTS["polarity_torque_k"],
+    on_step: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Run a four-stage anneal that uses *force scheduling* instead of
+    the default temperature-decay schedule for displacement control.
+
+    Tuned on the BMS sheet (2026-05-13) — produces noticeably tighter
+    groupings than running ``iterate`` with the default temperature
+    schedule, because attraction can pull components together cleanly
+    before repulsion fans them out.
+
+    **Stage 1 — CLUSTER** (``cluster_iters`` iterations).  Pure
+    attraction (no repulsion, no polarity).  Components collapse into
+    their connection-determined clusters with rotation enabled.
+
+    **Stage 2 — SPREAD** (``spread_stages × iters_per_stage`` iters).
+    Repulsion ramps up geometrically:
+    ``repulsion_k = repulsion_base × repulsion_growth ** t`` for
+    ``t = 0..spread_stages-1``.  Defaults send repulsion from 0.05 to
+    ≈51 over 11 stages.  The slow ramp lets clusters separate without
+    losing the grouping established in stage 1.
+
+    **Stage 3 — POLARIZE** (``polarize_stages × iters_per_stage``).
+    Polarity bias and polarity torque are switched on; repulsion
+    steps down one notch per stage (matches the spread peak then
+    halves).  Lets V+/GND-coupled components rotate and migrate to
+    their preferred edges without fighting the spread.
+
+    **Stage 4 — SETTLE** (``settle_iters``).  No more clamping —
+    ``sess.temperature`` decays naturally from ``step_temperature``
+    via ``params.cooling``, letting the configuration relax.
+
+    Throughout stages 1-3, ``sess.temperature`` is clamped to
+    ``step_temperature`` (default 5 mm) before each ``iterate(n=1)``,
+    overriding the default annealing schedule.  Stage 4 does NOT
+    clamp.
+
+    ``on_step`` (optional): callable invoked after each single-step
+    iteration with the session — useful for hooking the matplotlib
+    viz when running interactively.
+    """
+    # Stage 1 — CLUSTER
+    sess.params.attraction_k = base_attraction_k
+    sess.params.rotation_k = base_rotation_k
+    sess.params.repulsion_k = 0.0
+    sess.params.polarity_k = 0.0
+    sess.params.polarity_torque_k = 0.0
+    for _ in range(cluster_iters):
+        sess.temperature = step_temperature
+        iterate(sess, n=1)
+        if on_step is not None:
+            on_step(sess)
+
+    # Stage 2 — SPREAD
+    for t in range(spread_stages):
+        sess.params.repulsion_k = repulsion_base * (repulsion_growth ** t)
+        for _ in range(iters_per_stage):
+            sess.temperature = step_temperature
+            iterate(sess, n=1)
+            if on_step is not None:
+                on_step(sess)
+
+    # Stage 3 — POLARIZE: enable polarity, step repulsion DOWN.
+    sess.params.polarity_k = polarity_k
+    sess.params.polarity_torque_k = polarity_torque_k
+    spread_peak_t = spread_stages - 1
+    for t in range(polarize_stages):
+        sess.params.repulsion_k = repulsion_base * (
+            repulsion_growth ** (spread_peak_t - t)
+        )
+        for _ in range(iters_per_stage):
+            sess.temperature = step_temperature
+            iterate(sess, n=1)
+            if on_step is not None:
+                on_step(sess)
+
+    # Stage 4 — SETTLE (natural temperature decay)
+    for _ in range(settle_iters):
+        iterate(sess, n=1)
+        if on_step is not None:
+            on_step(sess)
+
+    return {
+        "iteration": sess.iteration,
+        "temperature": round(sess.temperature, 4),
+        "max_force": round(sess.last_max_force, 4),
+        "final_params": _params_dict(sess.params),
+    }
+
+
+# ----------------------------------------------------------------------
 # Top-level singleton
 # ----------------------------------------------------------------------
 
@@ -1467,6 +1594,27 @@ class AutoPlacer:
         )
         if rewire:
             result["rewire"] = rewire_session(sess, sess.schematic_path)
+        return {"success": True, **result}
+
+    def recipe(
+        self,
+        schematic_path: str,
+        on_step: Optional[Any] = None,
+        **overrides: Any,
+    ) -> Dict[str, Any]:
+        """Run the staged-anneal recipe on a loaded session.
+
+        Replaces the typical ``set_params`` + N × ``iterate`` loop
+        with a four-stage schedule (cluster → spread → polarize →
+        settle).  See :func:`run_staged_anneal` for details and the
+        per-stage parameter knobs.
+
+        ``on_step`` is a per-iteration callback for live viz hookup.
+        """
+        sess = self.get(schematic_path)
+        if sess is None:
+            return {"success": False, "message": "session not loaded"}
+        result = run_staged_anneal(sess, on_step=on_step, **overrides)
         return {"success": True, **result}
 
 

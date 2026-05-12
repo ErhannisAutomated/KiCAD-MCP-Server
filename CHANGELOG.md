@@ -4,6 +4,29 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### New MCP Tools (this branch: fixes/improvements_2, 2026-05-13)
+
+- **`autoplacer_recipe`** — runs a four-stage anneal (cluster →
+  spread → polarize → settle) on a loaded session.  Tuned on the BMS
+  sheet: stage 1 uses attraction-only to cluster components by their
+  net connections, stage 2 ramps repulsion up geometrically over
+  11 sub-stages to fan clusters apart without losing the grouping,
+  stage 3 steps repulsion down two notches while turning on polarity
+  bias + polarity torque, stage 4 lets the configuration settle
+  under natural temperature decay.  Throughout stages 1-3 the
+  per-iteration temperature cap is clamped to a small fixed value
+  (default 5 mm) so displacement control comes from force scheduling
+  rather than the default cooling schedule.  Defaults match the
+  user's BMS-tested recipe; all twelve knobs (cluster_iters,
+  spread_stages, polarize_stages, settle_iters, iters_per_stage,
+  step_temperature, base_attraction_k, base_rotation_k,
+  repulsion_base, repulsion_growth, polarity_k, polarity_torque_k)
+  are optional MCP overrides.
+
+  Python API: `commands.autoplacer.run_staged_anneal(sess, **kw)` and
+  `PLACER.recipe(schematic_path, on_step=..., **kw)` (the latter
+  threads a per-iteration callback for matplotlib viz hookup).
+
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-12 part 2)
 
 - **connect_pins Phase 5: stub-style label now triggers on total
