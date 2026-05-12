@@ -453,23 +453,6 @@ def load_session(schematic_path: Path) -> Session:
             continue
         label_positions.append(((round(at[0], 2), round(at[1], 2)), top[1]))
 
-    # Collect wire segments.
-    wires: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
-    for top in sexp:
-        if not (isinstance(top, list) and top and top[0] == Symbol("wire")):
-            continue
-        pts = []
-        for sub in top[1:]:
-            if isinstance(sub, list) and sub and sub[0] == Symbol("pts"):
-                for xy in sub[1:]:
-                    if isinstance(xy, list) and xy[0] == Symbol("xy") and len(xy) >= 3:
-                        try:
-                            pts.append((round(float(xy[1]), 2), round(float(xy[2]), 2)))
-                        except (TypeError, ValueError):
-                            pass
-        if len(pts) == 2:
-            wires.append((pts[0], pts[1]))
-
     # World pin positions, per component (key includes unit so multi-
     # unit components don't collide on the same dict key).
     pin_world: Dict[Tuple[str, str], Tuple[float, float]] = {}
@@ -478,31 +461,6 @@ def load_session(schematic_path: Path) -> Session:
             wp = comp.world_pin_xy(pn)
             if wp is not None:
                 pin_world[(comp.key, pn)] = (round(wp[0], 2), round(wp[1], 2))
-
-    # For each (ref, pn), figure out its net by:
-    #   1) Direct: any label at that exact coord?
-    #   2) BFS via wires up to depth 4: any label encountered?
-    def _bfs_label(start: Tuple[float, float]) -> Optional[str]:
-        # Direct label at the start point
-        for (lpos, lname) in label_positions:
-            if abs(lpos[0] - start[0]) < 0.5 and abs(lpos[1] - start[1]) < 0.5:
-                return lname
-        visited = {start}
-        queue = [(start, 0)]
-        while queue:
-            cur, depth = queue.pop(0)
-            if depth >= 5:
-                continue
-            for (a, b) in wires:
-                for (here, there) in ((a, b), (b, a)):
-                    if abs(here[0] - cur[0]) < 0.5 and abs(here[1] - cur[1]) < 0.5:
-                        for (lpos, lname) in label_positions:
-                            if abs(lpos[0] - there[0]) < 0.5 and abs(lpos[1] - there[1]) < 0.5:
-                                return lname
-                        if there not in visited:
-                            visited.add(there)
-                            queue.append((there, depth + 1))
-        return None
 
     # Net discovery uses the same T-junction-aware wire-graph BFS the
     # rewire path uses (`wire_connectivity.walk_wire_chain`).  The
@@ -1327,7 +1285,6 @@ def _scan_unrelated_wire_crossings(schematic_path: Path) -> List[Dict[str, Any]]
     except Exception:
         return []
     wires: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
-    label_at: Dict[Tuple[float, float], List[str]] = {}
     junctions: set = set()
     for top in sexp:
         if not (isinstance(top, list) and top):
@@ -1350,16 +1307,6 @@ def _scan_unrelated_wire_crossings(schematic_path: Path) -> List[Dict[str, Any]]
                                 pass
                     if len(pts) == 2:
                         wires.append((pts[0], pts[1]))
-        elif head == "label":
-            name = top[1] if isinstance(top[1], str) else ""
-            for sub in top[2:]:
-                if isinstance(sub, list) and str(sub[0]) == "at" and len(sub) >= 3:
-                    try:
-                        pos = (round(float(sub[1]), 2), round(float(sub[2]), 2))
-                    except (TypeError, ValueError):
-                        continue
-                    label_at.setdefault(pos, []).append(name)
-                    break
         elif head == "junction":
             for sub in top[1:]:
                 if isinstance(sub, list) and str(sub[0]) == "at" and len(sub) >= 3:
