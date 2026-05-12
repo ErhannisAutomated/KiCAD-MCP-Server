@@ -4,6 +4,23 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13)
+
+- **Autoplacer: net discovery via the real wire graph (T-junction
+  aware, no depth limit).**  ``load_session`` was using a hand-rolled
+  BFS over wire endpoints with a depth-5 hop limit and no T-junction
+  handling.  Pins whose nearest label was more than five wire-segments
+  away — or reachable only through a mid-segment T-junction — got no
+  net assignment, were missing from the session's net membership,
+  and then dropped permanently when ``apply_to_schematic`` stripped
+  the wiring before ``rewire_session`` re-routed.  Surfaced on the
+  buckboost sheet where C23/2 (bootstrap cap on BB_SW1) was 8 hops
+  from any BB_SW1 label and ended up disconnected in the rewired
+  file.  Replaced the BFS with ``walk_wire_chain`` so net discovery
+  uses the same robust wire-graph traversal as Phase 5 in
+  ``connect_pins``.  One new test
+  (``TestLoad.test_load_discovers_net_via_long_wire_chain``).
+
 ### New MCP Tools (this branch: fixes/improvements_2, 2026-05-13)
 
 - **`autoplacer_recipe`** — runs a four-stage anneal (cluster →

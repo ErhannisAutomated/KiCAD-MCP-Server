@@ -159,6 +159,72 @@ class TestLoad:
             sess = load_session(sch)
             assert sess.components["J1__u1"].pinned is True
 
+    def test_load_discovers_net_via_long_wire_chain(self):
+        """Regression: load_session must discover a pin's net through
+        an arbitrarily long wire chain, including chains joined by
+        mid-segment T-junctions.  Surfaced on buckboost where C23/2's
+        BB_SW1 connection was > 5 wire hops from the nearest BB_SW1
+        label and got dropped, causing apply+rewire to leave C23/2
+        permanently orphan."""
+        from commands.autoplacer import load_session
+        from commands.connection_schematic import ConnectionManager
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = Path(tmp) / "long_chain.kicad_sch"
+            # Build a chain of 8 wire segments between two resistors,
+            # with a BB_SW1 label only at the far end.  Pre-fix
+            # _bfs_label gave up at depth 5; the chain is 8 hops, so
+            # R1/2's net assignment was missed.
+            wires = []
+            for i in range(8):
+                x1 = 100.0 + i * 5.0
+                x2 = x1 + 5.0
+                wires.append(f'  (wire (pts (xy {x1} 100.0) (xy {x2} 100.0)) '
+                             f'(stroke (width 0) (type default)) '
+                             f'(uuid 11111111-1111-1111-1111-111111111111))')
+            wires_block = "\n".join(wires)
+            sch.write_text(textwrap.dedent(f"""\
+                (kicad_sch (version 20250114) (generator "test")
+                  (lib_symbols
+                    (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0))
+                      (symbol "R_1_1"
+                        (pin passive line (at 0 3.81 270) (length 1.27)
+                          (name "~") (number "1"))
+                        (pin passive line (at 0 -3.81 90) (length 1.27)
+                          (name "~") (number "2"))
+                      )
+                    )
+                  )
+                  (symbol (lib_id "Device:R") (at 100.0 96.19 0) (unit 1)
+                    (property "Reference" "R1" (at 100.0 96.19 0))
+                    (instances (project "test" (path "/" (reference "R1") (unit 1))))
+                  )
+                  (symbol (lib_id "Device:R") (at 140.0 96.19 0) (unit 1)
+                    (property "Reference" "R2" (at 140.0 96.19 0))
+                    (instances (project "test" (path "/" (reference "R2") (unit 1))))
+                  )
+                {wires_block}
+                  (label "FAR" (at 140.0 100.0 0)
+                    (effects (font (size 1.27 1.27)))
+                    (uuid 22222222-2222-2222-2222-222222222222))
+                  (sheet_instances (path "/" (page "1")))
+                )
+            """))
+            # Sanity: the file is well-formed and the label is reachable
+            # from R1/2 via wires.
+            assert ConnectionManager.get_pin_net(sch, "R1", "2") == "FAR"
+            assert ConnectionManager.get_pin_net(sch, "R2", "2") == "FAR"
+
+            sess = load_session(sch)
+            # The autoplacer's session must know R1/2 and R2/2 are on
+            # net FAR.  Pre-fix it would have dropped both.
+            assert "FAR" in sess.nets, (
+                f"net FAR not discovered; sess.nets={list(sess.nets)}"
+            )
+            far_pins = {(k, p) for k, p in sess.nets["FAR"].pins}
+            assert ("R1__u1", "2") in far_pins
+            assert ("R2__u1", "2") in far_pins
+
 
 @pytest.mark.unit
 class TestForceMath:

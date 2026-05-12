@@ -504,8 +504,39 @@ def load_session(schematic_path: Path) -> Session:
                             queue.append((there, depth + 1))
         return None
 
+    # Net discovery uses the same T-junction-aware wire-graph BFS the
+    # rewire path uses (`wire_connectivity.walk_wire_chain`).  The
+    # previous in-file _bfs_label imposed a depth-5 hop limit and didn't
+    # handle T-junctions, so long or mid-segment-T-joined chains lost
+    # their net assignment — `apply_to_schematic` then stripped the
+    # wiring + `rewire_session` re-routed only the pins it knew about,
+    # leaving the dropped pins permanently orphan.  Surfaced on the
+    # buckboost sheet where C23's bootstrap path on BB_SW1 was longer
+    # than 5 wire hops from any BB_SW1 label.
+    from commands.wire_connectivity import walk_wire_chain as _wwc
+
+    chain_label_cache: Dict[Tuple[int, int], Optional[str]] = {}
     for (comp_key, pn), wp in pin_world.items():
-        net_name = _bfs_label(wp)
+        # Reuse the chain result across pins that share a coord (multi-
+        # unit duplicate pads, common pins, etc.) to avoid re-walking.
+        key = (round(wp[0] * 10000), round(wp[1] * 10000))
+        if key in chain_label_cache:
+            net_name = chain_label_cache[key]
+        else:
+            # Try direct-label first (label sits ON the pin coord with no
+            # connecting wire).  Matches the old direct-match shortcut.
+            net_name = None
+            for (lpos, lname) in label_positions:
+                if abs(lpos[0] - wp[0]) < 0.5 and abs(lpos[1] - wp[1]) < 0.5:
+                    net_name = lname
+                    break
+            if net_name is None:
+                chain = _wwc((float(wp[0]), float(wp[1])), schematic_path)
+                if chain is not None and chain.labels:
+                    # Pick deterministically if a chain happens to carry
+                    # multiple labels (rare; usually a cross-net merge).
+                    net_name = sorted(chain.labels)[0]
+            chain_label_cache[key] = net_name
         if not net_name:
             continue
         sess.nets.setdefault(net_name, Net(name=net_name)).pins.append((comp_key, pn))
