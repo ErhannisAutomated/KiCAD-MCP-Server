@@ -4,6 +4,23 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Documentation + Reproducer (this branch: fixes/improvements_2, 2026-05-13 part 4)
+
+- ``docs/AUTOPLACER_GUIDE.md`` — new standalone guide for the
+  autoplacer.  Covers the four-stage recipe, the per-stage knobs,
+  the Jupyter + viz workflow, ``compare_netlists`` / ``diagnose_chains``
+  as post-apply validation, and the two known limitations
+  (multi-unit duplicate pads, issue #74).
+- ``docs/TOOL_INVENTORY.md`` — added the 8 autoplacer tools
+  (previously unlisted) and the 2 new validation tools.
+  Updated counts.
+- ``docs/INDEX.md`` — linked the new guide; tool-count bump.
+- ``tests/test_wire_manager_cross_net.py`` — new xfail test
+  reproducing the cross-net merge in
+  ``WireManager._break_wires_at_point`` (issue #74).  Fails today
+  with a clear description in the xfail reason; once add_wire
+  refuses net-blind splits, remove the marker.
+
 ### New MCP Tools (this branch: fixes/improvements_2, 2026-05-13 part 3)
 
 - **`diagnose_chains`** — enumerate physical wire chains in a

@@ -132,7 +132,7 @@ _Source: `src/tools/export.ts`_
 
 ---
 
-## Schematic (43 tools)
+## Schematic (53 tools)
 
 _Source: `src/tools/schematic.ts`_
 
@@ -214,13 +214,30 @@ _Source: `src/tools/schematic.ts`_
 | `export_schematic_svg` | Export schematic to SVG     | Routed (schematic) |
 | `export_schematic_pdf` | Export schematic to PDF     | Routed (schematic) |
 
-### Validation and Synchronization (3)
+### Validation and Synchronization (5)
 
-| Tool                      | Description                                           | Access             |
-| ------------------------- | ----------------------------------------------------- | ------------------ |
-| `run_erc`                 | Run electrical rule check                             | Additional         |
-| `generate_netlist`        | Generate netlist from schematic                       | Routed (schematic) |
-| `sync_schematic_to_board` | Sync schematic components/nets to PCB (F8 equivalent) | Direct             |
+| Tool                      | Description                                                                        | Access             |
+| ------------------------- | ---------------------------------------------------------------------------------- | ------------------ |
+| `run_erc`                 | Run electrical rule check                                                          | Additional         |
+| `generate_netlist`        | Generate netlist from schematic                                                    | Routed (schematic) |
+| `sync_schematic_to_board` | Sync schematic components/nets to PCB (F8 equivalent)                              | Direct             |
+| `diagnose_chains`         | Enumerate wire chains + labels + pins per chain; flag DUPLICATE_LABELS/CROSS_NET/LOOP | Direct             |
+| `compare_netlists`        | Diff per-pin net assignments between two .kicad_sch files (regression guard)       | Direct             |
+
+### Autoplacer (8)
+
+_Force-directed schematic component placement.  Lifecycle: `load` → tune via `set_params` and `iterate` (or one-shot `run` / `recipe`) → `preview` (write current positions to a file without rewiring) → `apply` (snap to grid, write back, re-route via `connect_pins(auto)`).  Source: `commands/autoplacer.py`._
+
+| Tool                    | Description                                                                                                                                                | Access |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------- | ------ |
+| `autoplacer_load`       | Parse a .kicad_sch into a force-directed Session; persists for subsequent calls.                                                                           | Direct |
+| `autoplacer_set_params` | Update one or more Params fields (repulsion_k, attraction_k, polarity_k, polarity_torque_k, rotation_k, initial_temperature, sheet bbox, polarity rules, …) | Direct |
+| `autoplacer_iterate`    | Run N force-directed iterations on the in-memory model.                                                                                                    | Direct |
+| `autoplacer_run`        | Iterate until max_iterations or max_force < threshold (default 200 iters / 0.5 mm).                                                                        | Direct |
+| `autoplacer_recipe`     | **Recommended.** Run a four-stage anneal (cluster → spread → polarize → settle) using force scheduling instead of temperature decay. See `AUTOPLACER_GUIDE.md`. | Direct |
+| `autoplacer_state`      | Snapshot the model: iteration count, temperature, max force, every component's (x, y, rotation, pinned).                                                   | Direct |
+| `autoplacer_preview`    | Write the current model positions to a target .kicad_sch path (no snap, no rewire) — for inspection while iterating.                                       | Direct |
+| `autoplacer_apply`      | Snap to grid, center on page, write to source path, optionally re-route every net via `connect_pins(auto)`.                                                | Direct |
 
 ---
 

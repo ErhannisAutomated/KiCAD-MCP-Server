@@ -21,8 +21,9 @@ KiCAD MCP Server -- AI-assisted PCB design via Model Context Protocol
 
 | Document                                                                | Description                                                 |
 | ----------------------------------------------------------------------- | ----------------------------------------------------------- |
-| [Tool Inventory](TOOL_INVENTORY.md)                                     | Complete list of all 122 tools with access types            |
+| [Tool Inventory](TOOL_INVENTORY.md)                                     | Complete list of all 132 tools with access types            |
 | [Schematic Tools Reference](SCHEMATIC_TOOLS_REFERENCE.md)               | 27 schematic tools -- components, wiring, analysis, export  |
+| [Autoplacer Guide](AUTOPLACER_GUIDE.md)                                 | Force-directed schematic placement: load → recipe → apply   |
 | [Routing Tools Reference](ROUTING_TOOLS_REFERENCE.md)                   | 13 routing tools -- traces, vias, differential pairs, zones |
 | [Footprint and Symbol Creator Guide](FOOTPRINT_SYMBOL_CREATOR_GUIDE.md) | 8 tools for creating custom footprints and symbols          |
 | [Freerouting Guide](FREEROUTING_GUIDE.md)                               | 4 autorouter tools -- setup, usage, Docker support          |
