@@ -4,6 +4,20 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Housekeeping (this branch: fixes/improvements_2, 2026-05-13 part 8)
+
+- **New MCP tool: `find_unrelated_wire_crossings`.**  Moved the
+  `_scan_unrelated_wire_crossings` implementation from
+  `commands.autoplacer` to `commands.schematic_inspect` and exposed
+  it as a standalone MCP tool so post-routing crossing checks can
+  be invoked outside the autoplacer's rewire flow.  `autoplacer.py`
+  keeps a thin alias for backwards compatibility with `rewire_session`'s
+  `unrelated_crossings` return field.  Three tests in
+  `TestFindUnrelatedWireCrossings`; route registration locked in.
+- Added `*-erc.json` to `.gitignore` and removed the regenerable
+  `parent-erc.json` from the worktree (kicad-cli's ERC drops these
+  next to the schematic by default).
+
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 7)
 
 - **Issue #74 fixed: cross-net merge in WireManager wire splits.**

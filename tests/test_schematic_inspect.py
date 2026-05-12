@@ -10,7 +10,11 @@ import pytest
 PYTHON_DIR = Path(__file__).parent.parent / "python"
 sys.path.insert(0, str(PYTHON_DIR))
 
-from commands.schematic_inspect import compare_netlists, diagnose_chains
+from commands.schematic_inspect import (
+    compare_netlists,
+    diagnose_chains,
+    find_unrelated_wire_crossings,
+)
 
 
 _R_LIB = textwrap.dedent("""
@@ -226,6 +230,56 @@ class TestCompareNetlists:
 
 
 @pytest.mark.unit
+class TestFindUnrelatedWireCrossings:
+    """Wrapper around _scan_unrelated_wire_crossings, exposed as the
+    find_unrelated_wire_crossings MCP tool.  Same chain-aware net
+    resolution as diagnose_chains, so same-net segments crossing each
+    other don't get flagged."""
+
+    def test_empty_schematic_no_crossings(self, tmp_path: Path):
+        p = _write_sch(tmp_path, "empty.kicad_sch")
+        r = find_unrelated_wire_crossings(p)
+        assert r["success"]
+        assert r["n_crossings"] == 0
+        assert r["crossings"] == []
+
+    def test_genuinely_unrelated_crossing_flagged(self, tmp_path: Path):
+        p = _write_sch(
+            tmp_path,
+            "diff.kicad_sch",
+            wires=[
+                ((100.0, 90.0), (100.0, 110.0)),
+                ((90.0, 100.0), (110.0, 100.0)),
+            ],
+            labels=[("NET_A", 100.0, 90.0), ("NET_B", 90.0, 100.0)],
+        )
+        r = find_unrelated_wire_crossings(p)
+        assert r["n_crossings"] == 1
+        assert r["crossings"][0]["point"] == [100.0, 100.0]
+        # Each wire reports its chain labels.
+        assert "NET_A" in r["crossings"][0]["wire_a_labels"]
+        assert "NET_B" in r["crossings"][0]["wire_b_labels"]
+
+    def test_same_net_crossing_not_flagged(self, tmp_path: Path):
+        """Two USB_VBUS segments crossing each other — both reachable
+        from one label via the wire-graph BFS — must not flag.
+        Regression for the charger sheet's USB_VBUS NW-of-C17 case."""
+        p = _write_sch(
+            tmp_path,
+            "samenet.kicad_sch",
+            wires=[
+                ((100.0, 90.0), (100.0, 110.0)),
+                ((90.0, 100.0), (110.0, 100.0)),
+                ((100.0, 90.0), (90.0, 100.0)),
+                ((110.0, 100.0), (100.0, 110.0)),
+            ],
+            labels=[("USB_VBUS", 100.0, 90.0)],
+        )
+        r = find_unrelated_wire_crossings(p)
+        assert r["n_crossings"] == 0
+
+
+@pytest.mark.unit
 class TestMcpHandlerDispatch:
     """Both new MCP tools should be routable from the interface."""
 
@@ -238,3 +292,4 @@ class TestMcpHandlerDispatch:
             KiCADInterface.__init__(iface)
         assert "diagnose_chains" in iface.command_routes
         assert "compare_netlists" in iface.command_routes
+        assert "find_unrelated_wire_crossings" in iface.command_routes

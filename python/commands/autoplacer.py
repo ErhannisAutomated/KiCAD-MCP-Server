@@ -1271,109 +1271,13 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
 
 
 def _scan_unrelated_wire_crossings(schematic_path: Path) -> List[Dict[str, Any]]:
-    """Walk every pair of perpendicular wires and find interior crossings
-    where neither wire has a junction at the crossing point.  Each
-    finding is electrically harmless on its own (KiCad's wire graph
-    treats no-junction crossings as not connected) but flags places
-    where any future endpoint landing at the crossing point would
-    silently merge two unrelated nets.  Returned as a list of dicts
-    with point + endpoint info; callers (and tests) can surface them.
-    """
-    try:
-        text = Path(schematic_path).read_text()
-        sexp = sexpdata.loads(text)
-    except Exception:
-        return []
-    wires: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
-    junctions: set = set()
-    for top in sexp:
-        if not (isinstance(top, list) and top):
-            continue
-        head = str(top[0])
-        if head == "wire":
-            for sub in top[1:]:
-                if isinstance(sub, list) and str(sub[0]) == "pts":
-                    pts = []
-                    for xy in sub[1:]:
-                        if (
-                            isinstance(xy, list) and str(xy[0]) == "xy"
-                            and len(xy) >= 3
-                        ):
-                            try:
-                                pts.append(
-                                    (round(float(xy[1]), 2), round(float(xy[2]), 2))
-                                )
-                            except (TypeError, ValueError):
-                                pass
-                    if len(pts) == 2:
-                        wires.append((pts[0], pts[1]))
-        elif head == "junction":
-            for sub in top[1:]:
-                if isinstance(sub, list) and str(sub[0]) == "at" and len(sub) >= 3:
-                    try:
-                        junctions.add(
-                            (round(float(sub[1]), 2), round(float(sub[2]), 2))
-                        )
-                    except (TypeError, ValueError):
-                        pass
-                    break
-
-    # Net resolution via the real wire-graph BFS: a wire's net is the
-    # set of label names reachable from EITHER of its endpoints, not
-    # just labels positioned exactly AT an endpoint.  The pre-fix
-    # endpoint-only check missed two segments of one labelled chain
-    # crossing each other — flagged as "unrelated" even though the
-    # wire-graph BFS would show both on the same net.
-    from commands.wire_connectivity import walk_wire_chain as _wwc
-
-    chain_label_cache: Dict[Tuple[float, float], frozenset] = {}
-
-    def _wire_chain_labels(w) -> frozenset:
-        a, _ = w
-        if a in chain_label_cache:
-            return chain_label_cache[a]
-        chain = _wwc(a, schematic_path)
-        labels = chain.labels if chain is not None else frozenset()
-        chain_label_cache[a] = labels
-        return labels
-
-    EPS = 1e-3
-    findings: List[Dict[str, Any]] = []
-    for i, w1 in enumerate(wires):
-        for w2 in wires[i + 1:]:
-            a, b = w1
-            c, d = w2
-            v1 = a[0] == b[0]
-            h1 = a[1] == b[1]
-            v2 = c[0] == d[0]
-            h2 = c[1] == d[1]
-            if not ((v1 and h2) or (h1 and v2)):
-                continue
-            if v1 and h2:
-                x = a[0]; y = c[1]
-                x1, x2 = sorted((c[0], d[0])); y1, y2 = sorted((a[1], b[1]))
-            else:
-                x = c[0]; y = a[1]
-                x1, x2 = sorted((a[0], b[0])); y1, y2 = sorted((c[1], d[1]))
-            if not (x1 + EPS < x < x2 - EPS and y1 + EPS < y < y2 - EPS):
-                continue
-            pt = (round(x, 2), round(y, 2))
-            if pt in junctions:
-                continue
-            n1 = _wire_chain_labels(w1)
-            n2 = _wire_chain_labels(w2)
-            if n1 and n2 and (n1 & n2):
-                # Same net via the wire-graph BFS — crossing is
-                # within one labelled chain and electrically benign.
-                continue
-            findings.append({
-                "point": list(pt),
-                "wire_a": [list(a), list(b)],
-                "wire_a_labels": sorted(n1),
-                "wire_b": [list(c), list(d)],
-                "wire_b_labels": sorted(n2),
-            })
-    return findings
+    """Backwards-compatible alias used by ``rewire_session``.  The full
+    public surface lives at
+    :func:`commands.schematic_inspect.find_unrelated_wire_crossings`
+    (also exposed as the ``find_unrelated_wire_crossings`` MCP tool).
+    Returns just the list of findings to match the legacy contract."""
+    from commands.schematic_inspect import find_unrelated_wire_crossings
+    return find_unrelated_wire_crossings(schematic_path).get("crossings", [])
 
 
 # ----------------------------------------------------------------------

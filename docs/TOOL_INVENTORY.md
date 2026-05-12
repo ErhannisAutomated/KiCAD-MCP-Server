@@ -132,7 +132,7 @@ _Source: `src/tools/export.ts`_
 
 ---
 
-## Schematic (53 tools)
+## Schematic (54 tools)
 
 _Source: `src/tools/schematic.ts`_
 
@@ -214,15 +214,16 @@ _Source: `src/tools/schematic.ts`_
 | `export_schematic_svg` | Export schematic to SVG     | Routed (schematic) |
 | `export_schematic_pdf` | Export schematic to PDF     | Routed (schematic) |
 
-### Validation and Synchronization (5)
+### Validation and Synchronization (6)
 
-| Tool                      | Description                                                                        | Access             |
-| ------------------------- | ---------------------------------------------------------------------------------- | ------------------ |
-| `run_erc`                 | Run electrical rule check                                                          | Additional         |
-| `generate_netlist`        | Generate netlist from schematic                                                    | Routed (schematic) |
-| `sync_schematic_to_board` | Sync schematic components/nets to PCB (F8 equivalent)                              | Direct             |
-| `diagnose_chains`         | Enumerate wire chains + labels + pins per chain; flag DUPLICATE_LABELS/CROSS_NET/LOOP | Direct             |
-| `compare_netlists`        | Diff per-pin net assignments between two .kicad_sch files (regression guard)       | Direct             |
+| Tool                             | Description                                                                                  | Access             |
+| -------------------------------- | -------------------------------------------------------------------------------------------- | ------------------ |
+| `run_erc`                        | Run electrical rule check                                                                    | Additional         |
+| `generate_netlist`               | Generate netlist from schematic                                                              | Routed (schematic) |
+| `sync_schematic_to_board`        | Sync schematic components/nets to PCB (F8 equivalent)                                        | Direct             |
+| `diagnose_chains`                | Enumerate wire chains + labels + pins per chain; flag DUPLICATE_LABELS/CROSS_NET/LOOP        | Direct             |
+| `compare_netlists`               | Diff per-pin net assignments between two .kicad_sch files (regression guard)                 | Direct             |
+| `find_unrelated_wire_crossings`  | Perpendicular wire crossings between unrelated nets with no junction at the crossing point  | Direct             |
 
 ### Autoplacer (8)
 

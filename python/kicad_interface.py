@@ -442,6 +442,7 @@ class KiCADInterface:
             "autoplacer_apply": self._handle_autoplacer_apply,
             "diagnose_chains": self._handle_diagnose_chains,
             "compare_netlists": self._handle_compare_netlists,
+            "find_unrelated_wire_crossings": self._handle_find_unrelated_wire_crossings,
             "import_svg_logo": self._handle_import_svg_logo,
             # UI/Process management commands
             "check_kicad_ui": self._handle_check_kicad_ui,
@@ -4187,6 +4188,29 @@ class KiCADInterface:
             return diagnose_chains(Path(schematic_path), filter_nets=filter_nets)
         except Exception as e:
             logger.error(f"Error in diagnose_chains: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_find_unrelated_wire_crossings(
+        self, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Find perpendicular wire crossings between unrelated nets
+        that have no junction at the crossing point.  Use as a post-
+        routing sanity check; each finding is electrically harmless
+        on its own but flags a place where any future endpoint
+        landing there would silently merge two nets (the failure
+        mode behind issue #74)."""
+        try:
+            from pathlib import Path
+            from commands.schematic_inspect import find_unrelated_wire_crossings
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            return find_unrelated_wire_crossings(Path(schematic_path))
+        except Exception as e:
+            logger.error(f"Error in find_unrelated_wire_crossings: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return {"success": False, "message": str(e)}

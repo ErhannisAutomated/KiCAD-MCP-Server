@@ -287,6 +287,155 @@ def diagnose_chains(
     }
 
 
+def find_unrelated_wire_crossings(
+    schematic_path: Path,
+) -> Dict[str, Any]:
+    """Find perpendicular wire crossings where two unrelated nets pass
+    through the same point without a junction.
+
+    Each finding is electrically harmless on its own (KiCad's
+    connectivity engine treats no-junction crossings as not connected)
+    but flags a place where any future endpoint landing at the
+    crossing point would silently merge two different nets — exactly
+    the failure mode behind issue #74.  Use as a post-routing sanity
+    check.
+
+    Same-net crossings (two segments of one labelled chain) are
+    filtered out: net resolution uses the wire-graph BFS in
+    :func:`walk_wire_chain`, not just labels at each wire's own
+    endpoints, so two segments of one chain that happen to cross are
+    correctly recognised as one net and skipped.
+
+    Returns:
+      {
+        "success": bool,
+        "schematic_path": str,
+        "n_crossings": int,
+        "crossings": [
+          {
+            "point": [x, y],
+            "wire_a": [[x1, y1], [x2, y2]],
+            "wire_a_labels": [...],
+            "wire_b": [[x1, y1], [x2, y2]],
+            "wire_b_labels": [...],
+          },
+          ...
+        ],
+      }
+    """
+    import sexpdata
+    from sexpdata import Symbol
+
+    sch_path = Path(schematic_path)
+    try:
+        sexp = sexpdata.loads(sch_path.read_text())
+    except Exception as e:
+        return {
+            "success": False,
+            "schematic_path": str(sch_path),
+            "message": f"could not load: {e}",
+        }
+
+    wires: List[Tuple[Tuple[float, float], Tuple[float, float]]] = []
+    junctions: Set[Tuple[float, float]] = set()
+    for top in sexp:
+        if not (isinstance(top, list) and top):
+            continue
+        head = str(top[0])
+        if head == "wire":
+            for sub in top[1:]:
+                if isinstance(sub, list) and sub and str(sub[0]) == "pts":
+                    pts: List[Tuple[float, float]] = []
+                    for xy in sub[1:]:
+                        if (
+                            isinstance(xy, list)
+                            and str(xy[0]) == "xy"
+                            and len(xy) >= 3
+                        ):
+                            try:
+                                pts.append(
+                                    (
+                                        round(float(xy[1]), 2),
+                                        round(float(xy[2]), 2),
+                                    )
+                                )
+                            except (TypeError, ValueError):
+                                pass
+                    if len(pts) == 2:
+                        wires.append((pts[0], pts[1]))
+        elif head == "junction":
+            for sub in top[1:]:
+                if isinstance(sub, list) and str(sub[0]) == "at" and len(sub) >= 3:
+                    try:
+                        junctions.add(
+                            (round(float(sub[1]), 2), round(float(sub[2]), 2))
+                        )
+                    except (TypeError, ValueError):
+                        pass
+                    break
+
+    from commands.wire_connectivity import walk_wire_chain as _wwc
+
+    chain_label_cache: Dict[Tuple[float, float], frozenset] = {}
+
+    def _wire_chain_labels(w) -> frozenset:
+        a, _ = w
+        if a in chain_label_cache:
+            return chain_label_cache[a]
+        chain = _wwc(a, sch_path)
+        labels = chain.labels if chain is not None else frozenset()
+        chain_label_cache[a] = labels
+        return labels
+
+    EPS = 1e-3
+    findings: List[Dict[str, Any]] = []
+    for i, w1 in enumerate(wires):
+        for w2 in wires[i + 1:]:
+            a, b = w1
+            c, d = w2
+            v1 = a[0] == b[0]
+            h1 = a[1] == b[1]
+            v2 = c[0] == d[0]
+            h2 = c[1] == d[1]
+            if not ((v1 and h2) or (h1 and v2)):
+                continue
+            if v1 and h2:
+                x = a[0]; y = c[1]
+                x1, x2 = sorted((c[0], d[0]))
+                y1, y2 = sorted((a[1], b[1]))
+            else:
+                x = c[0]; y = a[1]
+                x1, x2 = sorted((a[0], b[0]))
+                y1, y2 = sorted((c[1], d[1]))
+            if not (x1 + EPS < x < x2 - EPS and y1 + EPS < y < y2 - EPS):
+                continue
+            pt = (round(x, 2), round(y, 2))
+            if pt in junctions:
+                continue
+            n1 = _wire_chain_labels(w1)
+            n2 = _wire_chain_labels(w2)
+            if n1 and n2 and (n1 & n2):
+                # Same net via the wire-graph BFS — crossing is
+                # within one labelled chain and electrically benign.
+                continue
+            findings.append(
+                {
+                    "point": list(pt),
+                    "wire_a": [list(a), list(b)],
+                    "wire_a_labels": sorted(n1),
+                    "wire_b": [list(c), list(d)],
+                    "wire_b_labels": sorted(n2),
+                }
+            )
+
+    return {
+        "success": True,
+        "schematic_path": str(sch_path),
+        "n_crossings": len(findings),
+        "crossings": findings,
+    }
+
+
 def compare_netlists(
     orig_path: Path,
     new_path: Path,
