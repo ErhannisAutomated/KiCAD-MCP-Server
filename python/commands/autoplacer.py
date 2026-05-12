@@ -1371,9 +1371,24 @@ def _scan_unrelated_wire_crossings(schematic_path: Path) -> List[Dict[str, Any]]
                         pass
                     break
 
-    def _wire_label(w):
-        a, b = w
-        return label_at.get(a, []) + label_at.get(b, [])
+    # Net resolution via the real wire-graph BFS: a wire's net is the
+    # set of label names reachable from EITHER of its endpoints, not
+    # just labels positioned exactly AT an endpoint.  The pre-fix
+    # endpoint-only check missed two segments of one labelled chain
+    # crossing each other — flagged as "unrelated" even though the
+    # wire-graph BFS would show both on the same net.
+    from commands.wire_connectivity import walk_wire_chain as _wwc
+
+    chain_label_cache: Dict[Tuple[float, float], frozenset] = {}
+
+    def _wire_chain_labels(w) -> frozenset:
+        a, _ = w
+        if a in chain_label_cache:
+            return chain_label_cache[a]
+        chain = _wwc(a, schematic_path)
+        labels = chain.labels if chain is not None else frozenset()
+        chain_label_cache[a] = labels
+        return labels
 
     EPS = 1e-3
     findings: List[Dict[str, Any]] = []
@@ -1398,16 +1413,18 @@ def _scan_unrelated_wire_crossings(schematic_path: Path) -> List[Dict[str, Any]]
             pt = (round(x, 2), round(y, 2))
             if pt in junctions:
                 continue
-            n1 = _wire_label(w1)
-            n2 = _wire_label(w2)
-            if n1 and n2 and set(n1) & set(n2):
+            n1 = _wire_chain_labels(w1)
+            n2 = _wire_chain_labels(w2)
+            if n1 and n2 and (n1 & n2):
+                # Same net via the wire-graph BFS — crossing is
+                # within one labelled chain and electrically benign.
                 continue
             findings.append({
                 "point": list(pt),
                 "wire_a": [list(a), list(b)],
-                "wire_a_labels": n1,
+                "wire_a_labels": sorted(n1),
                 "wire_b": [list(c), list(d)],
-                "wire_b_labels": n2,
+                "wire_b_labels": sorted(n2),
             })
     return findings
 

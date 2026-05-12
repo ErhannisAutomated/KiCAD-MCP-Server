@@ -956,6 +956,92 @@ class TestRewire:
 
 
 @pytest.mark.unit
+class TestScanUnrelatedCrossings:
+    """The crossings diagnostic must use the real wire-graph BFS to
+    figure out each wire's net, not just labels at the wire's own
+    endpoints — otherwise two segments of one labelled chain that
+    happen to cross each other get flagged as 'unrelated'."""
+
+    def _write(self, tmp: Path, name: str, wires: list, labels: list) -> Path:
+        parts = [
+            '(kicad_sch (version 20250114) (generator "test")',
+            '  (uuid 11111111-1111-1111-1111-111111111111)',
+            '  (paper "A4")',
+        ]
+        for (x1, y1), (x2, y2) in wires:
+            parts.append(
+                f'  (wire (pts (xy {x1} {y1}) (xy {x2} {y2})) '
+                '(stroke (width 0) (type default)) '
+                '(uuid 11111111-1111-1111-1111-111111111111))'
+            )
+        for name_, x, y in labels:
+            parts.append(
+                f'  (label "{name_}" (at {x} {y} 0) '
+                '(effects (font (size 1.27 1.27))) '
+                '(uuid 22222222-2222-2222-2222-222222222222))'
+            )
+        parts.append('  (sheet_instances (path "/" (page "1")))')
+        parts.append(')')
+        p = tmp / name
+        p.write_text("\n".join(parts))
+        return p
+
+    def test_same_net_segments_crossing_not_flagged(self):
+        """Two USB_VBUS segments that cross each other — both reachable
+        from one USB_VBUS label via wire-graph BFS — must not appear
+        in the unrelated-crossings findings.  Regression for the
+        charger sheet's USB_VBUS crossing north-west of C17 reported
+        by the user 2026-05-13."""
+        from commands.autoplacer import _scan_unrelated_wire_crossings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = self._write(
+                Path(tmp),
+                "same_net.kicad_sch",
+                wires=[
+                    # Long vertical segment.
+                    ((100.0, 90.0), (100.0, 110.0)),
+                    # Long horizontal segment crossing it at (100, 100).
+                    ((90.0, 100.0), (110.0, 100.0)),
+                    # A connecting segment ties them on the same chain
+                    # via a shared endpoint at the vertical's TOP.
+                    ((100.0, 90.0), (90.0, 100.0)),
+                    # Another connecting at the horizontal's RIGHT end.
+                    ((110.0, 100.0), (100.0, 110.0)),
+                ],
+                labels=[("USB_VBUS", 100.0, 90.0)],
+            )
+            findings = _scan_unrelated_wire_crossings(sch)
+            assert findings == [], (
+                f"Same-net crossing must not flag — got {findings}"
+            )
+
+    def test_genuinely_unrelated_crossing_still_flagged(self):
+        """Two perpendicular wires on DIFFERENT nets crossing without
+        a junction is still a legitimate finding (would silently
+        merge nets if anything ever endpoints at the crossing point)."""
+        from commands.autoplacer import _scan_unrelated_wire_crossings
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = self._write(
+                Path(tmp),
+                "diff_net.kicad_sch",
+                wires=[
+                    ((100.0, 90.0), (100.0, 110.0)),  # NET_A
+                    ((90.0, 100.0), (110.0, 100.0)),  # NET_B
+                ],
+                labels=[
+                    ("NET_A", 100.0, 90.0),
+                    ("NET_B", 90.0, 100.0),
+                ],
+            )
+            findings = _scan_unrelated_wire_crossings(sch)
+            assert len(findings) == 1
+            pt = findings[0]["point"]
+            assert pt == [100.0, 100.0]
+
+
+@pytest.mark.unit
 class TestStagedAnneal:
     """Smoke tests for run_staged_anneal — the four-stage recipe."""
 

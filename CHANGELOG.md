@@ -4,6 +4,23 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 5)
+
+- **Autoplacer: `_scan_unrelated_wire_crossings` resolves nets via
+  the wire-graph BFS, not just endpoint-positioned labels.**  The
+  previous `_wire_label(w)` shortcut only inspected labels at a
+  wire's own two endpoints; it missed labels positioned anywhere
+  else on the wire's chain.  Result: when the autorouter laid two
+  segments of one labelled chain that happened to cross each other,
+  `_scan_unrelated_wire_crossings` reported "1 unrelated crossing"
+  even though both wires were the same net.  Surfaced on the
+  charger sheet (USB_VBUS, two segments crossing NW of C17).  Fix:
+  replace the endpoint-only check with `walk_wire_chain` (cached
+  per wire endpoint, so the BFS runs at most once per distinct
+  wire).  Two new regression tests in
+  ``TestScanUnrelatedCrossings``: same-net crossing not flagged,
+  cross-net crossing still flagged.
+
 ### Documentation + Reproducer (this branch: fixes/improvements_2, 2026-05-13 part 4)
 
 - ``docs/AUTOPLACER_GUIDE.md`` — new standalone guide for the
