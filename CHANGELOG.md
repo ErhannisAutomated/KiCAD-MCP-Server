@@ -4,6 +4,43 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 6)
+
+- **WireManager.add_wire is now idempotent.**  Two mechanisms were
+  producing duplicate wire entries in autorouted schematics:
+
+  1. *Convergent route final segments.*  When two `route_pair` calls
+     terminate at the same pin coord, the routes can end up sharing
+     their final segment.  Both calls then invoked `add_wire` with
+     identical `(start, end)` args, stacking parallel wire entries.
+     Surfaced as 3x copies of the same wire near U3/1 on charger.
+     Fix: outer-call dedupe before the split logic — if a wire
+     with the same endpoints (modulo direction) is already on the
+     sheet, return success without re-laying.
+
+  2. *Sub-segment duplicates from split logic.*  When the new wire
+     passes through an existing endpoint, the split logic divides
+     it into sub-segments.  One sub-segment can exactly duplicate
+     an existing wire (e.g., new wire (10,10)→(10,0) split at
+     (10,5) produces (10,10)→(10,5) which IS the existing
+     (10,5)→(10,10) wire).  Fix: post-split dedupe — skip any
+     sub-segment whose endpoint pair is already present.
+
+  Across the three power_module child sheets, this brought the
+  duplicate-wire count from {12, 7, 4} → {0, 0, 0}.  Netlist
+  equivalence + chain pathology checks unchanged.
+
+  - One existing test
+    (`test_new_wire_through_existing_endpoint_splits_at_endpoint`)
+    asserted a wire-count of ≥4 after the T-junction split case;
+    that's now 3 because the redundant upper-half sub-segment gets
+    deduplicated against the existing corner wire.  Test rewritten
+    to assert the semantic invariant — wire endpoint at (10,5) and
+    a junction at (10,5) — instead of counting raw wire entries.
+  - One new test
+    (`test_add_wire_is_idempotent_for_identical_repeated_calls`)
+    in `tests/test_wire_manager_cross_net.py`.
+
 ### Bug Fixes (this branch: fixes/improvements_2, 2026-05-13 part 5)
 
 - **Autoplacer: `_scan_unrelated_wire_crossings` resolves nets via

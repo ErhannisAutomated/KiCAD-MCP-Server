@@ -119,3 +119,38 @@ def test_add_wire_does_not_silently_merge_two_unrelated_nets(
         "this kind of split, the chains stay disjoint and this "
         "assertion passes."
     )
+
+
+@pytest.mark.unit
+def test_add_wire_is_idempotent_for_identical_repeated_calls(
+    tmp_path: Path,
+) -> None:
+    """Calling WireManager.add_wire twice with the same endpoints
+    (modulo direction) must result in only ONE wire entry in the
+    file.  Regression for the duplicate-wire bug surfaced 2026-05-13
+    on charger: two pair routes converging on a shared pin coord
+    were both calling add_wire with identical final-segment args,
+    leaving 3x copies of the same wire in the .kicad_sch."""
+    p = tmp_path / "idempotent.kicad_sch"
+    p.write_text(textwrap.dedent(
+        """\
+        (kicad_sch (version 20250114) (generator "test")
+          (uuid 11111111-1111-1111-1111-111111111111)
+          (paper "A4")
+          (sheet_instances (path "/" (page "1")))
+        )
+        """
+    ))
+
+    # First call: lays the wire.
+    assert WireManager.add_wire(p, [10.0, 10.0], [20.0, 10.0])
+    # Second call with identical args: no-op (still returns True).
+    assert WireManager.add_wire(p, [10.0, 10.0], [20.0, 10.0])
+    # Third call with reversed direction: also no-op.
+    assert WireManager.add_wire(p, [20.0, 10.0], [10.0, 10.0])
+
+    text = p.read_text()
+    n_wires = text.count("(wire ")
+    assert n_wires == 1, (
+        f"Idempotent add_wire produced {n_wires} entries; expected 1"
+    )

@@ -162,6 +162,34 @@ class WireManager:
 
             sch_data = sexpdata.loads(sch_content)
 
+            # Idempotent dedupe at the OUTER call level: if a wire with
+            # the same (start, end) endpoints (modulo direction) is
+            # already on the sheet, return success without re-laying.
+            # Catches convergent routes — two route_pair calls that
+            # end at a shared pin coord can produce identical final
+            # segments, which would otherwise stack as parallel wires.
+            # Done before split logic so split-sub-segments that
+            # happen to duplicate existing wires still pass through
+            # (the split-at-endpoint contract is preserved).
+            call_key = frozenset({
+                (round(float(start_point[0]), 4), round(float(start_point[1]), 4)),
+                (round(float(end_point[0]), 4), round(float(end_point[1]), 4)),
+            })
+            for item in sch_data:
+                parsed = WireManager._parse_wire(item)
+                if parsed is None:
+                    continue
+                (x1, y1), (x2, y2), _, _ = parsed
+                if call_key == frozenset({
+                    (round(x1, 4), round(y1, 4)),
+                    (round(x2, 4), round(y2, 4)),
+                }):
+                    logger.info(
+                        f"add_wire idempotent skip: {start_point}→{end_point} "
+                        "already present"
+                    )
+                    return True
+
             # Break any existing wire that passes through a new endpoint (T-junction support)
             for pt in (start_point, end_point):
                 splits = WireManager._break_wires_at_point(sch_data, pt)
@@ -203,7 +231,34 @@ class WireManager:
                     f"{len(split_points)} existing-endpoint(s) "
                     f"into {len(new_segments)} segments"
                 )
+
+            # Sub-segment dedupe: after the split logic, each segment
+            # is compared against existing wires.  Without this, a new
+            # wire passing through an existing endpoint produces a
+            # sub-segment that may exactly duplicate an existing wire
+            # (e.g., new wire (10,10)→(10,0) passing through existing
+            # corner at (10,5) produces a sub-segment (10,10)→(10,5)
+            # that IS the existing (10,5)→(10,10) wire).  Skipping
+            # exact duplicates keeps the file lean; KiCad would render
+            # the two atop each other anyway.
+            existing_pairs: set = set()
+            for item in sch_data:
+                parsed = WireManager._parse_wire(item)
+                if parsed is None:
+                    continue
+                (x1, y1), (x2, y2), _, _ = parsed
+                existing_pairs.add(frozenset({
+                    (round(x1, 4), round(y1, 4)),
+                    (round(x2, 4), round(y2, 4)),
+                }))
             for seg_a, seg_b in new_segments:
+                seg_key = frozenset({
+                    (round(seg_a[0], 4), round(seg_a[1], 4)),
+                    (round(seg_b[0], 4), round(seg_b[1], 4)),
+                })
+                if seg_key in existing_pairs:
+                    continue
+                existing_pairs.add(seg_key)
                 wire_sexp = WireManager._make_wire_sexp(
                     seg_a, seg_b, stroke_width, stroke_type,
                 )
