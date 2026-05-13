@@ -485,13 +485,24 @@ class ExportCommands:
         self, schematic_path: str, include_attributes: List[str]
     ) -> List[Dict[str, Any]]:
         """Read component list with all custom properties from a .kicad_sch file.
-        This is the authoritative source for custom properties like LCSC that are
-        set on schematic symbols but not automatically synced to the PCB footprints.
+
+        Walks every .kicad_sch under the project directory so hierarchical
+        child sheets are included (matching _build_hierarchical_pad_net_map's
+        traversal in sync_schematic_to_board).  Dedupes by reference so
+        multi-unit symbols only count once per reference.
         """
         import re
+        from pathlib import Path
 
-        with open(schematic_path, "r", encoding="utf-8") as f:
-            content = f.read()
+        project_dir = Path(schematic_path).parent
+        sch_files = sorted(project_dir.rglob("*.kicad_sch"))
+        contents: List[str] = []
+        for sch in sch_files:
+            try:
+                with open(sch, "r", encoding="utf-8") as f:
+                    contents.append(f.read())
+            except Exception:
+                pass
 
         def _find_matching_paren(s: str, start: int) -> int:
             depth = 0
@@ -516,51 +527,48 @@ class ExportCommands:
                 i += 1
             return -1
 
-        # Bounds of (lib_symbols ...) block — skip it (contains templates, not placed symbols)
-        lib_sym_pos = content.find("(lib_symbols")
-        lib_sym_end = _find_matching_paren(content, lib_sym_pos) if lib_sym_pos >= 0 else -1
-
         prop_pattern = re.compile(r'\(property\s+"([^"]*)"\s+"([^"]*)"')
         sym_pattern = re.compile(r"\(symbol\s+\(")
 
         components: List[Dict[str, Any]] = []
-        search_start = 0
-
-        while True:
-            m = sym_pattern.search(content, search_start)
-            if not m:
-                break
-            pos = m.start()
-
-            if lib_sym_pos >= 0 and lib_sym_pos <= pos <= lib_sym_end:
-                search_start = lib_sym_end + 1
-                continue
-
-            end = _find_matching_paren(content, pos)
-            if end < 0:
-                search_start = pos + 1
-                continue
-
-            block = content[pos : end + 1]
-            props: Dict[str, str] = {}
-            for pm in prop_pattern.finditer(block):
-                props[pm.group(1)] = pm.group(2)
-
-            ref = props.get("Reference", "")
-            if not ref or ref.startswith("#"):
+        seen_refs: set = set()
+        for content in contents:
+            # Bounds of (lib_symbols ...) block — skip it (contains templates, not placed symbols)
+            lib_sym_pos = content.find("(lib_symbols")
+            lib_sym_end = (
+                _find_matching_paren(content, lib_sym_pos) if lib_sym_pos >= 0 else -1
+            )
+            search_start = 0
+            while True:
+                m = sym_pattern.search(content, search_start)
+                if not m:
+                    break
+                pos = m.start()
+                if lib_sym_pos >= 0 and lib_sym_pos <= pos <= lib_sym_end:
+                    search_start = lib_sym_end + 1
+                    continue
+                end = _find_matching_paren(content, pos)
+                if end < 0:
+                    search_start = pos + 1
+                    continue
+                block = content[pos : end + 1]
+                props: Dict[str, str] = {}
+                for pm in prop_pattern.finditer(block):
+                    props[pm.group(1)] = pm.group(2)
+                ref = props.get("Reference", "")
+                if not ref or ref.startswith("#") or ref in seen_refs:
+                    search_start = end + 1
+                    continue
+                seen_refs.add(ref)
+                comp: Dict[str, Any] = {
+                    "reference": ref,
+                    "value": props.get("Value", ""),
+                    "footprint": props.get("Footprint", ""),
+                }
+                for attr in include_attributes:
+                    comp[attr] = props.get(attr, "")
+                components.append(comp)
                 search_start = end + 1
-                continue
-
-            comp: Dict[str, Any] = {
-                "reference": ref,
-                "value": props.get("Value", ""),
-                "footprint": props.get("Footprint", ""),
-            }
-            for attr in include_attributes:
-                comp[attr] = props.get(attr, "")
-
-            components.append(comp)
-            search_start = end + 1
 
         return components
 
