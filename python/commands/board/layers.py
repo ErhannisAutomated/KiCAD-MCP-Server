@@ -39,7 +39,13 @@ class BoardLayerCommands:
                     "errorDetails": "name, type, and position are required",
                 }
 
-            # Determine layer ID based on position and number
+            # Determine layer ID based on position and number.
+            # In KiCad 9 the PCB_LAYER_ID enum spaces copper layers two slots apart
+            # (F_Cu=0, B_Cu=2, In1_Cu=4, In2_Cu=6, In3_Cu=8, ...) and the odd slots
+            # hold non-copper layers (F.Silkscreen=5, B.Silkscreen=7, ...).  The
+            # naive `In1_Cu + (number - 1)` mapped In2 to id 5 (F.Silkscreen),
+            # silently corrupting the layer table and leaving orphan zones on
+            # F.Silkscreen after save.
             layer_id = None
             if position == "inner":
                 if number is None:
@@ -48,7 +54,13 @@ class BoardLayerCommands:
                         "message": "Missing layer number",
                         "errorDetails": "number is required for inner layers",
                     }
-                layer_id = pcbnew.In1_Cu + (number - 1)
+                if not isinstance(number, int) or number < 1 or number > 30:
+                    return {
+                        "success": False,
+                        "message": "Invalid inner-layer number",
+                        "errorDetails": "number must be an integer in [1, 30]",
+                    }
+                layer_id = pcbnew.In1_Cu + 2 * (number - 1)
             elif position == "top":
                 layer_id = pcbnew.F_Cu
             elif position == "bottom":
