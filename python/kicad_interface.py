@@ -725,7 +725,15 @@ class KiCADInterface:
             if project_path != getattr(self, "_current_project_path", None):
                 self._current_project_path = project_path
                 local_lib = FootprintLibraryManager(project_path=project_path)
-                self.component_commands = ComponentCommands(self.board, local_lib)
+                # Mutate the existing ComponentCommands instance instead of
+                # replacing it.  Otherwise the bound-method references captured
+                # in self.command_routes (e.g. {"move_component":
+                # self.component_commands.move_component}) keep pointing at the
+                # old instance — which still holds a stale board reference —
+                # so subsequent move/rotate/etc. silently operate on a
+                # different BOARD than the one save_project flushes to disk.
+                self.component_commands.board = self.board
+                self.component_commands.library_manager = local_lib
                 logger.info(f"Reloaded FootprintLibraryManager with project_path={project_path}")
 
         return self.component_commands.place_component(params)
