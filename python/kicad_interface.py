@@ -4757,34 +4757,46 @@ class KiCADInterface:
 
         from skip import Schematic
 
-        try:
-            sch = Schematic(schematic_path)
-        except Exception as e:
-            return {"placed": [], "errors": [f"Could not read schematic: {e}"], "skipped": 0}
+        # Walk every .kicad_sch in the project so hierarchical child sheets are
+        # imported, not just the top sheet.  Mirrors _build_hierarchical_pad_net_map.
+        project_dir = Path(schematic_path).parent
+        sch_files = sorted(project_dir.rglob("*.kicad_sch"))
 
         # Build set of references already on board
         existing_refs = {fp.GetReference() for fp in board.GetFootprints()}
 
-        # Collect components that need placing
+        # Collect components that need placing (deduplicate by reference)
         to_place = []
+        seen_refs: set = set()
         skipped = 0
-        for sym in getattr(sch, "symbol", None) or []:
+        for sch_path in sch_files:
             try:
-                ref = sym.property.Reference.value
-                if ref.startswith("#"):
-                    continue
-                if ref in existing_refs:
-                    skipped += 1
-                    continue
-                fp_str = ""
-                if hasattr(sym.property, "Footprint"):
-                    fp_str = sym.property.Footprint.value
-                if not fp_str:
-                    continue
-                value = sym.property.Value.value if hasattr(sym.property, "Value") else ""
-                to_place.append({"ref": ref, "footprint": fp_str, "value": value})
-            except Exception:
+                sch = Schematic(str(sch_path))
+            except Exception as e:
+                logger.warning(f"_auto_import: could not load {sch_path}: {e}")
                 continue
+            for sym in getattr(sch, "symbol", None) or []:
+                try:
+                    ref = sym.property.Reference.value
+                    if ref.startswith("#"):
+                        continue
+                    if ref in existing_refs:
+                        skipped += 1
+                        continue
+                    if ref in seen_refs:
+                        # Multi-unit symbols appear once per unit; only place
+                        # the footprint a single time.
+                        continue
+                    fp_str = ""
+                    if hasattr(sym.property, "Footprint"):
+                        fp_str = sym.property.Footprint.value
+                    if not fp_str:
+                        continue
+                    value = sym.property.Value.value if hasattr(sym.property, "Value") else ""
+                    seen_refs.add(ref)
+                    to_place.append({"ref": ref, "footprint": fp_str, "value": value})
+                except Exception:
+                    continue
 
         if not to_place:
             return {"placed": [], "errors": [], "skipped": skipped}
