@@ -164,6 +164,111 @@ class ExportCommands:
                 "errorDetails": str(e),
             }
 
+    def export_position_file(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Export a pick-and-place position file via `kicad-cli pcb export pos`."""
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            output_path = params.get("outputPath")
+            if not output_path:
+                return {
+                    "success": False,
+                    "message": "Missing output path",
+                    "errorDetails": "outputPath parameter is required",
+                }
+            output_path = os.path.abspath(os.path.expanduser(output_path))
+
+            fmt = (params.get("format") or "CSV").lower()
+            if fmt not in {"csv", "ascii", "gerber"}:
+                return {
+                    "success": False,
+                    "message": "Invalid format",
+                    "errorDetails": "format must be CSV, ASCII, or gerber",
+                }
+
+            side = (params.get("side") or "both").lower()
+            side = {"top": "front", "bottom": "back"}.get(side, side)
+            if side not in {"front", "back", "both"}:
+                return {
+                    "success": False,
+                    "message": "Invalid side",
+                    "errorDetails": "side must be top, bottom, or both",
+                }
+
+            units = (params.get("units") or "mm").lower()
+            units = {"inch": "in"}.get(units, units)
+            if units not in {"mm", "in"}:
+                return {
+                    "success": False,
+                    "message": "Invalid units",
+                    "errorDetails": "units must be mm or inch",
+                }
+
+            board_file = params.get("boardPath") or self.board.GetFileName()
+            kicad_cli = self._find_kicad_cli()
+            if not kicad_cli or not board_file or not os.path.exists(board_file):
+                return {
+                    "success": False,
+                    "message": "kicad-cli not available for position-file export",
+                    "errorDetails": (
+                        f"kicad-cli={'found' if kicad_cli else 'missing'}, "
+                        f"board_file={board_file!r}"
+                    ),
+                }
+
+            os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
+
+            import subprocess
+
+            cmd = [
+                kicad_cli, "pcb", "export", "pos",
+                "--output", output_path,
+                "--format", fmt,
+                "--side", side,
+                "--units", units,
+            ]
+            if params.get("excludeDNP"):
+                cmd.append("--exclude-dnp")
+            if params.get("smdOnly"):
+                cmd.append("--smd-only")
+            if params.get("excludeThroughHole"):
+                cmd.append("--exclude-fp-th")
+            if params.get("useDrillFileOrigin"):
+                cmd.append("--use-drill-file-origin")
+            cmd.append(board_file)
+
+            result = subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+            if result.returncode != 0:
+                return {
+                    "success": False,
+                    "message": "kicad-cli position-file export failed",
+                    "errorDetails": result.stderr.strip() or result.stdout.strip(),
+                }
+
+            size = os.path.getsize(output_path) if os.path.isfile(output_path) else 0
+            return {
+                "success": True,
+                "message": f"Exported position file to {output_path}",
+                "path": output_path,
+                "format": fmt,
+                "side": side,
+                "units": units,
+                "size_bytes": size,
+            }
+
+        except Exception as e:
+            logger.error(f"Error exporting position file: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to export position file",
+                "errorDetails": str(e),
+            }
+
     def export_pdf(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Export PDF files"""
         try:

@@ -361,6 +361,7 @@ class KiCADInterface:
             "export_svg": self.export_commands.export_svg,
             "export_3d": self.export_commands.export_3d,
             "export_bom": self.export_commands.export_bom,
+            "export_position_file": self.export_commands.export_position_file,
             # Library commands (footprint management)
             "list_libraries": self.library_commands.list_libraries,
             "search_footprints": self.library_commands.search_footprints,
