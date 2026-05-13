@@ -522,6 +522,9 @@ export class KiCADMcpServer {
         "list_schematic_nets",
         "list_schematic_labels",
         "get_schematic_view",
+        // Freerouting is per-board complexity dependent and routinely
+        // takes minutes; even small boards exceed the 30s default.
+        "autoroute",
       ];
       if (longRunningCommands.includes(command)) {
         commandTimeout = 600000; // 10 minutes for long operations
