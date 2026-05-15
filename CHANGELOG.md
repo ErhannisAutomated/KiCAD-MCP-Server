@@ -4,6 +4,28 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Root-cause fix for delete_trace SWIG corruption (this branch: develop, 2026-05-15)
+
+- **Switched every `board.Remove(item)` call site to
+  `board.RemoveNative(item)`** in `commands/routing.py` and
+  `commands/component.py`. The previous subprocess workaround in
+  `_bulk_strip_via_subprocess` and the `_BULK_STRIP_SUBPROCESS` script
+  are removed. The dispatcher's `_reload_required` handling is kept
+  (harmless, may be useful to future tools) but no command currently
+  sets the flag.
+
+- **Root cause**: pcbnew's `BOARD::Remove(item)` corrupts
+  *process-global* SWIG type state after a few hundred mass-removals
+  (threshold observed ~650 on power_module). Symptom: subsequent
+  method calls on the BOARD — and even a fresh `pcbnew.LoadBoard()` in
+  the same process — return bare `SwigPyObject` instead of their
+  typed wrappers, breaking every downstream operation until process
+  restart. `BOARD::RemoveNative()` skips the listener/undo path that
+  triggers the corruption and is the in-process-safe alternative.
+  `Delete()` and `DeleteNative()` work too; tested in
+  `tests/test_remove_native_does_not_corrupt.py` (integration-gated).
+  The 791-track strip used to error mid-flow; now it just works.
+
 ### autoroute layerOrder + bulk-strip fix (this branch: develop, 2026-05-15)
 
 - **`autoroute` and `export_dsn` accept `layerOrder`.** Reorders the

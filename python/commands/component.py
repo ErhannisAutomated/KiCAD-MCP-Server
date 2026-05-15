@@ -305,8 +305,9 @@ class ComponentCommands:
                     "errorDetails": f"Could not find component: {reference}",
                 }
 
-            # Remove from board
-            self.board.Remove(module)
+            # RemoveNative — BOARD.Remove() can corrupt SWIG state on
+            # repeated calls; see commands/routing.py module note.
+            self.board.RemoveNative(module)
 
             return {"success": True, "message": f"Deleted component: {reference}"}
 
