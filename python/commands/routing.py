@@ -94,6 +94,7 @@ class RoutingCommands:
             layer = params.get("layer", "F.Cu")
             width = params.get("width")
             net = params.get("net")  # optional override
+            check_obstacles = params.get("checkObstacles", True)
 
             if not from_ref or not from_pad or not to_ref or not to_pad:
                 return {
@@ -160,6 +161,23 @@ class RoutingCommands:
                 and start_layer != end_layer
             )
 
+            def _obstacle_error(obs: list) -> Dict[str, Any]:
+                shown = "; ".join(obs[:8])
+                if len(obs) > 8:
+                    shown += f" (+{len(obs) - 8} more)"
+                return {
+                    "success": False,
+                    "message": f"Route blocked by {len(obs)} obstacle(s)",
+                    "errorDetails": (
+                        "The straight path would cross foreign-net copper: "
+                        + shown
+                        + ". route_pad_to_pad only draws straight segments — use "
+                        "route_trace with intermediate waypoints to route around "
+                        "these, or pass checkObstacles=false to override."
+                    ),
+                    "obstacles": obs,
+                }
+
             if needs_via:
                 # Place via directly below the start pad (same X).
                 # Using the geometric midpoint X causes all vias to stack at
@@ -167,6 +185,16 @@ class RoutingCommands:
                 # on F.Cu/B.Cu): midpoint is always the board center.
                 via_x = start_pos.x / scale
                 via_y = (start_pos.y + end_pos.y) / 2 / scale
+
+                if check_obstacles:
+                    via_pt = pcbnew.VECTOR2I(int(via_x * scale), int(via_y * scale))
+                    obs = self._find_route_obstacles(
+                        start_pos, via_pt, self.board.GetLayerID(start_layer), net
+                    ) + self._find_route_obstacles(
+                        via_pt, end_pos, self.board.GetLayerID(end_layer), net
+                    )
+                    if obs:
+                        return _obstacle_error(obs)
 
                 # Trace on start layer: start_pad → via
                 r1 = self.route_trace(
@@ -206,11 +234,18 @@ class RoutingCommands:
                 }
             else:
                 # Same layer — direct trace
+                seg_layer = layer if layer else start_layer
+                if check_obstacles:
+                    obs = self._find_route_obstacles(
+                        start_pos, end_pos, self.board.GetLayerID(seg_layer), net
+                    )
+                    if obs:
+                        return _obstacle_error(obs)
                 result = self.route_trace(
                     {
                         "start": {"x": start_pos.x / scale, "y": start_pos.y / scale, "unit": "mm"},
                         "end": {"x": end_pos.x / scale, "y": end_pos.y / scale, "unit": "mm"},
-                        "layer": layer if layer else start_layer,
+                        "layer": seg_layer,
                         "width": width,
                         "net": net,
                     }
@@ -555,7 +590,7 @@ class RoutingCommands:
         }
 
     def get_nets_list(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Get a list of all nets in the PCB"""
+        """Get a list of all nets in the PCB, optionally with routing stats."""
         try:
             if not self.board:
                 return {
@@ -564,20 +599,48 @@ class RoutingCommands:
                     "errorDetails": "Load or create a board first",
                 }
 
+            include_stats = params.get("includeStats", False)
+            unit = params.get("unit", "mm")
+            scale = 1000000.0 if unit == "mm" else 25400000.0
+
+            # Tally per-net track count, via count and routed length in one pass.
+            stats: Dict[int, Dict[str, Any]] = {}
+            if include_stats:
+                for track in self.board.Tracks():
+                    code = track.GetNetCode()
+                    s = stats.setdefault(
+                        code, {"trackCount": 0, "viaCount": 0, "totalLength": 0.0}
+                    )
+                    if track.Type() == pcbnew.PCB_VIA_T:
+                        s["viaCount"] += 1
+                    else:
+                        s["trackCount"] += 1
+                        s["totalLength"] += track.GetLength() / scale
+
             nets = []
             netinfo = self.board.GetNetInfo()
             for net_code in range(netinfo.GetNetCount()):
                 net = netinfo.GetNetItem(net_code)
                 if net:
-                    nets.append(
-                        {
-                            "name": net.GetNetname(),
-                            "code": net.GetNetCode(),
-                            "class": net.GetNetClassName(),
-                        }
-                    )
+                    entry = {
+                        "name": net.GetNetname(),
+                        "code": net.GetNetCode(),
+                        "class": net.GetNetClassName(),
+                    }
+                    if include_stats:
+                        s = stats.get(
+                            net.GetNetCode(),
+                            {"trackCount": 0, "viaCount": 0, "totalLength": 0.0},
+                        )
+                        entry["trackCount"] = s["trackCount"]
+                        entry["viaCount"] = s["viaCount"]
+                        entry["totalLength"] = round(s["totalLength"], 4)
+                    nets.append(entry)
 
-            return {"success": True, "nets": nets}
+            result = {"success": True, "nets": nets}
+            if include_stats:
+                result["unit"] = unit
+            return result
 
         except Exception as e:
             logger.error(f"Error getting nets list: {str(e)}")
@@ -1429,3 +1492,96 @@ class RoutingCommands:
         dx = p1.x - p2.x
         dy = p1.y - p2.y
         return (dx * dx + dy * dy) ** 0.5
+
+    def _find_route_obstacles(
+        self,
+        start: pcbnew.VECTOR2I,
+        end: pcbnew.VECTOR2I,
+        layer_id: int,
+        net_name: str,
+    ) -> list:
+        """Return human-readable descriptions of foreign-net copper that a
+        straight segment start->end on layer_id would collide with.
+
+        Checks tracks (same-layer segment intersection), vias (all layers,
+        centre within via radius of the segment) and pads (segment sampled
+        through the pad's real shape via HitTest). Empty list = clear path.
+        """
+        obstacles: list = []
+        sx, sy, ex, ey = start.x, start.y, end.x, end.y
+
+        def seg_pt_dist(px: float, py: float) -> float:
+            vx, vy = ex - sx, ey - sy
+            c1 = vx * vx + vy * vy
+            if c1 == 0:
+                return ((px - sx) ** 2 + (py - sy) ** 2) ** 0.5
+            t = max(0.0, min(1.0, ((px - sx) * vx + (py - sy) * vy) / c1))
+            qx, qy = sx + t * vx, sy + t * vy
+            return ((px - qx) ** 2 + (py - qy) ** 2) ** 0.5
+
+        def ccw(ax, ay, bx, by, cx, cy) -> bool:
+            return (cy - ay) * (bx - ax) > (by - ay) * (cx - ax)
+
+        def segs_cross(cx, cy, dx, dy) -> bool:
+            return ccw(sx, sy, cx, cy, dx, dy) != ccw(ex, ey, cx, cy, dx, dy) and ccw(
+                sx, sy, ex, ey, cx, cy
+            ) != ccw(sx, sy, ex, ey, dx, dy)
+
+        seg_len = ((ex - sx) ** 2 + (ey - sy) ** 2) ** 0.5
+
+        # Tracks and vias
+        for t in self.board.Tracks():
+            if t.GetNetname() == net_name:
+                continue
+            if t.Type() == pcbnew.PCB_VIA_T:
+                pos = t.GetPosition()
+                # KiCad 9 PCB_VIA.GetWidth() needs a layer arg (per-layer
+                # widths); a through via is uniform so F.Cu is fine.
+                try:
+                    via_w = t.GetWidth(pcbnew.F_Cu)
+                except TypeError:
+                    via_w = t.GetWidth()
+                if seg_pt_dist(pos.x, pos.y) < via_w / 2.0:
+                    obstacles.append(
+                        f"via on net '{t.GetNetname() or '<no net>'}' "
+                        f"at ({pos.x / 1e6:.2f},{pos.y / 1e6:.2f})"
+                    )
+            else:
+                if t.GetLayer() != layer_id:
+                    continue
+                ts, te = t.GetStart(), t.GetEnd()
+                if segs_cross(ts.x, ts.y, te.x, te.y):
+                    obstacles.append(
+                        f"track on net '{t.GetNetname() or '<no net>'}' "
+                        f"crossing near ({ts.x / 1e6:.2f},{ts.y / 1e6:.2f})"
+                    )
+
+        # Pads — sample the segment through the pad's real shape
+        steps = max(2, int(seg_len / 100000))  # ~0.1mm sampling
+        for fp in self.board.GetFootprints():
+            for pad in fp.Pads():
+                if pad.GetNetname() == net_name:
+                    continue
+                if not pad.IsOnLayer(layer_id):
+                    continue
+                pc = pad.GetPosition()
+                bb = pad.GetBoundingBox()
+                half_diag = (bb.GetWidth() ** 2 + bb.GetHeight() ** 2) ** 0.5 / 2.0
+                if seg_pt_dist(pc.x, pc.y) > half_diag:
+                    continue  # quick reject — pad nowhere near the segment
+                for i in range(steps + 1):
+                    f = i / steps
+                    px = int(sx + f * (ex - sx))
+                    py = int(sy + f * (ey - sy))
+                    try:
+                        inside = pad.HitTest(pcbnew.VECTOR2I(px, py))
+                    except Exception:
+                        inside = bb.Contains(pcbnew.VECTOR2I(px, py))
+                    if inside:
+                        obstacles.append(
+                            f"pad {fp.GetReference()}-{pad.GetNumber()} on net "
+                            f"'{pad.GetNetname() or '<no net>'}' "
+                            f"at ({pc.x / 1e6:.2f},{pc.y / 1e6:.2f})"
+                        )
+                        break
+        return obstacles

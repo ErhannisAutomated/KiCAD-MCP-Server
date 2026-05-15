@@ -133,9 +133,17 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         })
         .optional()
         .describe("Delete trace nearest to this position"),
-      net: z.string().optional().describe("Delete all traces on this net (bulk delete)"),
+      net: z
+        .string()
+        .optional()
+        .describe(
+          'Delete all traces on this net (bulk delete). Pass "*" to delete every track on the board.',
+        ),
       layer: z.string().optional().describe("Filter by layer when using net-based deletion"),
-      includeVias: z.boolean().optional().describe("Include vias in net-based deletion"),
+      includeVias: z
+        .boolean()
+        .optional()
+        .describe('Include vias in net-based deletion (use with net="*" to strip the whole board)'),
     },
     async (args: any) => {
       const result = await callKicadScript("delete_trace", args);
@@ -168,6 +176,12 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         .optional()
         .describe("Filter by bounding box region"),
       unit: z.enum(["mm", "inch"]).optional().describe("Unit for coordinates"),
+      includeVias: z
+        .boolean()
+        .optional()
+        .describe(
+          "Also return vias (with their UUIDs) in a separate 'vias' array. Needed to get via UUIDs for reliable delete_trace by UUID.",
+        ),
     },
     async (args: any) => {
       const result = await callKicadScript("query_traces", args);
@@ -310,7 +324,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Route pad to pad tool
   server.tool(
     "route_pad_to_pad",
-    "PREFERRED tool for pad-to-pad routing. Looks up pad positions automatically, detects the net from the pad, and — critically — if the two pads are on different copper layers (e.g. J1 on F.Cu and J2 on B.Cu) automatically inserts a via at the midpoint so the connection is complete. Always use this instead of route_trace when routing between named component pads.",
+    "PREFERRED tool for pad-to-pad routing. Looks up pad positions automatically, detects the net from the pad, and — critically — if the two pads are on different copper layers (e.g. J1 on F.Cu and J2 on B.Cu) automatically inserts a via at the midpoint so the connection is complete. Always use this instead of route_trace when routing between named component pads. NOTE: it only draws STRAIGHT segments — by default it refuses (checkObstacles) if the straight path would cross foreign-net copper; route around obstacles with route_trace waypoints in that case.",
     {
       fromRef: z.string().describe("Reference of the source component (e.g. 'U2')"),
       fromPad: z
@@ -323,6 +337,12 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
       layer: z.string().optional().describe("PCB layer (default: F.Cu)"),
       width: z.number().optional().describe("Trace width in mm (default: board default)"),
       net: z.string().optional().describe("Net name override (default: auto-detected from pad)"),
+      checkObstacles: z
+        .boolean()
+        .optional()
+        .describe(
+          "Refuse the route if the straight path would cross foreign-net tracks, vias or pads (default: true). Set false to force the trace anyway.",
+        ),
     },
     async (args: any) => {
       const result = await callKicadScript("route_pad_to_pad", args);
