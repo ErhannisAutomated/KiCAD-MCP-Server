@@ -301,8 +301,9 @@ For the complete tool reference with access types (direct/routed/additional), se
 - `route_pad_to_pad` - Route between pads with auto-via insertion
 - `add_via` - Place vias for layer transitions
 - `delete_trace` - Remove traces (by UUID, position, or net)
-- `query_traces` - Query/filter traces
-- `get_nets_list` - List all nets with statistics
+- `query_traces` - Query/filter traces (use `includeVias: true` to also get via UUIDs for reliable via deletion)
+- `get_nets_list` - List all nets with optional per-net `includeStats` (trackCount, viaCount, totalLength)
+- `audit_plane_cuts` - Report signal traces routed on inner copper layers (the GND/PWR planes) — sorted for ripup/retry on an outer layer
 - `modify_trace` - Change trace width, layer, or net
 - `create_netclass` - Define net class with rules
 - `add_copper_pour` - Create copper zones/pours
