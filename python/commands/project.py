@@ -159,6 +159,29 @@ class ProjectCommands:
             else:
                 board_path = filename
 
+            # KiCad's SETTINGS_MANAGER caches the project (including netclass
+            # clearances/widths and design rules) for the life of the process.
+            # A plain LoadBoard on a re-open reuses that cache, so out-of-band
+            # edits to .kicad_pro are silently ignored — e.g. export_dsn then
+            # emits stale netclass clearances. Unload the cached project first
+            # so LoadBoard re-reads .kicad_pro fresh.
+            project_path = os.path.splitext(board_path)[0] + ".kicad_pro"
+            try:
+                sm = pcbnew.GetSettingsManager()
+                if sm.IsProjectOpen():
+                    proj = None
+                    try:
+                        proj = sm.GetProject(project_path)
+                    except Exception:
+                        try:
+                            proj = sm.GetProject()
+                        except Exception:
+                            proj = None
+                    if proj is not None:
+                        sm.UnloadProject(proj, False)  # False = don't save
+            except Exception as cache_err:
+                logger.warning(f"Could not refresh project settings cache: {cache_err}")
+
             # Load the board
             board = pcbnew.LoadBoard(board_path)
             self.board = board
