@@ -11,7 +11,7 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
   // Full autoroute: export DSN -> run Freerouting -> import SES
   server.tool(
     "autoroute",
-    "Run Freerouting autorouter on the current PCB. Exports to Specctra DSN, runs Freerouting CLI, and imports the routed SES result. Requires Java 11+ and freerouting.jar (see check_freerouting).",
+    "Run Freerouting autorouter on the current PCB. Exports to Specctra DSN, runs Freerouting CLI, and imports the routed SES result. Requires Java 11+ and freerouting.jar (see check_freerouting). On 4-layer boards, layers are reordered in the DSN so freerouting prefers outer layers and uses GND last — see layerOrder.",
     {
       boardPath: z.string().optional().describe("Path to .kicad_pcb file (default: current board)"),
       freeroutingJar: z
@@ -22,6 +22,12 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
         ),
       maxPasses: z.number().optional().describe("Maximum routing passes (default: 20)"),
       timeout: z.number().optional().describe("Timeout in seconds (default: 300)"),
+      layerOrder: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Layer-priority order to write into the DSN; freerouting iterates layers in this order and prefers earlier ones. Must be a permutation of the board\'s copper layers. Default on 4-layer boards: ["F.Cu","B.Cu","In2.Cu","In1.Cu"] (outer first, GND-on-In1.Cu last) — set explicitly only to override.',
+        ),
     },
     async (args: any) => {
       const result = await callKicadScript("autoroute", args);
@@ -39,13 +45,19 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
   // Export DSN only
   server.tool(
     "export_dsn",
-    "Export the current PCB to Specctra DSN format. Useful for manual Freerouting workflow or external autorouters.",
+    "Export the current PCB to Specctra DSN format. Useful for manual Freerouting workflow or external autorouters. Honours the same layerOrder reordering as autoroute.",
     {
       boardPath: z.string().optional().describe("Path to .kicad_pcb file (default: current board)"),
       outputPath: z
         .string()
         .optional()
         .describe("Output DSN file path (default: same dir as board)"),
+      layerOrder: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Layer-priority order to write into the DSN. Must be a permutation of the board\'s copper layers. Default on 4-layer boards: ["F.Cu","B.Cu","In2.Cu","In1.Cu"] (outer first, GND-on-In1.Cu last).',
+        ),
     },
     async (args: any) => {
       const result = await callKicadScript("export_dsn", args);

@@ -557,10 +557,27 @@ class KiCADInterface:
                         self.board = self.project_commands.board
                         self._update_command_handlers()
                     elif command in self._BOARD_MUTATING_COMMANDS:
-                        # Auto-save after every board mutation via SWIG.
-                        # Prevents data loss if Claude hits context limit before
-                        # an explicit save_project call.
-                        self._auto_save_board()
+                        # If the handler signalled that it wrote to disk
+                        # itself (e.g. delete_trace's bulk-strip via
+                        # subprocess) we must NOT re-save self.board over
+                        # the freshly-modified file; instead, reload it
+                        # so every handler picks up the new state.
+                        if result.pop("_reload_required", False):
+                            board_path = (
+                                self.board.GetFileName() if self.board else None
+                            )
+                            if board_path:
+                                logger.info(
+                                    "Reloading board after %s (_reload_required)",
+                                    command,
+                                )
+                                self.board = pcbnew.LoadBoard(board_path)
+                                self._update_command_handlers()
+                        else:
+                            # Auto-save after every board mutation via SWIG.
+                            # Prevents data loss if Claude hits context limit before
+                            # an explicit save_project call.
+                            self._auto_save_board()
 
                 return result
             else:

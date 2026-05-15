@@ -85,6 +85,107 @@ def _java_version_ok(java_exe: str) -> bool:
     return False
 
 
+# GND-last default for 4-layer boards. Image-current return on a signal
+# trace travels on the nearest plane; cutting GND on In1.Cu detours the
+# return and forms an EMI loop, so prefer outer layers, then PWR
+# (In2.Cu), and use GND last. Assumes the [[feedback-pcb-stackup]]
+# convention (GND@L2 = In1.Cu, PWR@L3 = In2.Cu). Callers can override
+# with an explicit `layerOrder` param.
+_DEFAULT_4LAYER_ORDER = ["F.Cu", "B.Cu", "In2.Cu", "In1.Cu"]
+
+
+def _resolve_layer_order(board: Any, requested: Optional[List[str]]) -> Optional[List[str]]:
+    """Return the effective layer routing order, or None for "leave the
+    DSN alone". Requested order takes precedence; otherwise we apply the
+    GND-last default for 4-layer boards and no reorder for 2-layer.
+    """
+    if requested:
+        # Caller may give the order as ["F.Cu", "B.Cu", ...]; we trust it.
+        return list(requested)
+    try:
+        n_cu = board.GetCopperLayerCount()
+    except Exception:
+        n_cu = None
+    if n_cu == 4:
+        return list(_DEFAULT_4LAYER_ORDER)
+    return None
+
+
+def _rewrite_dsn_layer_order(dsn_text: str, desired_order: List[str]) -> str:
+    """Rewrite the DSN structure-block layer list to follow `desired_order`.
+
+    The DSN exporter emits one block per copper layer of the form::
+
+        (layer F.Cu
+          (type signal)
+          (property
+            (index 0)
+          )
+        )
+
+    Freerouting iterates layers in the order they appear here (and
+    prefers earlier indices), so reordering changes its layer-cost bias.
+    We require `desired_order` to be a permutation of the layers present
+    in the DSN — anything else is a caller bug.
+    """
+    import re
+
+    block_re = re.compile(
+        r"    \(layer (\S+)\n"
+        r"      \(type signal\)\n"
+        r"      \(property\n"
+        r"        \(index \d+\)\n"
+        r"      \)\n"
+        r"    \)",
+        re.MULTILINE,
+    )
+    matches = list(block_re.finditer(dsn_text))
+    if not matches:
+        raise ValueError("no (layer ...) blocks found in DSN structure")
+    found = [m.group(1) for m in matches]
+    if set(desired_order) != set(found):
+        raise ValueError(
+            f"layerOrder {desired_order!r} must be a permutation of "
+            f"DSN layers {found!r}"
+        )
+
+    new_blocks = []
+    for i, name in enumerate(desired_order):
+        new_blocks.append(
+            f"    (layer {name}\n"
+            f"      (type signal)\n"
+            f"      (property\n"
+            f"        (index {i})\n"
+            f"      )\n"
+            f"    )"
+        )
+    new_block_text = "\n".join(new_blocks)
+    first = matches[0].start()
+    last = matches[-1].end()
+    return dsn_text[:first] + new_block_text + dsn_text[last:]
+
+
+def _maybe_apply_layer_order(
+    board: Any, dsn_path: str, requested: Optional[List[str]]
+) -> Optional[List[str]]:
+    """If a layer order applies, rewrite the DSN in place. Returns the
+    order that was applied, or None if no reorder happened."""
+    order = _resolve_layer_order(board, requested)
+    if not order:
+        return None
+    try:
+        with open(dsn_path, "r") as f:
+            txt = f.read()
+        new_txt = _rewrite_dsn_layer_order(txt, order)
+        if new_txt != txt:
+            with open(dsn_path, "w") as f:
+                f.write(new_txt)
+        return order
+    except ValueError as e:
+        logger.warning(f"Skipping DSN layer reorder: {e}")
+        return None
+
+
 def _build_freerouting_cmd(
     jar_path: str,
     dsn_path: str,
@@ -267,6 +368,16 @@ class FreeroutingCommands:
         dsn_size = os.path.getsize(dsn_path)
         logger.info(f"DSN exported: {dsn_size} bytes")
 
+        # Step 1b: Reorder DSN layers so freerouting tries them in the
+        # caller's preferred order (default: GND-last on 4-layer boards
+        # so the closest-plane signal-return path stays intact).
+        layer_order = params.get("layerOrder")
+        applied_layer_order = _maybe_apply_layer_order(
+            self.board, dsn_path, layer_order
+        )
+        if applied_layer_order:
+            logger.info(f"DSN layer order set to: {applied_layer_order}")
+
         # Step 2: Run Freerouting
         cmd = _build_freerouting_cmd(jar_path, dsn_path, ses_path, passes, use_docker)
 
@@ -359,6 +470,7 @@ class FreeroutingCommands:
             "dsn_path": dsn_path,
             "ses_path": ses_path,
             "elapsed_seconds": elapsed,
+            "layerOrder": applied_layer_order,
             "board_stats": {
                 "tracks": track_count,
                 "vias": via_count,
@@ -412,12 +524,19 @@ class FreeroutingCommands:
                 "errorDetails": str(e),
             }
 
+        # Apply caller-requested (or default 4-layer) layer routing order
+        layer_order = params.get("layerOrder")
+        applied_layer_order = _maybe_apply_layer_order(
+            self.board, output_path, layer_order
+        )
+
         file_size = os.path.getsize(output_path) if os.path.isfile(output_path) else 0
         return {
             "success": True,
             "message": f"Exported DSN to {output_path}",
             "path": output_path,
             "size_bytes": file_size,
+            "layerOrder": applied_layer_order,
         }
 
     def import_ses(self, params: Dict[str, Any]) -> Dict[str, Any]:

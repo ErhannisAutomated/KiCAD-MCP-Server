@@ -4,6 +4,33 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### autoroute layerOrder + bulk-strip fix (this branch: develop, 2026-05-15)
+
+- **`autoroute` and `export_dsn` accept `layerOrder`.** Reorders the
+  DSN's `(layer ...)` blocks before invoking freerouting, biasing
+  freerouting's per-layer cost so it prefers earlier layers. On
+  4-layer boards the default is `["F.Cu","B.Cu","In2.Cu","In1.Cu"]`
+  (outer first, GND-on-In1.Cu last). Verified on power_module:
+  switching from the as-exported `[F.Cu,In1.Cu,In2.Cu,B.Cu]` order to
+  the new default dropped inner-layer cut length from 912 mm → 453 mm
+  (50% reduction) with only +2 unrouted nets. Helper
+  `_rewrite_dsn_layer_order` validates the requested order is a
+  permutation of the layers actually present. Tests in
+  `tests/test_dsn_layer_order.py` (8 unit tests, no pcbnew needed).
+
+- **`delete_trace(net="*")` no longer corrupts the MCP's pcbnew
+  state.** Stripping every track in-process leaves SWIG in a broken
+  state where `board.GetDesignSettings()` and even fresh
+  `pcbnew.LoadBoard` start returning bare `SwigPyObject` — meaning
+  subsequent `add_via` / `import_ses` calls fail with attribute errors
+  until the MCP is restarted. Fix: when `net=="*"`, the handler now
+  runs the actual `b.Remove(track)` loop in a one-shot subprocess
+  and returns `_reload_required` so the dispatcher hot-reloads
+  `self.board` and refreshes every command handler's reference.
+  Verified end-to-end: `open → delete_trace(net="*") → add_via` now
+  succeeds without restart. The dispatcher also skips its auto-save
+  in this path so it doesn't clobber the freshly-emptied file.
+
 ### New tool: `audit_plane_cuts` (this branch: develop, 2026-05-15)
 
 - **`audit_plane_cuts`** reports signal traces routed on inner copper

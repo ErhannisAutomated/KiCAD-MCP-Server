@@ -2,14 +2,45 @@
 Routing-related command implementations for KiCAD interface
 """
 
+import json
 import logging
 import math
 import os
+import subprocess
+import sys
 from typing import Any, Dict, List, Optional, Tuple
 
 import pcbnew
 
 logger = logging.getLogger("kicad_interface")
+
+
+# Stripping every track in-process corrupts pcbnew's SWIG state for the
+# rest of the MCP run — after a `delete_trace(net="*")` the BOARD's
+# GetDesignSettings() starts returning a bare SwigPyObject, and even a
+# fresh pcbnew.LoadBoard returns a SwigPyObject (not a usable BOARD).
+# Workaround: when we wipe everything, do the actual removal in a
+# subprocess (fresh interpreter) and have the main process just reload
+# the board file. Verified end-to-end in tests/.
+_BULK_STRIP_SUBPROCESS = """
+import json, sys
+import pcbnew
+path = sys.argv[1]
+params = json.loads(sys.argv[2])
+b = pcbnew.LoadBoard(path)
+layer_id = b.GetLayerID(params["layer"]) if params.get("layer") else None
+n = 0
+for t in list(b.Tracks()):
+    is_via = t.Type() == pcbnew.PCB_VIA_T
+    if is_via and not params.get("include_vias", False):
+        continue
+    if layer_id is not None and not is_via and t.GetLayer() != layer_id:
+        continue
+    b.Remove(t)
+    n += 1
+b.Save(path)
+print(n)
+"""
 
 
 class RoutingCommands:
@@ -487,9 +518,12 @@ class RoutingCommands:
 
             # Delete by net name (bulk delete), use "*" to delete all tracks
             if net_name:
+                if net_name == "*":
+                    return self._bulk_strip_via_subprocess(layer, include_vias)
+
                 tracks_to_remove = []
                 for track in list(self.board.Tracks()):
-                    if net_name != "*" and track.GetNetname() != net_name:
+                    if track.GetNetname() != net_name:
                         continue
 
                     # Skip vias if not requested
@@ -1553,6 +1587,74 @@ class RoutingCommands:
                 "message": "Failed to route differential pair",
                 "errorDetails": str(e),
             }
+
+    def _bulk_strip_via_subprocess(
+        self, layer: Optional[str], include_vias: bool
+    ) -> Dict[str, Any]:
+        """Strip every track (optionally filtered by layer / include_vias)
+        in a fresh interpreter so the main MCP process's pcbnew state
+        stays clean. Returns _reload_required=True so the dispatcher
+        re-LoadBoards self.board and refreshes every command handler."""
+        if not self.board:
+            return {
+                "success": False,
+                "message": "No board is loaded",
+                "errorDetails": "Load or create a board first",
+            }
+        path = self.board.GetFileName()
+        if not path:
+            return {
+                "success": False,
+                "message": "Bulk strip needs a saved board file",
+                "errorDetails": "self.board has no file name — save the project first",
+            }
+        # Persist current in-memory state so the subprocess sees it
+        try:
+            pcbnew.SaveBoard(path, self.board)
+        except Exception as e:
+            return {
+                "success": False,
+                "message": "Pre-strip board save failed",
+                "errorDetails": str(e),
+            }
+        params = {"layer": layer, "include_vias": bool(include_vias)}
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-c", _BULK_STRIP_SUBPROCESS, path, json.dumps(params)],
+                capture_output=True,
+                text=True,
+                timeout=60,
+            )
+        except subprocess.TimeoutExpired:
+            return {
+                "success": False,
+                "message": "Bulk strip subprocess timed out",
+            }
+        except Exception as e:
+            return {
+                "success": False,
+                "message": "Bulk strip subprocess failed to launch",
+                "errorDetails": str(e),
+            }
+        if proc.returncode != 0:
+            return {
+                "success": False,
+                "message": "Bulk strip subprocess exited non-zero",
+                "errorDetails": (proc.stderr or proc.stdout or "").strip(),
+            }
+        try:
+            n = int((proc.stdout or "0").strip())
+        except ValueError:
+            n = 0
+        # Don't reload self.board here — the dispatcher honours
+        # _reload_required and refreshes every command handler's
+        # board reference atomically.
+        return {
+            "success": True,
+            "message": f"Deleted {n} traces on net '*' (via subprocess to avoid SWIG state corruption)",
+            "deletedCount": n,
+            "_reload_required": True,
+        }
 
     def _get_point(self, point_spec: Dict[str, Any]) -> pcbnew.VECTOR2I:
         """Convert point specification to KiCAD point"""
