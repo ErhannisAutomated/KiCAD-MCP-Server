@@ -163,13 +163,29 @@ Route R1 pad 2 to LED1 pad 1 with 0.3mm trace width.
 
 **Tool:** `route_pad_to_pad` -- auto-detects pad positions, nets, and inserts vias when pads are on different layers
 
-**Manual approach:**
+> **Note (2026-05-15):** `route_pad_to_pad` only draws *straight*
+> segments. By default it refuses to route if the straight path would
+> cross foreign-net tracks, vias, or pads — and returns the obstacle
+> list so you can route around them. In dense IC areas (e.g.
+> escaping a QFN pad on the "wrong" side) you'll need `route_trace`
+> with intermediate waypoints, often hopping to B.Cu via `add_via` to
+> get around the obstacles. The `checkObstacles=false` override is
+> available but should be a last resort — silent straight-lining
+> through pin fields previously caused 25+ DRC violations in a single
+> call.
+
+**Manual approach (multi-segment / around obstacles):**
 
 ```
 Route a trace from x=15, y=25 to x=25, y=25 on the front copper layer.
 ```
 
-**Tool:** `route_trace`
+**Tool:** `route_trace`. For an obstacle detour: `query_traces` (or
+`query_traces` with `includeVias=true`) the bounding box around the
+route first to see existing copper, then issue a sequence of
+`route_trace` + `add_via` calls along a path that misses the
+obstacles. `route_trace` is fixed-layer; use `add_via` between
+segments to change layers.
 
 ### Advanced Routing
 

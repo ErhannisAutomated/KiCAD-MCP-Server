@@ -4,6 +4,43 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Bug fixes + tooling (this branch: develop, 2026-05-15)
+
+- **`route_pad_to_pad` now refuses to draw through foreign-net copper.**
+  The straight-segment routing had zero obstacle awareness — a single
+  call through a dense IC pin field could produce 25+ DRC violations.
+  New `_find_route_obstacles` helper does seg/seg intersection for
+  tracks, centre-within-radius for vias, and segment-sampled
+  `PAD.HitTest` for pads (the sampling avoids false positives on
+  fine-pitch adjacent same-net pads). Refusal returns an obstacle list
+  with locations and nets; new `checkObstacles=false` overrides.
+  Surfaced on the power_module re-route session. Commit `902e7da`.
+
+- **`open_project` now refreshes `.kicad_pro` settings on re-open.**
+  KiCad's `SETTINGS_MANAGER` caches the project (netclass clearances/
+  widths, design rules) for the life of the process. A plain
+  `LoadBoard` on re-open reused that cache, so out-of-band edits to
+  `.kicad_pro` were silently ignored — most visibly, `export_dsn` then
+  emitted stale netclass clearances. `open_project` now calls
+  `SETTINGS_MANAGER.UnloadProject(proj, False)` before `LoadBoard`.
+  Verified end-to-end (edit clearance on disk → re-open → fresh value).
+  Commit `0f3fb93`.
+
+- **`get_nets_list` `includeStats` is implemented.** Was schema-exposed
+  but the handler ignored it; now returns per-net `trackCount`,
+  `viaCount`, `totalLength` (+ `unit`).
+
+- **Schema/discoverability fixes** in `src/tools/routing.ts` and
+  `python/schemas/tool_schemas.py`:
+  - `query_traces` exposes `includeVias` (the Python handler always
+    returned vias with UUIDs but the param was missing from the
+    schema, so via-delete by UUID was unreachable).
+  - `delete_trace` documents `net="*"` (strips every track) in the
+    schema description; `traceUuid` renamed from `uuid` in the Python
+    schema to match the TS schema and the handler.
+  - `route_pad_to_pad` adds `checkObstacles` and a NOTE about
+    straight-segment behavior to its top-level description.
+
 ### Housekeeping (this branch: fixes/improvements_2, 2026-05-13 part 8)
 
 - **New MCP tool: `find_unrelated_wire_crossings`.**  Moved the

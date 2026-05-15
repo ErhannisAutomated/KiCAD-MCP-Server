@@ -793,7 +793,7 @@ ROUTING_TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {
-                "uuid": {
+                "traceUuid": {
                     "type": "string",
                     "description": "UUID of a specific trace to delete",
                 },
@@ -813,7 +813,7 @@ ROUTING_TOOLS = [
                 },
                 "net": {
                     "type": "string",
-                    "description": "Delete all traces on this net (bulk delete)",
+                    "description": 'Delete all traces on this net (bulk delete). Pass "*" to delete every track on the board.',
                 },
                 "layer": {
                     "type": "string",
@@ -821,7 +821,7 @@ ROUTING_TOOLS = [
                 },
                 "includeVias": {
                     "type": "boolean",
-                    "description": "Include vias in net-based deletion",
+                    "description": 'Include vias in net-based deletion (use with net="*" to strip the whole board)',
                     "default": False,
                 },
             },
@@ -859,7 +859,7 @@ ROUTING_TOOLS = [
                 },
                 "includeVias": {
                     "type": "boolean",
-                    "description": "Include vias in the result",
+                    "description": "Also return vias (with their UUIDs) in a separate 'vias' array. Needed to get via UUIDs for reliable delete_trace by UUID.",
                     "default": False,
                 },
             },
@@ -932,8 +932,23 @@ ROUTING_TOOLS = [
     {
         "name": "get_nets_list",
         "title": "List All Nets",
-        "description": "Returns a list of all electrical nets defined on the board.",
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": "Returns a list of all electrical nets defined on the board, optionally with per-net routing statistics.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "includeStats": {
+                    "type": "boolean",
+                    "description": "Include per-net trackCount, viaCount and totalLength",
+                    "default": False,
+                },
+                "unit": {
+                    "type": "string",
+                    "enum": ["mm", "inch"],
+                    "description": "Unit for length measurements (default mm)",
+                    "default": "mm",
+                },
+            },
+        },
     },
     {
         "name": "create_netclass",
