@@ -344,6 +344,8 @@ class KiCADInterface:
             "delete_trace": self.routing_commands.delete_trace,
             "query_traces": self.routing_commands.query_traces,
             "audit_plane_cuts": self.routing_commands.audit_plane_cuts,
+            "decoupling_audit": self._handle_decoupling_audit,
+            "place_near": self._handle_place_near,
             "modify_trace": self.routing_commands.modify_trace,
             "copy_routing_pattern": self.routing_commands.copy_routing_pattern,
             "get_nets_list": self.routing_commands.get_nets_list,
@@ -1426,6 +1428,21 @@ class KiCADInterface:
                 changes["propertiesUpdated"] = properties_updated
             if properties_removed:
                 changes["propertiesRemoved"] = properties_removed
+
+            # Propagate the rename across Placement_Anchor properties
+            # in every sheet of the project (constraint v1 contract).
+            if new_reference is not None and new_reference != reference:
+                try:
+                    from commands.placement_constraints import (
+                        find_top_schematic,
+                        propagate_rename,
+                    )
+                    top = find_top_schematic(sch_file)
+                    prop = propagate_rename(top, {reference: str(new_reference)})
+                    if prop["updated"] or prop["dangling"]:
+                        changes["placementAnchorPropagation"] = prop
+                except Exception as e:
+                    logger.warning(f"Placement_Anchor propagation failed: {e}")
 
             logger.info(f"Edited schematic component {reference}: {changes}")
             return {"success": True, "reference": reference, "updated": changes}
@@ -3420,7 +3437,30 @@ class KiCADInterface:
                 )
 
             SchematicManager.save_schematic(schematic, schematic_path)
-            return {"success": True, "annotated": annotated}
+
+            # Propagate the renames through Placement_Anchor refs in
+            # every sheet of the project.
+            propagation: Dict[str, Any] = {}
+            rename_map = {a["oldReference"]: a["newReference"] for a in annotated}
+            # Only renames where the old ref didn't just end in "?" matter,
+            # but include every entry — propagate_rename ignores irrelevant ones.
+            if rename_map:
+                try:
+                    from commands.placement_constraints import (
+                        find_top_schematic,
+                        propagate_rename,
+                    )
+                    top = find_top_schematic(schematic_path)
+                    propagation = propagate_rename(top, rename_map)
+                except Exception as e:
+                    logger.warning(f"Placement_Anchor propagation failed: {e}")
+                    propagation = {"error": str(e)}
+
+            return {
+                "success": True,
+                "annotated": annotated,
+                "placementAnchorPropagation": propagation,
+            }
 
         except Exception as e:
             logger.error(f"Error annotating schematic: {e}")
@@ -6424,6 +6464,382 @@ print("ok")
                 "success": False,
                 "message": f"Failed to get datasheet URL: {str(e)}",
             }
+
+    def _handle_decoupling_audit(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Find decoupling caps (or any constrained component) too far
+        from their target IC pin / body.
+
+        Reads ``Placement_Anchor`` properties on schematic symbols
+        AND auto-discovers cap↔IC power-pin pairs by net analysis when
+        ``includeAutoDiscovered`` is true (default).
+
+        Required params: ``schematicPath``. Optional: ``boardPath`` (else
+        uses the currently-loaded board), ``maxDist`` (default 5.0 mm,
+        used for auto-discovered pairs and any explicit anchor without
+        an inline ``within=`` value), ``includeAutoDiscovered``,
+        ``includeExplicit``.
+        """
+        logger.info("Running decoupling_audit")
+        try:
+            from commands.placement_constraints import (
+                ANCHOR_PROPERTY,
+                DecouplingPair,
+                discover_decoupling_pairs,
+                distance_pad_to_pad,
+                get_constraint_version,
+                iter_components,
+                parse_anchor_value,
+            )
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+
+            board_path = params.get("boardPath")
+            max_dist = float(params.get("maxDist", 5.0))
+            include_auto = params.get("includeAutoDiscovered", True)
+            include_explicit = params.get("includeExplicit", True)
+
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+
+            # Project file (sibling to .kicad_sch by convention) — version check.
+            from pathlib import Path
+            proj = Path(schematic_path).with_suffix(".kicad_pro")
+            constraint_version = get_constraint_version(proj)
+
+            pairs: List[DecouplingPair] = []
+            parse_errors: List[Dict[str, str]] = []
+
+            # Explicit Placement_Anchor properties.
+            explicit_owners = set()
+            if include_explicit:
+                for comp in iter_components(schematic_path):
+                    if not comp.anchor:
+                        continue
+                    clauses, errors = parse_anchor_value(comp.anchor)
+                    for err in errors:
+                        parse_errors.append(
+                            {"ref": comp.reference, "anchor": comp.anchor, "badClause": err}
+                        )
+                    for c in clauses:
+                        pairs.append(
+                            DecouplingPair(
+                                cap_ref=comp.reference,
+                                ic_ref=c.target_ref,
+                                ic_pin=c.target_pin or "",
+                                power_net="",
+                                source="explicit",
+                                max_dist_mm=c.max_dist_mm,
+                            )
+                        )
+                        explicit_owners.add(comp.reference)
+
+            # Auto-discovered pairs (skip caps that already have explicit anchors).
+            if include_auto:
+                auto_pairs, auto_errors = discover_decoupling_pairs(schematic_path, max_dist)
+                parse_errors.extend(auto_errors)
+                for p in auto_pairs:
+                    if p.cap_ref in explicit_owners:
+                        continue
+                    pairs.append(p)
+
+            # Measure PCB distances. For auto-discovered pairs, a cap on
+            # a shared rail (e.g. BAT+) hits every IC pin on that rail —
+            # so we keep only the cap's closest target as its "primary"
+            # and demote the others to "secondary" (reported but not
+            # flagged). Explicit Placement_Anchor pairs are always
+            # primary.
+            unresolved: List[Dict[str, str]] = []
+            measured: List[Tuple[DecouplingPair, float]] = []
+            for p in pairs:
+                fp_a = board.FindFootprintByReference(p.cap_ref)
+                fp_b = board.FindFootprintByReference(p.ic_ref)
+                if fp_a is None:
+                    unresolved.append({"ref": p.cap_ref, "reason": f"{p.cap_ref} not on PCB"})
+                    continue
+                if fp_b is None:
+                    unresolved.append(
+                        {
+                            "ref": p.ic_ref,
+                            "reason": f"target {p.ic_ref} not on PCB (from {p.cap_ref})",
+                        }
+                    )
+                    continue
+                dist = distance_pad_to_pad(
+                    board, p.cap_ref, None, p.ic_ref, p.ic_pin or None
+                )
+                if dist is None:
+                    unresolved.append(
+                        {
+                            "ref": p.cap_ref,
+                            "reason": f"could not resolve pad: {p.cap_ref} or {p.ic_ref}.{p.ic_pin}",
+                        }
+                    )
+                    continue
+                measured.append((p, dist))
+
+            # Primary target per cap (for auto-discovered only).
+            primary_by_cap: Dict[str, Tuple[DecouplingPair, float]] = {}
+            for p, d in measured:
+                if p.source == "explicit":
+                    continue
+                cur = primary_by_cap.get(p.cap_ref)
+                if cur is None or d < cur[1]:
+                    primary_by_cap[p.cap_ref] = (p, d)
+
+            results: List[Dict[str, Any]] = []
+            for p, d in measured:
+                if p.source == "explicit":
+                    role = "primary"
+                else:
+                    prim = primary_by_cap.get(p.cap_ref)
+                    role = "primary" if prim and prim[0] is p else "secondary"
+                status = "ok"
+                if role == "primary" and d > p.max_dist_mm:
+                    status = "too_far"
+                results.append(
+                    {
+                        "cap": p.cap_ref,
+                        "ic": p.ic_ref,
+                        "pin": p.ic_pin,
+                        "net": p.power_net,
+                        "source": p.source,
+                        "role": role,
+                        "distance_mm": round(d, 3),
+                        "max_mm": p.max_dist_mm,
+                        "status": status,
+                    }
+                )
+
+            # Sort: too_far primaries first (longest distance first),
+            # then ok primaries, then secondaries.
+            def _sort_key(r):
+                role_rank = 0 if r["role"] == "primary" else 1
+                status_rank = 0 if r["status"] == "too_far" else 1
+                return (role_rank, status_rank, -r["distance_mm"])
+            results.sort(key=_sort_key)
+            too_far_count = sum(1 for r in results if r["status"] == "too_far")
+
+            return {
+                "success": True,
+                "constraintVersion": constraint_version,
+                "anchorProperty": ANCHOR_PROPERTY,
+                "pairs": results,
+                "tooFarCount": too_far_count,
+                "unresolved": unresolved,
+                "parseErrors": parse_errors,
+                "message": (
+                    f"decoupling_audit: {len(results)} pairs, "
+                    f"{too_far_count} too_far, {len(unresolved)} unresolved"
+                ),
+            }
+        except Exception as e:
+            logger.error(f"Error in decoupling_audit: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_place_near(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Snap PCB footprints to within ``maxDist`` mm of a target pad / footprint.
+
+        Required: ``refs`` (list of component references to move), ``target``
+        (anchor as ``REF`` or ``REF.PIN``). Optional: ``boardPath`` (defaults
+        to currently loaded board), ``maxDist`` (default 5.0 mm),
+        ``skipIfWithin`` (default true), ``savePath`` (write the board if set).
+
+        Placement strategy: for each ref, search a small grid of candidate
+        positions around the target, pick the closest one that doesn't
+        bbox-overlap any other footprint, and move there.
+        """
+        logger.info("Running place_near")
+        try:
+            refs = params.get("refs")
+            target = params.get("target")
+            if not refs:
+                return {"success": False, "message": "refs (list) is required"}
+            if not target:
+                return {"success": False, "message": "target is required"}
+
+            max_dist = float(params.get("maxDist", 5.0))
+            skip_if_within = bool(params.get("skipIfWithin", True))
+            board_path = params.get("boardPath")
+            save_path = params.get("savePath", board_path)
+
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+
+            # Parse target.
+            target_ref = target
+            target_pin: Optional[str] = None
+            if "." in target:
+                target_ref, target_pin = target.split(".", 1)
+
+            target_fp = board.FindFootprintByReference(target_ref)
+            if target_fp is None:
+                return {
+                    "success": False,
+                    "message": f"target {target_ref} not on PCB",
+                }
+            if target_pin:
+                target_pad = target_fp.FindPadByNumber(str(target_pin))
+                if target_pad is None:
+                    return {
+                        "success": False,
+                        "message": f"target pin {target_pin} not on {target_ref}",
+                    }
+                target_pos = target_pad.GetPosition()
+            else:
+                target_pos = target_fp.GetPosition()
+
+            # Build collision set: every existing footprint's bbox EXCEPT
+            # the ones we're moving and any on the opposite copper layer
+            # (a back-side battery holder shouldn't block front-side caps).
+            moving_refs = set(refs)
+            # Reference layer = the moving footprints' layer (assume homogeneous;
+            # if mixed, this is a corner case the caller can address explicitly).
+            ref_fp = None
+            for r in refs:
+                ref_fp = board.FindFootprintByReference(r)
+                if ref_fp:
+                    break
+            ref_layer = ref_fp.GetLayer() if ref_fp else target_fp.GetLayer()
+
+            stationary_bboxes = []
+            for fp in board.GetFootprints():
+                if fp.GetReference() in moving_refs:
+                    continue
+                if fp.GetLayer() != ref_layer:
+                    continue
+                bb = fp.GetBoundingBox(False)
+                stationary_bboxes.append((bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom()))
+
+            moved: List[Dict[str, Any]] = []
+            skipped: List[Dict[str, Any]] = []
+            placed_bboxes: List[Tuple[int, int, int, int]] = list(stationary_bboxes)
+
+            scale_mm = 1_000_000
+            max_dist_nm = max_dist * scale_mm
+
+            # Candidate offsets: a 1mm-resolution polar grid out to max_dist.
+            # Closer offsets first.
+            import math as _math
+            offsets: List[Tuple[int, int]] = []
+            step_mm = 1.0
+            r = step_mm
+            while r <= max_dist:
+                # Angle density scales with circumference.
+                n = max(12, int(2 * _math.pi * r / step_mm))
+                for i in range(n):
+                    ang = 2 * _math.pi * i / n
+                    offsets.append((int(r * _math.cos(ang) * scale_mm),
+                                    int(r * _math.sin(ang) * scale_mm)))
+                r += step_mm
+
+            for ref in refs:
+                fp = board.FindFootprintByReference(ref)
+                if fp is None:
+                    skipped.append({"ref": ref, "reason": "not on PCB"})
+                    continue
+
+                # Current distance from cap centre to target pad.
+                cur = fp.GetPosition()
+                cur_d_nm = ((cur.x - target_pos.x) ** 2 + (cur.y - target_pos.y) ** 2) ** 0.5
+                if skip_if_within and cur_d_nm <= max_dist_nm:
+                    skipped.append(
+                        {
+                            "ref": ref,
+                            "reason": f"already within {max_dist} mm ({cur_d_nm / scale_mm:.2f} mm)",
+                        }
+                    )
+                    continue
+
+                # Find a non-overlapping candidate position.
+                bb = fp.GetBoundingBox(False)
+                bb_w = bb.GetWidth()
+                bb_h = bb.GetHeight()
+                # Offset of the footprint origin relative to bbox centre.
+                origin_dx = cur.x - (bb.GetLeft() + bb_w // 2)
+                origin_dy = cur.y - (bb.GetTop() + bb_h // 2)
+
+                best: Optional[Tuple[int, int, Tuple[int, int, int, int]]] = None
+                for dx, dy in offsets:
+                    cand_x = target_pos.x + dx
+                    cand_y = target_pos.y + dy
+                    # Where the bbox would land if we put the footprint origin here.
+                    cand_left = cand_x - origin_dx - bb_w // 2
+                    cand_top = cand_y - origin_dy - bb_h // 2
+                    cand_right = cand_left + bb_w
+                    cand_bottom = cand_top + bb_h
+                    cand_box = (cand_left, cand_top, cand_right, cand_bottom)
+                    overlaps = False
+                    for (l, t, r2, b) in placed_bboxes:
+                        if not (cand_right <= l or cand_left >= r2 or cand_bottom <= t or cand_top >= b):
+                            overlaps = True
+                            break
+                    if overlaps:
+                        continue
+                    best = (cand_x, cand_y, cand_box)
+                    break
+
+                if best is None:
+                    skipped.append(
+                        {
+                            "ref": ref,
+                            "reason": f"no clear spot within {max_dist} mm of {target}",
+                        }
+                    )
+                    continue
+
+                new_x, new_y, new_box = best
+                fp.SetPosition(pcbnew.VECTOR2I(int(new_x), int(new_y)))
+                placed_bboxes.append(new_box)
+                moved.append(
+                    {
+                        "ref": ref,
+                        "oldPos": {"x": cur.x / scale_mm, "y": cur.y / scale_mm, "unit": "mm"},
+                        "newPos": {"x": new_x / scale_mm, "y": new_y / scale_mm, "unit": "mm"},
+                        "newDist_mm": round(
+                            ((new_x - target_pos.x) ** 2 + (new_y - target_pos.y) ** 2) ** 0.5
+                            / scale_mm,
+                            3,
+                        ),
+                    }
+                )
+
+            if save_path:
+                board.Save(save_path)
+                if board_path:
+                    # If we loaded from a path, refresh self.board so
+                    # subsequent calls see the new state.
+                    self.board = board
+
+            return {
+                "success": True,
+                "moved": moved,
+                "skipped": skipped,
+                "target": target,
+                "message": (
+                    f"place_near: moved {len(moved)}, skipped {len(skipped)}"
+                ),
+            }
+        except Exception as e:
+            logger.error(f"Error in place_near: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
 
 
 def _write_response(response_fd: Any, response: Any) -> None:

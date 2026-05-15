@@ -4,6 +4,53 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Placement-constraint v1: decoupling_audit + place_near (develop, 2026-05-15)
+
+Two new MCP tools land the schematic-resident placement-constraint
+design agreed in the previous session.
+
+- **`decoupling_audit`** — walks the schematic for cap↔IC power-pin
+  pairs (auto-discovered by net analysis OR explicit
+  `Placement_Anchor` property), measures each cap's PCB pad-to-pad
+  distance to its target IC pin, and flags any over the anchor's
+  `within=Nmm`. Per-cap, the closest target is the "primary"; others
+  on a shared rail are reported as "secondary" and not flagged
+  (avoids the noise where one cap on BAT+ would otherwise flag against
+  every IC pin on the rail). Auto-discovery covers `power_in` and
+  `power_out` IC pins; ground-net recognition handles GND, VSS, AGND,
+  DGND, PGND and standard suffix patterns.
+
+- **`place_near(refs, target, maxDist)`** — snaps PCB footprints to
+  within `maxDist` mm of a target pad (`U1.10`) or footprint body
+  (`U1`). Searches a 1mm-resolution polar grid out to `maxDist` and
+  picks the closest non-overlapping spot. Honors `skipIfWithin`
+  (default true), filters by copper layer (back-side parts don't
+  block front-side placement), and uses the silk-excluding bbox
+  (`GetBoundingBox(False)`) so a long reference designator doesn't
+  artificially inflate the collision box.
+
+- **`Placement_Anchor` schematic property + rename propagation.**
+  Property grammar: `<REF>[.<PIN>]/within=<N>mm[; ...]`. Plain text
+  (no JSON-in-string) so it's human-editable in the KiCad UI.
+  `edit_schematic_component(newReference=…)` and `annotate_schematic`
+  now scan every `.kicad_sch` in the project and rewrite any
+  `Placement_Anchor` values referencing the renamed component;
+  unresolved refs are surfaced in the response.
+
+- **`mcp_constraint_version: 1` in `.kicad_pro`** — added by
+  `decoupling_audit` / `place_near` callers; lets future tool
+  versions evolve the property grammar with explicit compatibility.
+
+Implementation lives in `python/commands/placement_constraints.py`
+(pure helpers — parser, rename rewriter, .kicad_pro version helper,
+multi-sheet component walker, decoupling-pair discovery, pad-to-pad
+distance). Tests: `tests/test_placement_constraints.py` (30 unit
+tests on the helpers) and `tests/test_placement_constraint_propagation.py`
+(5 integration tests on a minimal kicad-skip fixture).
+
+TypeScript schemas in `src/tools/placement.ts`; Python schemas
+synced in `python/schemas/tool_schemas.py`.
+
 ### Root-cause fix for delete_trace SWIG corruption (this branch: develop, 2026-05-15)
 
 - **Switched every `board.Remove(item)` call site to

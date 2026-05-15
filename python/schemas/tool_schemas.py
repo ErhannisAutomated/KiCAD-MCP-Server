@@ -892,6 +892,78 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "decoupling_audit",
+        "title": "Decoupling Audit",
+        "description": "Find decoupling caps (or any constrained component) too far from their target IC pin on the PCB. Reads Placement_Anchor properties on schematic symbols AND auto-discovers cap↔IC power-pin pairs by net analysis. Property grammar: 'Placement_Anchor = \"U1.10/within=3mm[; U1.9/within=3mm]\"'. The property lives on the SCHEMATIC symbol (PCB sync drops most custom props). Controlled by 'mcp_constraint_version: 1' in .kicad_pro.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "schematicPath": {
+                    "type": "string",
+                    "description": "Path to the top-level .kicad_sch (hierarchical sub-sheets are auto-walked).",
+                },
+                "boardPath": {
+                    "type": "string",
+                    "description": "Path to the .kicad_pcb. Defaults to the currently-loaded board.",
+                },
+                "maxDist": {
+                    "type": "number",
+                    "description": "Default max distance (mm) for auto-discovered pairs. Default 5.0.",
+                    "default": 5.0,
+                },
+                "includeAutoDiscovered": {
+                    "type": "boolean",
+                    "description": "Auto-discover cap↔IC pairs via net analysis. Default true.",
+                    "default": True,
+                },
+                "includeExplicit": {
+                    "type": "boolean",
+                    "description": "Honor explicit Placement_Anchor properties. Default true.",
+                    "default": True,
+                },
+            },
+            "required": ["schematicPath"],
+        },
+    },
+    {
+        "name": "place_near",
+        "title": "Place Near",
+        "description": "Snap PCB footprints to within maxDist mm of a target pad/footprint, respecting bbox collisions. Pairs with decoupling_audit: audit to find too-far caps, then place_near to fix.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "refs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Component references to move (e.g. ['C9', 'C10']).",
+                },
+                "target": {
+                    "type": "string",
+                    "description": "Anchor as 'REF' (footprint body) or 'REF.PIN' (specific pad). Example: 'U1.10'.",
+                },
+                "maxDist": {
+                    "type": "number",
+                    "description": "Max distance in mm. Default 5.0.",
+                    "default": 5.0,
+                },
+                "skipIfWithin": {
+                    "type": "boolean",
+                    "description": "Leave components already within maxDist alone. Default true.",
+                    "default": True,
+                },
+                "boardPath": {
+                    "type": "string",
+                    "description": "Path to .kicad_pcb. Defaults to currently-loaded board.",
+                },
+                "savePath": {
+                    "type": "string",
+                    "description": "Path to save the modified board. Defaults to boardPath.",
+                },
+            },
+            "required": ["refs", "target"],
+        },
+    },
+    {
         "name": "modify_trace",
         "title": "Modify Trace",
         "description": "Modifies properties of an existing trace. Find trace by UUID or position, then change width, layer, or net assignment.",
