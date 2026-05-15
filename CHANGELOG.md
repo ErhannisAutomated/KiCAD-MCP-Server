@@ -4,6 +4,20 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### New tool: `audit_plane_cuts` (this branch: develop, 2026-05-15)
+
+- **`audit_plane_cuts`** reports signal traces routed on inner copper
+  layers that double as power/GND planes — long traces there break
+  image-current return paths above F.Cu signals. Returns per-net total
+  cut length, per-layer breakdown, and the longest single-trace
+  offenders sorted for ripup + retry on an outer layer. Params:
+  `layers` (default `["In1.Cu","In2.Cu"]`), `minLength` (default 1mm),
+  `unit`. Found on power_module v7 that ~912mm of signal was cutting
+  the planes (CELL_TOP nets alone: 174mm, with a single 47mm slice
+  through the GND plane). Tests in `tests/test_audit_plane_cuts.py`
+  (integration-gated on real pcbnew). Schemas synced in
+  `src/tools/routing.ts` and `python/schemas/tool_schemas.py`.
+
 ### Bug fixes + tooling (this branch: develop, 2026-05-15)
 
 - **`route_pad_to_pad` now refuses to draw through foreign-net copper.**

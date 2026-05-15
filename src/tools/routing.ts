@@ -196,6 +196,33 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Audit plane cuts tool
+  server.tool(
+    "audit_plane_cuts",
+    "Report signal traces routed on inner copper layers that double as power/GND planes — long traces there break image-current return paths above F.Cu signals (slot-antenna effect). Returns per-net total cut length, per-layer breakdown, and the longest single-trace offenders sorted for ripup + retry on an outer layer.",
+    {
+      layers: z
+        .array(z.string())
+        .optional()
+        .describe(
+          'Inner layers to audit (default ["In1.Cu", "In2.Cu"]). Override only if your stackup labels the plane layers differently.',
+        ),
+      minLength: z
+        .number()
+        .optional()
+        .describe(
+          "Minimum trace length (default 1.0 mm) to include — filters out unavoidable short via-fanout stubs.",
+        ),
+      unit: z.enum(["mm", "inch"]).optional().describe("Length unit (default mm)"),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("audit_plane_cuts", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // Get nets list tool
   server.tool(
     "get_nets_list",

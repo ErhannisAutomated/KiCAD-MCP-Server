@@ -770,6 +770,115 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def audit_plane_cuts(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Report signal traces routed on inner copper layers that double as
+        power/GND planes — long traces there "cut" the plane and break
+        image-current return paths above F.Cu signals.
+
+        Returns per-net cut length, per-layer breakdown, and the longest
+        single-trace offenders ranked for ripup + retry on an outer layer.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            layers = params.get("layers", ["In1.Cu", "In2.Cu"])
+            min_length = float(params.get("minLength", 1.0))
+            unit = params.get("unit", "mm")
+            scale = 1000000.0 if unit == "mm" else 25400000.0
+
+            layer_ids = {}
+            for ln in layers:
+                lid = self.board.GetLayerID(ln)
+                if lid < 0:
+                    return {
+                        "success": False,
+                        "message": f"Unknown layer: {ln}",
+                        "errorDetails": f"GetLayerID('{ln}') returned {lid}",
+                    }
+                layer_ids[lid] = ln
+
+            offenders = []
+            per_net: Dict[str, Dict[str, Any]] = {}
+
+            for t in self.board.Tracks():
+                if t.Type() == pcbnew.PCB_VIA_T:
+                    continue
+                if t.GetLayer() not in layer_ids:
+                    continue
+                length = t.GetLength() / scale
+                if length < min_length:
+                    continue
+                net = t.GetNetname() or "<no net>"
+                layer = layer_ids[t.GetLayer()]
+                start, end = t.GetStart(), t.GetEnd()
+                offenders.append(
+                    {
+                        "uuid": t.m_Uuid.AsString(),
+                        "net": net,
+                        "layer": layer,
+                        "length": round(length, 4),
+                        "width": round(t.GetWidth() / scale, 4),
+                        "start": {
+                            "x": round(start.x / scale, 4),
+                            "y": round(start.y / scale, 4),
+                            "unit": unit,
+                        },
+                        "end": {
+                            "x": round(end.x / scale, 4),
+                            "y": round(end.y / scale, 4),
+                            "unit": unit,
+                        },
+                    }
+                )
+                ns = per_net.setdefault(
+                    net, {"total": 0.0, "byLayer": {}, "segments": 0}
+                )
+                ns["total"] += length
+                ns["segments"] += 1
+                ns["byLayer"][layer] = round(ns["byLayer"].get(layer, 0.0) + length, 4)
+
+            offenders.sort(key=lambda r: r["length"], reverse=True)
+            for ns in per_net.values():
+                ns["total"] = round(ns["total"], 4)
+
+            net_ranking = sorted(
+                (
+                    {
+                        "net": n,
+                        "total": v["total"],
+                        "segments": v["segments"],
+                        "byLayer": v["byLayer"],
+                    }
+                    for n, v in per_net.items()
+                ),
+                key=lambda r: r["total"],
+                reverse=True,
+            )
+
+            return {
+                "success": True,
+                "unit": unit,
+                "layersAudited": layers,
+                "minLength": min_length,
+                "totalCutSegments": len(offenders),
+                "totalCutLength": round(sum(o["length"] for o in offenders), 4),
+                "netRanking": net_ranking,
+                "longestTraces": offenders[:25],
+            }
+
+        except Exception as e:
+            logger.error(f"Error in audit_plane_cuts: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to audit plane cuts",
+                "errorDetails": str(e),
+            }
+
     def modify_trace(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Modify properties of an existing trace
 

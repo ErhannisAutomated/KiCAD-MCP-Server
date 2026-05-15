@@ -866,6 +866,32 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "audit_plane_cuts",
+        "title": "Audit Plane Cuts",
+        "description": "Report signal traces routed on inner copper layers that double as power/GND planes (e.g. In1.Cu GND, In2.Cu PWR). Long traces there break image-current return paths above F.Cu signals. Returns per-net total cut length, per-layer breakdown, and the longest single-trace offenders sorted for ripup + retry on an outer layer.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "layers": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": 'Inner layers to audit (default ["In1.Cu", "In2.Cu"])',
+                },
+                "minLength": {
+                    "type": "number",
+                    "description": "Minimum trace length (mm) to include; filters short via-fanout stubs",
+                    "default": 1.0,
+                },
+                "unit": {
+                    "type": "string",
+                    "enum": ["mm", "inch"],
+                    "description": "Length unit (default mm)",
+                    "default": "mm",
+                },
+            },
+        },
+    },
+    {
         "name": "modify_trace",
         "title": "Modify Trace",
         "description": "Modifies properties of an existing trace. Find trace by UUID or position, then change width, layer, or net assignment.",
