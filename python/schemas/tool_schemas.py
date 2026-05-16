@@ -729,34 +729,60 @@ ROUTING_TOOLS = [
     {
         "name": "route_trace",
         "title": "Route PCB Trace",
-        "description": "Routes a copper trace between two points or pads on a specified layer.",
+        "description": (
+            "Routes a single copper trace segment between two XY points on a "
+            "fixed layer. Refuses by default (checkObstacles) when the proposed "
+            "segment would cross foreign-net copper. Does not handle layer "
+            "changes — use route_pad_to_pad for inter-layer pad-to-pad routes."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "netName": {"type": "string", "description": "Net name for this trace"},
+                "start": {
+                    "type": "object",
+                    "description": "Start position",
+                    "properties": {
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "unit": {"type": "string"},
+                    },
+                    "required": ["x", "y"],
+                },
+                "end": {
+                    "type": "object",
+                    "description": "End position",
+                    "properties": {
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "unit": {"type": "string"},
+                    },
+                    "required": ["x", "y"],
+                },
                 "layer": {
                     "type": "string",
-                    "description": "Layer to route on (e.g., F.Cu, B.Cu)",
+                    "description": "PCB layer (e.g., F.Cu, B.Cu, In1.Cu)",
                     "default": "F.Cu",
                 },
                 "width": {
                     "type": "number",
-                    "description": "Trace width in millimeters",
-                    "minimum": 0.1,
+                    "description": "Trace width in mm",
+                    "minimum": 0.05,
                 },
-                "points": {
-                    "type": "array",
-                    "description": "Array of [x, y] waypoints in millimeters",
-                    "items": {
-                        "type": "array",
-                        "items": {"type": "number"},
-                        "minItems": 2,
-                        "maxItems": 2,
-                    },
-                    "minItems": 2,
+                "net": {
+                    "type": "string",
+                    "description": "Net name for this trace",
+                },
+                "checkObstacles": {
+                    "type": "boolean",
+                    "description": (
+                        "Refuse the route if the straight path would cross "
+                        "foreign-net tracks, vias or pads (default: true). "
+                        "Set false to force the trace — useful when restoring "
+                        "a deleted segment by coordinates."
+                    ),
                 },
             },
-            "required": ["points", "width"],
+            "required": ["start", "end", "layer", "width", "net"],
         },
     },
     {

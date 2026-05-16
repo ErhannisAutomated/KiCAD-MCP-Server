@@ -206,6 +206,7 @@ class RoutingCommands:
                         return _obstacle_error(obs)
 
                 # Trace on start layer: start_pad → via
+                # checkObstacles=False — we already verified the full path above
                 r1 = self.route_trace(
                     {
                         "start": {"x": start_pos.x / scale, "y": start_pos.y / scale, "unit": "mm"},
@@ -213,6 +214,7 @@ class RoutingCommands:
                         "layer": start_layer,
                         "width": width,
                         "net": net,
+                        "checkObstacles": False,
                     }
                 )
                 # Via connecting both layers
@@ -232,6 +234,7 @@ class RoutingCommands:
                         "layer": end_layer,
                         "width": width,
                         "net": net,
+                        "checkObstacles": False,
                     }
                 )
                 success = r1.get("success") and r2.get("success")
@@ -257,6 +260,7 @@ class RoutingCommands:
                         "layer": seg_layer,
                         "width": width,
                         "net": net,
+                        "checkObstacles": False,
                     }
                 )
 
@@ -300,6 +304,7 @@ class RoutingCommands:
             width = params.get("width")
             net = params.get("net")
             via = params.get("via", False)
+            check_obstacles = params.get("checkObstacles", True)
 
             if not start or not end:
                 return {
@@ -320,6 +325,31 @@ class RoutingCommands:
             # Get start point
             start_point = self._get_point(start)
             end_point = self._get_point(end)
+
+            # Obstacle check before committing the segment. Same helper that
+            # route_pad_to_pad uses — refuses when the proposed segment would
+            # cross foreign-net copper. Default on; pass checkObstacles=false
+            # to override (e.g. when intentionally routing through a region
+            # that DRC will tolerate, or when restoring a known-good trace).
+            if check_obstacles and net:
+                obs = self._find_route_obstacles(
+                    start_point, end_point, layer_id, net
+                )
+                if obs:
+                    shown = "; ".join(obs[:8])
+                    if len(obs) > 8:
+                        shown += f" (+{len(obs) - 8} more)"
+                    return {
+                        "success": False,
+                        "message": f"Route blocked by {len(obs)} obstacle(s)",
+                        "errorDetails": (
+                            "The straight path would cross foreign-net copper: "
+                            + shown
+                            + ". Route around the obstacles with intermediate "
+                            "waypoints, or pass checkObstacles=false to override."
+                        ),
+                        "obstacles": obs,
+                    }
 
             # Create track segment
             track = pcbnew.PCB_TRACK(self.board)

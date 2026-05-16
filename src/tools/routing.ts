@@ -30,7 +30,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Route trace tool
   server.tool(
     "route_trace",
-    "Route a trace segment between two XY points on a fixed layer. WARNING: Does NOT handle layer changes — if start and end are on different copper layers, use route_pad_to_pad instead, which automatically inserts a via.",
+    "Route a trace segment between two XY points on a fixed layer. By default refuses (checkObstacles) when the proposed segment would cross foreign-net copper — pass checkObstacles=false to override (e.g. restoring a known-good trace by coordinates). WARNING: Does NOT handle layer changes — if start and end are on different copper layers, use route_pad_to_pad instead, which automatically inserts a via.",
     {
       start: z
         .object({
@@ -49,6 +49,12 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
       layer: z.string().describe("PCB layer"),
       width: z.number().describe("Trace width in mm"),
       net: z.string().describe("Net name"),
+      checkObstacles: z
+        .boolean()
+        .optional()
+        .describe(
+          "Refuse the route if the straight path would cross foreign-net tracks, vias or pads (default: true). Set false to force the trace anyway — useful when restoring a previously-deleted segment by coordinates, or routing through a region you've verified is clear via other means.",
+        ),
     },
     async (args: any) => {
       const result = await callKicadScript("route_trace", args);

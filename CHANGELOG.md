@@ -4,6 +4,28 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### route_trace: refuse routes through foreign-net copper by default (develop, 2026-05-18)
+
+`route_trace` previously committed every segment unconditionally, so a
+mis-aimed waypoint silently produced `shorting_items` /
+`solder_mask_bridge` / `clearance` violations that only surfaced on the
+next `run_drc`. During the power_module cap close-out today, four bad
+routes in one batch were all shorts caught only after the fact — and
+two of the recovery deletes accidentally removed legitimate trace
+stubs (mis-flagged as "orphans"), forcing a restore.
+
+Add `checkObstacles` parameter (default `true`) mirroring the existing
+`route_pad_to_pad` behaviour. When set, `route_trace` runs the shared
+`_find_route_obstacles` helper before adding the track and refuses
+with a per-obstacle diagnostic instead. Pass `checkObstacles=false`
+to force the route — used internally by `route_pad_to_pad` (which has
+already checked the full path) and useful for restoring previously
+deleted segments by coordinates.
+
+The Python `tool_schemas.py` route_trace entry was also drifted (used
+a legacy `points` array; impl uses `start`/`end`); brought back into
+sync with the implementation in the same commit.
+
 ### place_near: clearance margin around pads in foreign-track check (develop, 2026-05-17)
 
 The strict bbox-overlap check from the earlier track-collision fix
