@@ -104,6 +104,12 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         .describe(
           "Pull-back from first obstacle on fromLayer when placing vias, mm (default 0.5).",
         ),
+      minimumStubLength: z
+        .number()
+        .optional()
+        .describe(
+          "Refuse when the safe via insertion point is closer than this to source or target pad, mm. Set ≥1 mm when from/to are component pads to keep vias out of the pad footprint. Default 0 (off).",
+        ),
       waypointSearchMax: z
         .number()
         .optional()

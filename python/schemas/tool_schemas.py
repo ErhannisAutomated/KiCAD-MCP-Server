@@ -842,6 +842,15 @@ ROUTING_TOOLS = [
                         "placing vias, mm (default 0.5)."
                     ),
                 },
+                "minimumStubLength": {
+                    "type": "number",
+                    "description": (
+                        "Refuse when the safe via insertion point is closer "
+                        "than this distance to source or target pad, mm. "
+                        "Set ≥1 mm when source/target are component pads to "
+                        "keep vias out of the pad footprint. Default 0 (off)."
+                    ),
+                },
                 "waypointSearchMax": {
                     "type": "number",
                     "description": (

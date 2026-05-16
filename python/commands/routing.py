@@ -1822,6 +1822,8 @@ class RoutingCommands:
             margin_mm = float(params.get("safetyMargin", 0.5))
             margin_iu = int(margin_mm * 1_000_000)
             waypoint_max_mm = float(params.get("waypointSearchMax", 10.0))
+            min_stub_mm = float(params.get("minimumStubLength", 0.0))
+            min_stub_iu = int(min_stub_mm * 1_000_000)
             apply = bool(params.get("apply", False))
 
             from_pt = self._resolve_route_endpoint(params.get("from"))
@@ -1878,6 +1880,38 @@ class RoutingCommands:
                     "obstaclesFromLayer": obs_a,
                 }
 
+            # minimumStubLength: refuse if via1 too close to source pad or
+            # via2 too close to target pad. Default 0 (off); set ≥1 mm when
+            # source/target are real component pads to keep vias off them.
+            if min_stub_iu > 0:
+                def _dist(a, b):
+                    return ((a.x - b.x) ** 2 + (a.y - b.y) ** 2) ** 0.5
+                if _dist(from_pt, via1) < min_stub_iu:
+                    return {
+                        "success": False,
+                        "strategy": "stub_too_short_source",
+                        "errorDetails": (
+                            f"Safe via insertion point is "
+                            f"{_dist(from_pt, via1) / 1e6:.3f} mm from source, "
+                            f"below minimumStubLength={min_stub_mm} mm. "
+                            "This would put the via inside the source pad's "
+                            "footprint area. Hand-route a longer stub out of "
+                            "the pad column first, or lower minimumStubLength."
+                        ),
+                        "via1": _pt_dict(via1),
+                    }
+                if _dist(to_pt, via2) < min_stub_iu:
+                    return {
+                        "success": False,
+                        "strategy": "stub_too_short_target",
+                        "errorDetails": (
+                            f"Safe via insertion point is "
+                            f"{_dist(to_pt, via2) / 1e6:.3f} mm from target, "
+                            f"below minimumStubLength={min_stub_mm} mm."
+                        ),
+                        "via2": _pt_dict(via2),
+                    }
+
             # --- Strategy B: straight via-jumper on viaLayer ---
             obs_b = self._find_route_obstacles(via1, via2, via_id, net)
             if not obs_b:
@@ -1887,7 +1921,9 @@ class RoutingCommands:
                     strategy="via_jumper",
                 )
 
-            # --- Strategy C: search for a single perpendicular-offset waypoint ---
+            # --- Strategy C: single-waypoint perpendicular-offset search ---
+            # Quick first pass — handles the common "obstacle blocks one
+            # side only" case in O(N) waypoint checks.
             for offset_mm in [
                 x * 0.5 for x in range(1, int(waypoint_max_mm * 2) + 1)
             ]:
@@ -1895,11 +1931,9 @@ class RoutingCommands:
                     wp = self._perpendicular_offset_midpoint(
                         via1, via2, offset_mm * sign
                     )
-                    leg1 = self._find_route_obstacles(via1, wp, via_id, net)
-                    if leg1:
+                    if self._find_route_obstacles(via1, wp, via_id, net):
                         continue
-                    leg2 = self._find_route_obstacles(wp, via2, via_id, net)
-                    if leg2:
+                    if self._find_route_obstacles(wp, via2, via_id, net):
                         continue
                     return self._emit_via_jumper(
                         from_pt, via1, via2, to_pt, [wp],
@@ -1908,13 +1942,80 @@ class RoutingCommands:
                         strategy="via_jumper_with_waypoint",
                     )
 
+            # --- Strategy D: 2D grid waypoint search ---
+            # For cases where the perpendicular-only search missed because
+            # the clear region is offset in both axes. Sweep ±waypoint_max
+            # in 1 mm steps, sorted by Manhattan distance from midpoint so
+            # we find the closest clear waypoint first.
+            mx = (via1.x + via2.x) / 2
+            my = (via1.y + via2.y) / 2
+            grid_range = int(waypoint_max_mm)
+            offsets = []
+            for ox in range(-grid_range, grid_range + 1):
+                for oy in range(-grid_range, grid_range + 1):
+                    if ox == 0 and oy == 0:
+                        continue
+                    offsets.append((ox, oy, abs(ox) + abs(oy)))
+            offsets.sort(key=lambda o: o[2])
+            for ox, oy, _ in offsets:
+                wp = pcbnew.VECTOR2I(
+                    int(mx + ox * 1_000_000), int(my + oy * 1_000_000)
+                )
+                if self._find_route_obstacles(via1, wp, via_id, net):
+                    continue
+                if self._find_route_obstacles(wp, via2, via_id, net):
+                    continue
+                return self._emit_via_jumper(
+                    from_pt, via1, via2, to_pt, [wp],
+                    from_layer, via_layer, width_mm,
+                    via_diam_mm, via_drill_mm, net, apply,
+                    strategy="via_jumper_with_grid_waypoint",
+                )
+
+            # --- Strategy E: 2-waypoint axis-aligned L-shape ---
+            # Genuine HVH or VHV detour around a blocking obstacle that
+            # spans the whole single-waypoint search region (e.g.
+            # BB_BOOT2-style long horizontal traces). Sweep the extension
+            # axis in 1 mm steps within ±waypoint_max.
+            for ext_mm in range(1, int(waypoint_max_mm) + 1):
+                for sign in (+1, -1):
+                    # HVH (horizontal extension): c1 = (via1.x + ext, via1.y),
+                    # c2 = (via1.x + ext, via2.y)
+                    ext_x = int(via1.x + sign * ext_mm * 1_000_000)
+                    c1 = pcbnew.VECTOR2I(ext_x, via1.y)
+                    c2 = pcbnew.VECTOR2I(ext_x, via2.y)
+                    if (not self._find_route_obstacles(via1, c1, via_id, net)
+                        and not self._find_route_obstacles(c1, c2, via_id, net)
+                        and not self._find_route_obstacles(c2, via2, via_id, net)):
+                        return self._emit_via_jumper(
+                            from_pt, via1, via2, to_pt, [c1, c2],
+                            from_layer, via_layer, width_mm,
+                            via_diam_mm, via_drill_mm, net, apply,
+                            strategy="via_jumper_hvh_lshape",
+                        )
+                    # VHV (vertical extension): c1 = (via1.x, via1.y + ext),
+                    # c2 = (via2.x, via1.y + ext)
+                    ext_y = int(via1.y + sign * ext_mm * 1_000_000)
+                    c1 = pcbnew.VECTOR2I(via1.x, ext_y)
+                    c2 = pcbnew.VECTOR2I(via2.x, ext_y)
+                    if (not self._find_route_obstacles(via1, c1, via_id, net)
+                        and not self._find_route_obstacles(c1, c2, via_id, net)
+                        and not self._find_route_obstacles(c2, via2, via_id, net)):
+                        return self._emit_via_jumper(
+                            from_pt, via1, via2, to_pt, [c1, c2],
+                            from_layer, via_layer, width_mm,
+                            via_diam_mm, via_drill_mm, net, apply,
+                            strategy="via_jumper_vhv_lshape",
+                        )
+
             return {
                 "success": False, "strategy": "blocked_on_via_layer",
                 "errorDetails": (
-                    f"viaLayer ({via_layer}) straight route blocked, and no "
-                    f"perpendicular-offset waypoint within ±{waypoint_max_mm} mm "
-                    "could clear it. Try a different viaLayer (e.g. an inner "
-                    "copper layer), or hand-route around the obstacle."
+                    f"viaLayer ({via_layer}) is blocked: tried straight, "
+                    f"perpendicular-offset waypoint, 2D grid search, and "
+                    f"axis-aligned L-shape within ±{waypoint_max_mm} mm — "
+                    "all hit foreign-net copper. Try a different viaLayer, "
+                    "increase waypointSearchMax, or hand-route around."
                 ),
                 "via1": _pt_dict(via1),
                 "via2": _pt_dict(via2),

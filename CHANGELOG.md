@@ -4,6 +4,40 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### find_via_lane v2: minimumStubLength + 2D grid + L-shape (develop, 2026-05-18)
+
+Live-testing v1 against power_module surfaced two limitations:
+
+  - **Via on pad**: For the J1.A9 USB_VBUS case (USB-C pad column with
+    0.5 mm pitch), the safe via insertion zone was only 0.5 mm from
+    the pad — so v1's pull-back landed the via 6 µm from the pad
+    center, effectively inside the pad's solder area. Bad for a
+    USB-C female receptacle.
+  - **Single-waypoint exhaustion**: For C26.1 BB_VCC the only viable
+    detour is an L-shape (HVH) around BB_BOOT2's east end, but v1's
+    perpendicular-offset-only search couldn't find it.
+
+v2 adds:
+
+  - **`minimumStubLength` param** (default 0, off; set ≥1 mm when
+    routing to/from real pads). If the safe via insertion point is
+    closer than this to the source or target, the tool refuses with
+    `stub_too_short_source` / `stub_too_short_target` strategy and
+    suggests hand-routing a longer stub first.
+  - **Strategy D: 2D grid waypoint search** — after the perpendicular
+    Strategy C fails, sweep a 1 mm grid of waypoint offsets within
+    ±waypointSearchMax, sorted by Manhattan distance from midpoint so
+    the closest clear waypoint wins.
+  - **Strategy E: axis-aligned 2-waypoint L-shape** — true HVH and
+    VHV detours around obstacles that span the whole single-waypoint
+    region. Sweep extension axis in 1 mm steps in both directions.
+
+For C26 specifically, even Strategy E still fails on power_module
+because BB_FB's diagonal sits across the natural east-detour
+corridor — confirming that case needs board-level re-route or via to
+an inner copper layer (which would cut the GND pour). That's not a
+tool-fix; documented in NOTES.
+
 ### find_via_lane (new tool, develop, 2026-05-18)
 
 When `route_pad_to_pad` returns "Route blocked" and the obstacles
