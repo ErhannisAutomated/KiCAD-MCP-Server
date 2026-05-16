@@ -1759,6 +1759,314 @@ class RoutingCommands:
         dy = p1.y - p2.y
         return (dx * dx + dy * dy) ** 0.5
 
+    def find_via_lane(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Propose a via-jumper route when the direct same-layer path is
+        blocked by foreign-net copper. Tries (in order):
+
+          A. Direct: straight segment on fromLayer. If clear → done.
+          B. Via-jumper: place via1 in fromLayer's clear zone near source
+             and via2 in fromLayer's clear zone near target; connect them
+             with a straight segment on viaLayer.
+          C. Via-jumper with waypoint: same vias, but search for a
+             perpendicular-offset waypoint on viaLayer that lets a
+             2-segment route around the blocking obstacle.
+
+        Inputs:
+          from, to        — {x, y, unit} points OR {ref, pad} pad lookups
+          net             — net name (required)
+          fromLayer       — default F.Cu
+          viaLayer        — default B.Cu
+          width           — trace width mm (default 0.2)
+          viaDiameter     — via outer diameter mm (default 0.6)
+          viaDrill        — via drill mm (default 0.3)
+          safetyMargin    — pull-back from first obstacle on fromLayer
+                            when placing vias, mm (default 0.5)
+          waypointSearchMax — max perpendicular offset for strategy C,
+                              mm (default 10)
+          apply           — if true, commit the proposed route; else preview
+
+        Returns {success, strategy, path, vias} on success, or
+        {success: false, strategy, obstacles, ...} on failure with the
+        diagnostic of what blocked which leg.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            net = params.get("net")
+            if not net:
+                return {
+                    "success": False,
+                    "message": "Missing net",
+                    "errorDetails": "net parameter is required",
+                }
+
+            from_layer = params.get("fromLayer", "F.Cu")
+            via_layer = params.get("viaLayer", "B.Cu")
+            from_id = self.board.GetLayerID(from_layer)
+            via_id = self.board.GetLayerID(via_layer)
+            if from_id < 0 or via_id < 0:
+                return {
+                    "success": False,
+                    "message": "Invalid layer",
+                    "errorDetails": f"Bad fromLayer/viaLayer: {from_layer}/{via_layer}",
+                }
+
+            width_mm = float(params.get("width", 0.2))
+            via_diam_mm = float(params.get("viaDiameter", 0.6))
+            via_drill_mm = float(params.get("viaDrill", 0.3))
+            margin_mm = float(params.get("safetyMargin", 0.5))
+            margin_iu = int(margin_mm * 1_000_000)
+            waypoint_max_mm = float(params.get("waypointSearchMax", 10.0))
+            apply = bool(params.get("apply", False))
+
+            from_pt = self._resolve_route_endpoint(params.get("from"))
+            to_pt = self._resolve_route_endpoint(params.get("to"))
+            if from_pt is None or to_pt is None:
+                return {
+                    "success": False,
+                    "message": "Could not resolve from/to",
+                    "errorDetails": (
+                        "Each of `from` and `to` must be either {x, y, unit} "
+                        "or {ref, pad} with a real footprint pad."
+                    ),
+                }
+
+            def _pt_dict(pt) -> Dict[str, Any]:
+                return {"x": pt.x / 1e6, "y": pt.y / 1e6, "unit": "mm"}
+
+            # --- Strategy A: direct on fromLayer ---
+            obs_a = self._find_route_obstacles(from_pt, to_pt, from_id, net)
+            if not obs_a:
+                path = [{
+                    "kind": "track", "layer": from_layer, "width": width_mm,
+                    "net": net,
+                    "start": _pt_dict(from_pt), "end": _pt_dict(to_pt),
+                }]
+                if apply:
+                    self.route_trace({
+                        "start": _pt_dict(from_pt), "end": _pt_dict(to_pt),
+                        "layer": from_layer, "width": width_mm, "net": net,
+                        "checkObstacles": False,
+                    })
+                return {
+                    "success": True, "strategy": "direct", "applied": apply,
+                    "path": path, "vias": [],
+                    "message": "Direct same-layer route is clear; no via needed.",
+                }
+
+            # --- Strategy B prep: find safe via insertion points on fromLayer ---
+            via1 = self._find_safe_via_point(
+                from_pt, to_pt, from_id, net, margin_iu
+            )
+            via2 = self._find_safe_via_point(
+                to_pt, from_pt, from_id, net, margin_iu
+            )
+            if via1 is None or via2 is None:
+                return {
+                    "success": False, "strategy": "no_safe_via_zone",
+                    "errorDetails": (
+                        "No clear zone on fromLayer adjacent to "
+                        + ("source" if via1 is None else "target")
+                        + " (obstacle hits before the safety margin). "
+                        "Add a small clear region or shorten safetyMargin."
+                    ),
+                    "obstaclesFromLayer": obs_a,
+                }
+
+            # --- Strategy B: straight via-jumper on viaLayer ---
+            obs_b = self._find_route_obstacles(via1, via2, via_id, net)
+            if not obs_b:
+                return self._emit_via_jumper(
+                    from_pt, via1, via2, to_pt, [], from_layer, via_layer,
+                    width_mm, via_diam_mm, via_drill_mm, net, apply,
+                    strategy="via_jumper",
+                )
+
+            # --- Strategy C: search for a single perpendicular-offset waypoint ---
+            for offset_mm in [
+                x * 0.5 for x in range(1, int(waypoint_max_mm * 2) + 1)
+            ]:
+                for sign in (+1, -1):
+                    wp = self._perpendicular_offset_midpoint(
+                        via1, via2, offset_mm * sign
+                    )
+                    leg1 = self._find_route_obstacles(via1, wp, via_id, net)
+                    if leg1:
+                        continue
+                    leg2 = self._find_route_obstacles(wp, via2, via_id, net)
+                    if leg2:
+                        continue
+                    return self._emit_via_jumper(
+                        from_pt, via1, via2, to_pt, [wp],
+                        from_layer, via_layer, width_mm,
+                        via_diam_mm, via_drill_mm, net, apply,
+                        strategy="via_jumper_with_waypoint",
+                    )
+
+            return {
+                "success": False, "strategy": "blocked_on_via_layer",
+                "errorDetails": (
+                    f"viaLayer ({via_layer}) straight route blocked, and no "
+                    f"perpendicular-offset waypoint within ±{waypoint_max_mm} mm "
+                    "could clear it. Try a different viaLayer (e.g. an inner "
+                    "copper layer), or hand-route around the obstacle."
+                ),
+                "via1": _pt_dict(via1),
+                "via2": _pt_dict(via2),
+                "obstaclesViaLayerStraight": obs_b,
+            }
+
+        except Exception as e:
+            logger.error(f"Error in find_via_lane: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to find via lane",
+                "errorDetails": str(e),
+            }
+
+    def _resolve_route_endpoint(self, spec):
+        """Resolve a from/to spec to a VECTOR2I. spec is either
+        {x, y, unit} or {ref, pad}."""
+        if not spec:
+            return None
+        # XY form
+        if "x" in spec and "y" in spec:
+            return self._get_point(spec)
+        # Pad form
+        ref = spec.get("ref")
+        pad_num = spec.get("pad")
+        if ref is None or pad_num is None:
+            return None
+        fp = self.board.FindFootprintByReference(str(ref))
+        if not fp:
+            return None
+        for pad in fp.Pads():
+            if pad.GetNumber() == str(pad_num):
+                return pad.GetPosition()
+        return None
+
+    def _find_safe_via_point(self, from_pt, to_pt, layer_id, net,
+                              margin_iu, n_samples: int = 40):
+        """Walk from from_pt toward to_pt on layer; return the furthest
+        point along the line where the segment from_pt→point is clear,
+        pulled back by margin_iu along the direction. None if no clear
+        point exists (i.e. obstacle is too close to from_pt)."""
+        dx = to_pt.x - from_pt.x
+        dy = to_pt.y - from_pt.y
+        total = (dx * dx + dy * dy) ** 0.5
+        if total == 0:
+            return from_pt
+        best_t = 0.0
+        for i in range(1, n_samples + 1):
+            t = i / n_samples
+            px = int(from_pt.x + t * dx)
+            py = int(from_pt.y + t * dy)
+            pt = pcbnew.VECTOR2I(px, py)
+            if self._find_route_obstacles(from_pt, pt, layer_id, net):
+                break
+            best_t = t
+        if best_t == 0.0:
+            return None
+        # Pull back margin_iu along the direction
+        best_len = best_t * total
+        if best_len <= margin_iu:
+            return None
+        pull_t = (best_len - margin_iu) / total
+        return pcbnew.VECTOR2I(
+            int(from_pt.x + pull_t * dx),
+            int(from_pt.y + pull_t * dy),
+        )
+
+    def _perpendicular_offset_midpoint(self, a, b, offset_mm: float):
+        """Midpoint of segment a→b shifted by offset_mm perpendicular to
+        the segment. Positive offset_mm = left side (rot +90° from a→b)."""
+        dx = b.x - a.x
+        dy = b.y - a.y
+        seg_len = (dx * dx + dy * dy) ** 0.5
+        if seg_len == 0:
+            return a
+        # Perpendicular unit (rot +90°): (-dy, dx) / seg_len
+        offset_iu = offset_mm * 1_000_000
+        pdx = -dy / seg_len * offset_iu
+        pdy = dx / seg_len * offset_iu
+        mx = (a.x + b.x) / 2 + pdx
+        my = (a.y + b.y) / 2 + pdy
+        return pcbnew.VECTOR2I(int(mx), int(my))
+
+    def _emit_via_jumper(self, from_pt, via1, via2, to_pt, waypoints,
+                          from_layer, via_layer, width_mm,
+                          via_diam_mm, via_drill_mm, net, apply,
+                          strategy: str) -> Dict[str, Any]:
+        """Build the path/vias result for a via-jumper route, and commit
+        the segments+vias if apply=true. waypoints is the list of
+        intermediate viaLayer points between via1 and via2 (empty for
+        straight, [wp] for 1-bend)."""
+        def _pt_dict(pt):
+            return {"x": pt.x / 1e6, "y": pt.y / 1e6, "unit": "mm"}
+
+        path = [
+            {"kind": "track", "layer": from_layer, "width": width_mm,
+             "net": net, "start": _pt_dict(from_pt), "end": _pt_dict(via1)},
+        ]
+        prev = via1
+        for wp in waypoints:
+            path.append(
+                {"kind": "track", "layer": via_layer, "width": width_mm,
+                 "net": net, "start": _pt_dict(prev), "end": _pt_dict(wp)}
+            )
+            prev = wp
+        path.append(
+            {"kind": "track", "layer": via_layer, "width": width_mm,
+             "net": net, "start": _pt_dict(prev), "end": _pt_dict(via2)}
+        )
+        path.append(
+            {"kind": "track", "layer": from_layer, "width": width_mm,
+             "net": net, "start": _pt_dict(via2), "end": _pt_dict(to_pt)}
+        )
+        vias = [
+            {"position": _pt_dict(via1), "diameter": via_diam_mm,
+             "drill": via_drill_mm, "net": net,
+             "from_layer": from_layer, "to_layer": via_layer},
+            {"position": _pt_dict(via2), "diameter": via_diam_mm,
+             "drill": via_drill_mm, "net": net,
+             "from_layer": via_layer, "to_layer": from_layer},
+        ]
+
+        if apply:
+            for seg in path:
+                r = self.route_trace({
+                    "start": seg["start"], "end": seg["end"],
+                    "layer": seg["layer"], "width": seg["width"],
+                    "net": seg["net"], "checkObstacles": False,
+                })
+                if not r.get("success"):
+                    return {
+                        "success": False,
+                        "message": "Failed to commit segment",
+                        "errorDetails": r.get("errorDetails", str(r)),
+                        "partialPath": path, "partialVias": vias,
+                    }
+            for v in vias:
+                self.add_via({
+                    "position": v["position"], "size": v["diameter"],
+                    "drill": v["drill"], "net": v["net"],
+                    "from_layer": v["from_layer"], "to_layer": v["to_layer"],
+                })
+
+        return {
+            "success": True, "strategy": strategy, "applied": apply,
+            "path": path, "vias": vias,
+            "message": (
+                f"{'Committed' if apply else 'Proposed'} via-jumper: "
+                f"{len(path)} segments + {len(vias)} vias on net '{net}'"
+            ),
+        }
+
     def check_route_segment(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Pre-flight check: would a straight segment from start to end on
         the given layer (for the given net) cross foreign-net copper?

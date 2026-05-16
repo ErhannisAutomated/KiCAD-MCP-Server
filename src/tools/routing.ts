@@ -69,6 +69,63 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Find via lane tool — proposes via-jumper around F.Cu blockers
+  server.tool(
+    "find_via_lane",
+    "Propose a via-jumper route when the direct same-layer path is blocked by foreign-net copper. Tries direct → via-jumper with straight viaLayer route → via-jumper with single-waypoint detour, returning the first that clears. Default is preview (proposed segments + via points); pass apply=true to commit. Source/target can be either explicit XY or {ref, pad} pad lookup. Use this when route_pad_to_pad returns 'Route blocked' and the obstacles can't be cleared with a same-layer waypoint.",
+    {
+      from: z
+        .object({
+          x: z.number().optional(),
+          y: z.number().optional(),
+          unit: z.string().optional(),
+          ref: z.string().optional(),
+          pad: z.union([z.string(), z.number()]).optional(),
+        })
+        .describe("Source: either {x, y, unit} XY or {ref, pad} pad lookup."),
+      to: z
+        .object({
+          x: z.number().optional(),
+          y: z.number().optional(),
+          unit: z.string().optional(),
+          ref: z.string().optional(),
+          pad: z.union([z.string(), z.number()]).optional(),
+        })
+        .describe("Target: either {x, y, unit} XY or {ref, pad} pad lookup."),
+      net: z.string().describe("Net name (required)."),
+      fromLayer: z.string().optional().describe("Primary layer (default F.Cu)."),
+      viaLayer: z.string().optional().describe("Layer to jump through (default B.Cu)."),
+      width: z.number().optional().describe("Trace width mm (default 0.2)."),
+      viaDiameter: z.number().optional().describe("Via outer diameter mm (default 0.6)."),
+      viaDrill: z.number().optional().describe("Via drill mm (default 0.3)."),
+      safetyMargin: z
+        .number()
+        .optional()
+        .describe(
+          "Pull-back from first obstacle on fromLayer when placing vias, mm (default 0.5).",
+        ),
+      waypointSearchMax: z
+        .number()
+        .optional()
+        .describe("Max perpendicular offset for waypoint search, mm (default 10)."),
+      apply: z
+        .boolean()
+        .optional()
+        .describe("Commit the proposed route (default false = preview)."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("find_via_lane", args);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
   // Check route segment tool (pre-flight, no commit)
   server.tool(
     "check_route_segment",

@@ -4,6 +4,38 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### find_via_lane (new tool, develop, 2026-05-18)
+
+When `route_pad_to_pad` returns "Route blocked" and the obstacles
+form a "fence" of stubs (TSSOP/QFP pad rows, perpendicular driver
+traces) that can't be cleared by waypointing on the same layer, the
+fix is a via-jumper through another layer. Today the agent had to
+hand-compute this for C26.1 BB_VCC on power_module and ultimately
+deferred it to GUI work.
+
+New `find_via_lane` tool proposes via-jumper routes by trying three
+strategies in order:
+  - **A. Direct**: straight same-layer segment. If clear → done.
+  - **B. Via-jumper**: walk fromLayer from source/target toward each
+    other, find the safe insertion point just before the first
+    obstacle on each side (pulled back by safetyMargin), drop a via
+    there, route straight through viaLayer. If clear → done.
+  - **C. Via-jumper with waypoint**: same vias as B, but search for
+    a perpendicular-offset midpoint waypoint on viaLayer that turns
+    the straight viaLayer hop into a 2-segment detour around the
+    blocking obstacle. Brute-force in 0.5 mm steps up to
+    `waypointSearchMax`.
+
+Default is preview (proposed segments + via positions, no commit).
+Pass `apply=true` to actually route. Source/target accept either
+explicit XY or `{ref, pad}` pad lookup.
+
+Limitations of this v1: single-waypoint only (no L-shapes), single
+viaLayer (no inner-copper fallback), no obstacle-geometry-aware
+detour direction selection (brute-force both sides). Good enough for
+the C26 class of case (BB_BOOT2 east-end detour); follow-up when a
+harder case shows up.
+
 ### dedupe_traces (new tool, develop, 2026-05-18)
 
 Autoroute SES re-imports leave behind exact-duplicate tracks — same

@@ -787,6 +787,79 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "find_via_lane",
+        "title": "Find Via Lane",
+        "description": (
+            "Propose a via-jumper route when the direct same-layer path is "
+            "blocked by foreign-net copper. Tries direct → via-jumper "
+            "straight → via-jumper with single-waypoint detour, returning "
+            "the first that clears. Default is preview (proposed segments "
+            "+ via points); pass apply=true to commit."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "from": {
+                    "type": "object",
+                    "description": (
+                        "Source: either {x, y, unit} XY or {ref, pad} pad lookup."
+                    ),
+                },
+                "to": {
+                    "type": "object",
+                    "description": (
+                        "Target: either {x, y, unit} XY or {ref, pad} pad lookup."
+                    ),
+                },
+                "net": {
+                    "type": "string",
+                    "description": "Net name (required).",
+                },
+                "fromLayer": {
+                    "type": "string",
+                    "description": "Primary layer (default F.Cu).",
+                },
+                "viaLayer": {
+                    "type": "string",
+                    "description": "Layer to jump through (default B.Cu).",
+                },
+                "width": {
+                    "type": "number",
+                    "description": "Trace width in mm (default 0.2).",
+                },
+                "viaDiameter": {
+                    "type": "number",
+                    "description": "Via outer diameter mm (default 0.6).",
+                },
+                "viaDrill": {
+                    "type": "number",
+                    "description": "Via drill mm (default 0.3).",
+                },
+                "safetyMargin": {
+                    "type": "number",
+                    "description": (
+                        "Pull-back from first obstacle on fromLayer when "
+                        "placing vias, mm (default 0.5)."
+                    ),
+                },
+                "waypointSearchMax": {
+                    "type": "number",
+                    "description": (
+                        "Max perpendicular offset for waypoint search, mm "
+                        "(default 10)."
+                    ),
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": (
+                        "Commit the proposed route (default false = preview)."
+                    ),
+                },
+            },
+            "required": ["from", "to", "net"],
+        },
+    },
+    {
         "name": "check_route_segment",
         "title": "Check Route Segment",
         "description": (
