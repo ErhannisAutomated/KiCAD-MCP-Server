@@ -21,10 +21,14 @@ Three subchecks (selectable via `checks=[...]`):
   geometrically valid). **Mixed drift** (pads off by different deltas)
   → error (the catastrophic shape-corruption case).
 
-- **`footprint_overlap`** — one footprint's centre falls inside
-  another's silk-excluded bbox on the SAME copper layer. Same-layer
-  filter prevents the obvious false positive of front-side parts
-  nested under a back-side battery holder.
+- **`footprint_overlap`** — silk-excluded bbox-overlap detection on
+  the SAME copper layer (refined 2026-05-16 from the original
+  centre-inside-bbox per user feedback — partial overlaps are just as
+  much a bug as full nesting). Reports overlap area in mm². Severity:
+  **error** if area > 0.1 mm² OR one centre is inside the other's
+  bbox (full nesting, the C24-inside-L2 bug); **warning** otherwise.
+  Edge-touch slivers below `min_overlap_mm2` (default 0.01) skipped.
+  Same-layer filter prevents the obvious front/back false positives.
 
 - **`stacked_pads`** — within a single footprint, ≥2 differently-
   numbered pads on DIFFERENT nets at the same XY. Skip rules: same
@@ -33,12 +37,13 @@ Three subchecks (selectable via `checks=[...]`):
   real bug.
 
 Implementation in `python/commands/integrity.py`. Tested on
-power_module v11c: detected 2 cosmetic pad-rotation warnings on
-R26/R27 — real signal of past `apply_positions.py` damage, but
-electrically benign for symmetric resistor pads.
+power_module v11c: detected 3 real bbox-overlap errors (R10/L1,
+L2/C25, R25/J1 — partial overlaps 0.15-0.26 mm²) and 2 cosmetic
+pad-rotation warnings on R26/R27 (remnants of past `apply_positions.py`
+damage, electrically benign for symmetric resistor pads).
 
-Tests: 16 new in `tests/test_pcb_integrity.py` (mocked BOARD/FP/PAD).
-1083 total passing.
+Tests: 19 in `tests/test_pcb_integrity.py` (mocked BOARD/FP/PAD).
+1086 total passing.
 
 ### get_drc_violations: include unconnected_items, add filters (develop, 2026-05-16)
 

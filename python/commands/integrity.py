@@ -139,21 +139,34 @@ def check_pad_rotation(board: Any) -> List[Dict[str, Any]]:
     return findings
 
 
-def check_footprint_overlap(board: Any) -> List[Dict[str, Any]]:
-    """Find footprints whose CENTRES fall inside another footprint's
-    silk-excluded bbox on the SAME copper layer.
+_MIN_OVERLAP_MM2 = 0.01  # below this, just edges touching — skip
+
+
+def check_footprint_overlap(board: Any, min_overlap_mm2: float = _MIN_OVERLAP_MM2) -> List[Dict[str, Any]]:
+    """Find footprints whose silk-excluded bboxes overlap on the SAME
+    copper layer.
+
+    Returns one finding per overlapping pair, with the overlap area
+    reported so callers can judge severity. Overlaps below
+    ``min_overlap_mm2`` (default 0.01 mm² — basically just edges
+    touching) are skipped.
+
+    Severity scaling:
+      * **error** if overlap area > 0.1 mm² (meaningful collision) OR
+        one footprint's centre is inside the other's bbox (full nesting,
+        like the 2026-05-14 C24-inside-L2 bug).
+      * **warning** otherwise (small overlap; usually a tight-but-legal
+        placement worth a look).
 
     Same-layer filter prevents the obvious false positive of front-side
     components nested under a back-side battery holder.
     """
     findings: List[Dict[str, Any]] = []
-    # Collect (fp, centre, bbox, layer) for every footprint.
     fps_info = []
     for fp in board.GetFootprints():
         pos = fp.GetPosition()
         bb = fp.GetBoundingBox(False)
         fps_info.append({
-            "fp": fp,
             "ref": fp.GetReference(),
             "centre": (pos.x, pos.y),
             "bbox": (bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom()),
@@ -161,32 +174,56 @@ def check_footprint_overlap(board: Any) -> List[Dict[str, Any]]:
             "layer_name": _fp_layer_name(board, fp),
         })
 
-    for inner in fps_info:
-        cx, cy = inner["centre"]
-        for outer in fps_info:
-            if inner is outer:
+    n = len(fps_info)
+    for i in range(n):
+        a = fps_info[i]
+        al, at, ar, ab = a["bbox"]
+        for j in range(i + 1, n):
+            b = fps_info[j]
+            if a["layer"] != b["layer"]:
                 continue
-            if inner["layer"] != outer["layer"]:
+            bl, bt, br, bb_ = b["bbox"]
+            ix0 = max(al, bl)
+            iy0 = max(at, bt)
+            ix1 = min(ar, br)
+            iy1 = min(ab, bb_)
+            if ix0 >= ix1 or iy0 >= iy1:
                 continue
-            l, t, r, b = outer["bbox"]
-            if l <= cx <= r and t <= cy <= b:
-                findings.append({
-                    "type": "footprint_centre_inside_other",
-                    "severity": "error",
-                    "ref": inner["ref"],
-                    "inside_of": outer["ref"],
-                    "layer": inner["layer_name"],
-                    "position": {
-                        "x": cx / 1_000_000,
-                        "y": cy / 1_000_000,
-                        "unit": "mm",
-                    },
-                    "message": (
-                        f"{inner['ref']} centre falls inside {outer['ref']}'s "
-                        f"bbox on {inner['layer_name']}. Likely a placement bug."
-                    ),
-                })
-                break  # one finding per inner is enough
+            area_mm2 = ((ix1 - ix0) * (iy1 - iy0)) / 1_000_000_000_000
+            if area_mm2 < min_overlap_mm2:
+                continue
+            # Detect full nesting — either centre inside the other's bbox.
+            ax, ay = a["centre"]
+            bx, by = b["centre"]
+            a_in_b = bl <= ax <= br and bt <= ay <= bb_
+            b_in_a = al <= bx <= ar and at <= by <= ab
+            full_nesting = a_in_b or b_in_a
+            severity = "error" if (area_mm2 > 0.1 or full_nesting) else "warning"
+            nesting_note = ""
+            if a_in_b:
+                nesting_note = f" {a['ref']} centre is INSIDE {b['ref']}."
+            elif b_in_a:
+                nesting_note = f" {b['ref']} centre is INSIDE {a['ref']}."
+            findings.append({
+                "type": "footprint_bbox_overlap",
+                "severity": severity,
+                "ref_a": a["ref"],
+                "ref_b": b["ref"],
+                "layer": a["layer_name"],
+                "overlap_mm2": round(area_mm2, 3),
+                "overlap_w_mm": round((ix1 - ix0) / 1_000_000, 2),
+                "overlap_h_mm": round((iy1 - iy0) / 1_000_000, 2),
+                "full_nesting": full_nesting,
+                "position": {
+                    "x": (ix0 + ix1) / 2 / 1_000_000,
+                    "y": (iy0 + iy1) / 2 / 1_000_000,
+                    "unit": "mm",
+                },
+                "message": (
+                    f"{a['ref']} and {b['ref']} bboxes overlap by "
+                    f"{area_mm2:.3f} mm² on {a['layer_name']}." + nesting_note
+                ),
+            })
     return findings
 
 

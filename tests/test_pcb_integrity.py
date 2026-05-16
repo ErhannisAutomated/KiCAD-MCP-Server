@@ -148,9 +148,41 @@ class TestCheckFootprintOverlap:
         c24 = _mk_fp("C24", (62, 80), bbox=(61, 79, 63, 81))
         board = _mk_board([l2, c24])
         findings = check_footprint_overlap(board)
-        # Both detect each other since both centres are inside the other's bbox.
-        refs = sorted([(f["ref"], f["inside_of"]) for f in findings])
-        assert ("C24", "L2") in refs
+        assert len(findings) == 1
+        f = findings[0]
+        assert {f["ref_a"], f["ref_b"]} == {"L2", "C24"}
+        assert f["severity"] == "error"
+        assert f["full_nesting"] is True
+        assert f["overlap_mm2"] == 4.0  # 2×2 mm² nested fully
+
+    def test_partial_overlap_above_error_threshold(self):
+        # Two footprints overlapping by 0.5×2 = 1 mm² — above 0.1.
+        # Centres (0,0) and (1.5,0) are each outside the other's bbox.
+        a = _mk_fp("R1", (0, 0), bbox=(-1, -1, 1, 1))
+        b = _mk_fp("R2", (1.5, 0), bbox=(0.5, -1, 2.5, 1))
+        board = _mk_board([a, b])
+        findings = check_footprint_overlap(board)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "error"
+        assert findings[0]["overlap_mm2"] == 1.0
+        assert findings[0]["full_nesting"] is False
+
+    def test_small_overlap_is_warning(self):
+        # 0.5 × 0.05 = 0.025 mm² — above default min_overlap (0.01) but
+        # below error threshold (0.1).
+        a = _mk_fp("R1", (0, 0), bbox=(-1, -1, 1, 1))
+        b = _mk_fp("R2", (1.45, 0), bbox=(0.5, -0.05, 2.5, 0.05))
+        board = _mk_board([a, b])
+        findings = check_footprint_overlap(board)
+        assert len(findings) == 1
+        assert findings[0]["severity"] == "warning"
+
+    def test_edge_touch_skipped(self):
+        # Sliver overlap (0.005 mm²) — below default min_overlap.
+        a = _mk_fp("R1", (0, 0), bbox=(-1, -1, 1, 1))
+        b = _mk_fp("R2", (1.49, 0), bbox=(0.5, -0.005, 2.5, 0.005))
+        board = _mk_board([a, b])
+        assert check_footprint_overlap(board) == []
 
     def test_same_layer_required(self):
         # Front-side cap "inside" back-side battery holder is fine.
