@@ -356,7 +356,7 @@ export function registerComponentTools(server: McpServer, callKicadScript: Comma
   // ------------------------------------------------------
   server.tool(
     "get_component_pads",
-    "Return all pads of a PCB component with their positions, net assignments and sizes.",
+    "Return all pads of a PCB component with their positions, net assignments, sizes, and copper layers. Each pad has a `layers` field: an SMD pad will list one copper layer (F.Cu or B.Cu — check this before routing, since routing on the wrong side produces a dangling track and unconnected_items DRC error), while through-hole/NPTH pads list the full Cu stack.",
     {
       reference: z.string().describe("Reference designator of the component (e.g., 'U1')"),
       unit: z.enum(["mm", "inch"]).optional().describe("Unit for coordinates (default: mm)"),

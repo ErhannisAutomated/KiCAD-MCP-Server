@@ -4,6 +4,23 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### get_component_pads: return `layers` per pad (develop, 2026-05-16)
+
+`get_component_pads` previously omitted which copper layer(s) each
+pad sits on — for SMD pads this is critical (F.Cu vs B.Cu determines
+which layer you must route on), and the workaround was to grep the
+`.kicad_pcb` file or test-route and watch DRC for `track_dangling`.
+
+Adds a `layers` field per pad: a list of enabled copper layer names
+(from `pad.GetLayerSet()` filtered through `IsCopperLayer` and
+`board.IsLayerEnabled`). SMD pads get one entry (e.g. `["B.Cu"]`),
+through-hole/NPTH get the full board Cu stack (e.g.
+`["F.Cu", "B.Cu", "In1.Cu", "In2.Cu"]` on a 4-layer board).
+
+Forcing function: 2026-05-16 BAT1 reroute session, where assuming
+F.Cu for cell-holder SMD pads cost a 10-min revert. Documented in
+feedback_check_pad_layer memory.
+
 ### find_via_lane v3: obstacle-bbox-aware L-shape (develop, 2026-05-16)
 
 v2's Strategies D (2D grid) and E (axis-aligned L-shape) sweep

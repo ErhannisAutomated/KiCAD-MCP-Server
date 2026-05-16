@@ -590,6 +590,18 @@ class ComponentCommands:
                 }
                 pad_type = type_map.get(pad.GetAttribute(), "unknown")
 
+                # Copper layers the pad sits on. For SMD this is one layer
+                # (F.Cu or B.Cu — required to know before routing, since
+                # routing on the wrong side produces a dangling track and
+                # an unconnected_items error). For through-hole/NPTH this
+                # is the full Cu stack.
+                cu_layers = [
+                    self.board.GetLayerName(lid)
+                    for lid in pad.GetLayerSet().Seq()
+                    if pcbnew.IsCopperLayer(lid)
+                    and self.board.IsLayerEnabled(lid)
+                ]
+
                 pads.append(
                     {
                         "name": pad.GetName(),
@@ -603,6 +615,7 @@ class ComponentCommands:
                         "drillSize": (
                             pad.GetDrillSize().x / 1000000 if pad.GetDrillSize().x > 0 else None
                         ),
+                        "layers": cu_layers,
                     }
                 )
 

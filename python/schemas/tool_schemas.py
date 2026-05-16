@@ -537,7 +537,14 @@ COMPONENT_TOOLS = [
     {
         "name": "get_component_pads",
         "title": "Get Component Pads",
-        "description": "Returns all pads for a component with their positions, net connections, sizes, and shapes.",
+        "description": (
+            "Returns all pads for a component with positions, net "
+            "connections, sizes, shapes, and copper layers. Each pad's "
+            "`layers` field lists which Cu layer(s) the pad sits on — "
+            "SMD pads return a single layer (F.Cu or B.Cu); routing on "
+            "the wrong side produces a dangling track + unconnected_items "
+            "DRC error. Through-hole/NPTH pads return the full Cu stack."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
