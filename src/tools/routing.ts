@@ -72,7 +72,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Find via lane tool — proposes via-jumper around F.Cu blockers
   server.tool(
     "find_via_lane",
-    "Propose a via-jumper route when the direct same-layer path is blocked by foreign-net copper. Tries direct → via-jumper with straight viaLayer route → via-jumper with single-waypoint detour, returning the first that clears. Default is preview (proposed segments + via points); pass apply=true to commit. Source/target can be either explicit XY or {ref, pad} pad lookup. Use this when route_pad_to_pad returns 'Route blocked' and the obstacles can't be cleared with a same-layer waypoint.",
+    "Propose a via-jumper route when the direct same-layer path is blocked by foreign-net copper. Tries (in order): direct on fromLayer → straight via-jumper on viaLayer → single perpendicular-offset waypoint → 2D grid waypoint search → axis-aligned L-shape (blind sweep) → obstacle-bbox-aware L-shape (v3: routes past the union bbox of via-layer blockers, so it escapes long obstacles a blind ±waypointSearchMax sweep can't). Returns the first strategy that clears. Default is preview (proposed segments + via points); pass apply=true to commit. Source/target can be either explicit XY or {ref, pad} pad lookup. Use this when route_pad_to_pad returns 'Route blocked' and the obstacles can't be cleared with a same-layer waypoint.",
     {
       from: z
         .object({

@@ -4,6 +4,64 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### find_via_lane v3: obstacle-bbox-aware L-shape (develop, 2026-05-16)
+
+v2's Strategies D (2D grid) and E (axis-aligned L-shape) sweep
+candidate waypoints in 1 mm steps within `±waypointSearchMax` from
+the via-pair midpoint. That's a blind search: it has no idea where
+the blocker actually is, only that *somewhere* in the swept region
+the path is clear. For a long obstacle that spans more than
+`waypointSearchMax` (e.g. a 20 mm horizontal trace), the blind
+sweep simply never escapes — and raising `waypointSearchMax` to
+40 mm wastes CPU on candidates that obviously won't help.
+
+v3 adds **Strategy F: obstacle-bbox-aware L-shape**. When the
+via-layer is blocked, it:
+
+  1. Collects the actual `pcbnew` objects (tracks, vias, pads) that
+     block the straight via1→via2 segment via a new
+     `_iter_route_obstacles` generator (shared core with the
+     existing `_find_route_obstacles` string output — both now use
+     the same detection logic).
+  2. Computes their union bounding box (`_obstacle_union_bbox`,
+     factoring track widths, via diameters, real pad bboxes).
+  3. Tries 4 candidate L-shapes — one extending past each bbox
+     edge (`east_hvh`, `west_hvh`, `north_vhv`, `south_vhv`) plus a
+     clearance margin of `viaDiameter/2 + 0.25 mm`.
+
+If any L-shape's three legs all clear, returns
+`strategy: "via_jumper_bbox_<edge>"` with the standard path/vias
+shape. Otherwise the diagnostic output now includes:
+
+  - `obstacleBbox`: union bbox in mm (so a human can eyeball where
+    the blocker actually is).
+  - `bboxLshapesTried`: per-edge breakdown of which legs blocked
+    (with up to 3 obstacles each) — far more actionable than v2's
+    silent "blocked" string.
+
+**Refactor**: `_find_route_obstacles` now wraps the new shared
+`_iter_route_obstacles` generator. String output is byte-identical
+to before; all existing callers (`route_trace` checkObstacles,
+`route_pad_to_pad`, `check_route_segment`, and v3's own Strategy F)
+share the same obstacle-detection core.
+
+**Limitations** (known, deferred to a hypothetical v4):
+
+  - When via1 and via2 *straddle* the obstacle bbox (one north and
+    one south of a horizontal blocker, as in C26 BB_VCC vs
+    BB_BOOT2), the VHV detours are geometrically impossible — you
+    can't go around a horizontal blocker by going further
+    perpendicular to it. Only HVH east/west detours apply.
+  - When those HVH legs hit *secondary* obstacles (BB_FB diagonal
+    east, BB_SW1/BB_BOOT1 vias west for C26), a single L-shape
+    can't dodge them. Needs a **3-bend Z-shape** with the back-leg
+    X varied in a small sweep — that's queued as Strategy G.
+
+Verified on power_module: C26 case still fails (genuine 4-segment
+problem), but the new diagnostic output makes the structural
+blocker obvious in a single response instead of requiring multiple
+calls + manual obstacle hunting.
+
 ### find_via_lane v2: minimumStubLength + 2D grid + L-shape (develop, 2026-05-18)
 
 Live-testing v1 against power_module surfaced two limitations:

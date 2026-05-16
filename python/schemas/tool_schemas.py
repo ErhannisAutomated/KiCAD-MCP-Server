@@ -791,10 +791,13 @@ ROUTING_TOOLS = [
         "title": "Find Via Lane",
         "description": (
             "Propose a via-jumper route when the direct same-layer path is "
-            "blocked by foreign-net copper. Tries direct → via-jumper "
-            "straight → via-jumper with single-waypoint detour, returning "
-            "the first that clears. Default is preview (proposed segments "
-            "+ via points); pass apply=true to commit."
+            "blocked by foreign-net copper. Tries (in order): direct on "
+            "fromLayer → straight via-jumper on viaLayer → single "
+            "perpendicular-offset waypoint → 2D grid waypoint search → "
+            "axis-aligned L-shape (blind sweep) → obstacle-bbox-aware "
+            "L-shape (v3, escapes long blockers a blind sweep can't). "
+            "Returns the first strategy that clears. Default is preview "
+            "(proposed segments + via points); pass apply=true to commit."
         ),
         "inputSchema": {
             "type": "object",

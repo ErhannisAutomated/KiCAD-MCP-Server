@@ -1770,6 +1770,15 @@ class RoutingCommands:
           C. Via-jumper with waypoint: same vias, but search for a
              perpendicular-offset waypoint on viaLayer that lets a
              2-segment route around the blocking obstacle.
+          D. 2D grid waypoint search (1 mm steps within ±waypoint_max,
+             sorted by Manhattan distance from the midpoint).
+          E. Axis-aligned 2-waypoint L-shape (HVH or VHV) with blind
+             1 mm extension sweep within ±waypoint_max.
+          F. Obstacle-bbox-aware L-shape (v3): compute the union bbox of
+             obstacles blocking the straight via-layer segment, then try
+             4 L-shapes — one extending past each bbox edge + clearance
+             margin. Bypasses long blockers (e.g. a 20 mm horizontal
+             trace) that the blind ±waypoint_max sweep can't escape.
 
         Inputs:
           from, to        — {x, y, unit} points OR {ref, pad} pad lookups
@@ -2008,18 +2017,76 @@ class RoutingCommands:
                             strategy="via_jumper_vhv_lshape",
                         )
 
+            # --- Strategy F (v3): obstacle-bbox-aware L-shape ---
+            # The blind sweeps above step in 1 mm increments within
+            # ±waypoint_max from the midpoint, so they can't escape a
+            # long obstacle (e.g. a horizontal trace spanning 20 mm)
+            # unless waypoint_max happens to exceed half its length.
+            # v3: compute the union bbox of obstacles blocking via1→via2,
+            # then propose 4 candidate L-shapes — each extends past one
+            # bbox edge + clearance margin — so the detour is sized to
+            # the obstacle's actual extent, not a blind search radius.
+            obstacle_items = list(self._iter_route_obstacles(
+                via1, via2, via_id, net
+            ))
+            bbox = self._obstacle_union_bbox(obstacle_items)
+            tried_bbox = []
+            if bbox is not None:
+                xmin, ymin, xmax, ymax = bbox
+                # Clearance: via radius + 0.25 mm pad (covers default
+                # min-clearance for POWER_2A/etc). Hard-coded; expose
+                # later if a real case needs tuning.
+                clear_iu = int((via_diam_mm / 2 + 0.25) * 1_000_000)
+                edges = [
+                    ("east_hvh",  int(xmax + clear_iu), None),
+                    ("west_hvh",  int(xmin - clear_iu), None),
+                    ("north_vhv", None, int(ymin - clear_iu)),
+                    ("south_vhv", None, int(ymax + clear_iu)),
+                ]
+                for label, ext_x, ext_y in edges:
+                    if ext_x is not None:
+                        c1 = pcbnew.VECTOR2I(ext_x, via1.y)
+                        c2 = pcbnew.VECTOR2I(ext_x, via2.y)
+                    else:
+                        c1 = pcbnew.VECTOR2I(via1.x, ext_y)
+                        c2 = pcbnew.VECTOR2I(via2.x, ext_y)
+                    leg1 = self._find_route_obstacles(via1, c1, via_id, net)
+                    leg2 = self._find_route_obstacles(c1, c2, via_id, net)
+                    leg3 = self._find_route_obstacles(c2, via2, via_id, net)
+                    if not leg1 and not leg2 and not leg3:
+                        return self._emit_via_jumper(
+                            from_pt, via1, via2, to_pt, [c1, c2],
+                            from_layer, via_layer, width_mm,
+                            via_diam_mm, via_drill_mm, net, apply,
+                            strategy=f"via_jumper_bbox_{label}",
+                        )
+                    tried_bbox.append({
+                        "edge": label,
+                        "leg1_blocked": leg1[:3],
+                        "leg2_blocked": leg2[:3],
+                        "leg3_blocked": leg3[:3],
+                    })
+
             return {
                 "success": False, "strategy": "blocked_on_via_layer",
                 "errorDetails": (
                     f"viaLayer ({via_layer}) is blocked: tried straight, "
-                    f"perpendicular-offset waypoint, 2D grid search, and "
-                    f"axis-aligned L-shape within ±{waypoint_max_mm} mm — "
-                    "all hit foreign-net copper. Try a different viaLayer, "
-                    "increase waypointSearchMax, or hand-route around."
+                    f"perpendicular-offset waypoint, 2D grid search, "
+                    f"axis-aligned L-shape within ±{waypoint_max_mm} mm, "
+                    "and obstacle-bbox-aware L-shape — all hit foreign-net "
+                    "copper. Try a different viaLayer, increase "
+                    "waypointSearchMax, or hand-route around."
                 ),
                 "via1": _pt_dict(via1),
                 "via2": _pt_dict(via2),
                 "obstaclesViaLayerStraight": obs_b,
+                "obstacleBbox": (
+                    {"xmin": bbox[0] / 1e6, "ymin": bbox[1] / 1e6,
+                     "xmax": bbox[2] / 1e6, "ymax": bbox[3] / 1e6,
+                     "unit": "mm"}
+                    if bbox else None
+                ),
+                "bboxLshapesTried": tried_bbox,
             }
 
         except Exception as e:
@@ -2236,21 +2303,26 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
-    def _find_route_obstacles(
+    def _iter_route_obstacles(
         self,
         start: pcbnew.VECTOR2I,
         end: pcbnew.VECTOR2I,
         layer_id: int,
         net_name: str,
-    ) -> list:
-        """Return human-readable descriptions of foreign-net copper that a
-        straight segment start->end on layer_id would collide with.
+    ):
+        """Yield the foreign-net copper objects that a straight segment
+        start->end on layer_id would collide with. Each yielded item is
+        a tuple of (kind, obj[, extra]):
 
-        Checks tracks (same-layer segment intersection), vias (all layers,
-        centre within via radius of the segment) and pads (segment sampled
-        through the pad's real shape via HitTest). Empty list = clear path.
+          ("via", pcbnew.PCB_VIA)
+          ("track", pcbnew.PCB_TRACK)
+          ("pad", pcbnew.PAD, footprint_ref_str)
+
+        Shared core for both `_find_route_obstacles` (string output) and
+        `_obstacle_union_bbox` (bbox geometry). Same detection rules:
+        track segment intersection on layer, via centre within via radius
+        of segment (all layers), pad shape sampled along segment.
         """
-        obstacles: list = []
         sx, sy, ex, ey = start.x, start.y, end.x, end.y
 
         def seg_pt_dist(px: float, py: float) -> float:
@@ -2285,19 +2357,13 @@ class RoutingCommands:
                 except TypeError:
                     via_w = t.GetWidth()
                 if seg_pt_dist(pos.x, pos.y) < via_w / 2.0:
-                    obstacles.append(
-                        f"via on net '{t.GetNetname() or '<no net>'}' "
-                        f"at ({pos.x / 1e6:.2f},{pos.y / 1e6:.2f})"
-                    )
+                    yield ("via", t)
             else:
                 if t.GetLayer() != layer_id:
                     continue
                 ts, te = t.GetStart(), t.GetEnd()
                 if segs_cross(ts.x, ts.y, te.x, te.y):
-                    obstacles.append(
-                        f"track on net '{t.GetNetname() or '<no net>'}' "
-                        f"crossing near ({ts.x / 1e6:.2f},{ts.y / 1e6:.2f})"
-                    )
+                    yield ("track", t)
 
         # Pads — sample the segment through the pad's real shape
         steps = max(2, int(seg_len / 100000))  # ~0.1mm sampling
@@ -2321,10 +2387,82 @@ class RoutingCommands:
                     except Exception:
                         inside = bb.Contains(pcbnew.VECTOR2I(px, py))
                     if inside:
-                        obstacles.append(
-                            f"pad {fp.GetReference()}-{pad.GetNumber()} on net "
-                            f"'{pad.GetNetname() or '<no net>'}' "
-                            f"at ({pc.x / 1e6:.2f},{pc.y / 1e6:.2f})"
-                        )
+                        yield ("pad", pad, fp.GetReference())
                         break
-        return obstacles
+
+    def _find_route_obstacles(
+        self,
+        start: pcbnew.VECTOR2I,
+        end: pcbnew.VECTOR2I,
+        layer_id: int,
+        net_name: str,
+    ) -> list:
+        """Return human-readable descriptions of foreign-net copper that a
+        straight segment start->end on layer_id would collide with.
+
+        Checks tracks (same-layer segment intersection), vias (all layers,
+        centre within via radius of the segment) and pads (segment sampled
+        through the pad's real shape via HitTest). Empty list = clear path.
+        """
+        out: list = []
+        for item in self._iter_route_obstacles(start, end, layer_id, net_name):
+            kind = item[0]
+            if kind == "via":
+                t = item[1]
+                pos = t.GetPosition()
+                out.append(
+                    f"via on net '{t.GetNetname() or '<no net>'}' "
+                    f"at ({pos.x / 1e6:.2f},{pos.y / 1e6:.2f})"
+                )
+            elif kind == "track":
+                t = item[1]
+                ts = t.GetStart()
+                out.append(
+                    f"track on net '{t.GetNetname() or '<no net>'}' "
+                    f"crossing near ({ts.x / 1e6:.2f},{ts.y / 1e6:.2f})"
+                )
+            elif kind == "pad":
+                pad, fp_ref = item[1], item[2]
+                pc = pad.GetPosition()
+                out.append(
+                    f"pad {fp_ref}-{pad.GetNumber()} on net "
+                    f"'{pad.GetNetname() or '<no net>'}' "
+                    f"at ({pc.x / 1e6:.2f},{pc.y / 1e6:.2f})"
+                )
+        return out
+
+    def _obstacle_union_bbox(self, items) -> Optional[tuple]:
+        """Union bounding box of obstacle copper extents (IU, axis-aligned).
+
+        items: iterable of tuples from `_iter_route_obstacles`. Returns
+        (xmin, ymin, xmax, ymax) or None if items is empty. Track widths
+        and via diameters are factored in; pads use their real bbox.
+        Used by find_via_lane Strategy F to size detour L-shapes.
+        """
+        xs, ys = [], []
+        for item in items:
+            kind = item[0]
+            if kind == "track":
+                t = item[1]
+                s, e = t.GetStart(), t.GetEnd()
+                w = t.GetWidth()
+                xs.extend([s.x - w / 2, s.x + w / 2, e.x - w / 2, e.x + w / 2])
+                ys.extend([s.y - w / 2, s.y + w / 2, e.y - w / 2, e.y + w / 2])
+            elif kind == "via":
+                t = item[1]
+                p = t.GetPosition()
+                try:
+                    w = t.GetWidth(pcbnew.F_Cu)
+                except TypeError:
+                    w = t.GetWidth()
+                xs.extend([p.x - w / 2, p.x + w / 2])
+                ys.extend([p.y - w / 2, p.y + w / 2])
+            elif kind == "pad":
+                pad = item[1]
+                bb = pad.GetBoundingBox()
+                tl, br = bb.GetOrigin(), bb.GetEnd()
+                xs.extend([tl.x, br.x])
+                ys.extend([tl.y, br.y])
+        if not xs:
+            return None
+        return (min(xs), min(ys), max(xs), max(ys))
