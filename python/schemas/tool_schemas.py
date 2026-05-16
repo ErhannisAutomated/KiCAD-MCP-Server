@@ -1287,8 +1287,39 @@ DESIGN_RULE_TOOLS = [
     {
         "name": "get_drc_violations",
         "title": "Get DRC Violations",
-        "description": "Returns a list of design rule violations from the most recent DRC run.",
-        "inputSchema": {"type": "object", "properties": {}},
+        "description": "Return the consolidated list of DRC findings (violations + unconnected_items) with optional filtering. Each finding includes per-item details (position, uuid, parsed net/layer/length/component-ref).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "severity": {
+                    "type": "string",
+                    "enum": ["error", "warning", "info", "all"],
+                    "description": "Filter by severity (default 'all')",
+                    "default": "all",
+                },
+                "type": {
+                    "oneOf": [
+                        {"type": "string"},
+                        {"type": "array", "items": {"type": "string"}},
+                    ],
+                    "description": "Filter by violation type (e.g. 'shorting_items', 'unconnected_items')",
+                },
+                "net": {
+                    "type": "string",
+                    "description": "Filter to findings on this net (parsed from item descriptions)",
+                },
+                "summaryOnly": {
+                    "type": "boolean",
+                    "description": "Return counts only, no individual items. Default false.",
+                    "default": False,
+                },
+                "useCachedReport": {
+                    "type": "boolean",
+                    "description": "Skip the kicad-cli re-run; use the previous violations file if it exists. Default false.",
+                    "default": False,
+                },
+            },
+        },
     },
 ]
 

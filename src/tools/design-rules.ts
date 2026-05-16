@@ -300,16 +300,32 @@ export function registerDesignRuleTools(server: McpServer, callKicadScript: Comm
   // ------------------------------------------------------
   server.tool(
     "get_drc_violations",
-    "Return the list of current DRC violations on the PCB, optionally filtered by severity (error, warning).",
+    "Return the consolidated list of DRC findings (violations + unconnected items) with optional filtering. Each finding includes per-item details (position, uuid, parsed net/layer/length/component-ref). Use `summaryOnly` for counts-only, or `useCachedReport` to skip the kicad-cli re-run.",
     {
       severity: z
-        .enum(["error", "warning", "all"])
+        .enum(["error", "warning", "info", "all"])
         .optional()
-        .describe("Filter violations by severity"),
+        .describe("Filter by severity (default 'all')"),
+      type: z
+        .union([z.string(), z.array(z.string())])
+        .optional()
+        .describe("Filter by violation type, e.g. 'shorting_items', 'unconnected_items', ['track_dangling', 'silk_overlap']"),
+      net: z
+        .string()
+        .optional()
+        .describe("Filter to findings on this net (parsed from item descriptions like 'Track [BAT+] on F.Cu')"),
+      summaryOnly: z
+        .boolean()
+        .optional()
+        .describe("Return counts only, no individual items. Default false."),
+      useCachedReport: z
+        .boolean()
+        .optional()
+        .describe("Skip the kicad-cli re-run; use the previous violations file if it exists. Default false. Pairs well with a prior run_drc."),
     },
-    async ({ severity }) => {
+    async (args: any) => {
       logger.debug("Getting DRC violations");
-      const result = await callKicadScript("get_drc_violations", { severity });
+      const result = await callKicadScript("get_drc_violations", args);
 
       return {
         content: [

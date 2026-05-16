@@ -4,6 +4,40 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### get_drc_violations: include unconnected_items, add filters (develop, 2026-05-16)
+
+Two changes that compose: a real bug fix and a long-requested filter surface.
+
+- **`run_drc` now consolidates `unconnected_items` into the violations
+  list.** kicad-cli writes `unconnected_items` in a SEPARATE top-level
+  array alongside `violations`; the previous handler iterated only
+  `violations`, silently dropping every unconnected rat from the saved
+  report. Worst-affected case: the v11c power_module reported "98
+  violations" but had 5 hidden unconnects (BAT+, BQ_PH, CC1, CHG_OUT,
+  USB_VBUS) that were nowhere in the JSON. Now they appear as
+  `type: "unconnected_items"`, `severity: "error"`.
+
+- **Per-item structured fields**. Each item under a violation now
+  carries `net`, `layer`, `length_mm`, and `ref` extracted from
+  kicad-cli's free-text descriptions (e.g. "Track [BAT+] on F.Cu,
+  length 0.6500 mm" → `{net: "BAT+", layer: "F.Cu", length_mm: 0.65}`).
+  Best-effort; unparseable fields stay null.
+
+- **`get_drc_violations` gained `type` / `net` / `summaryOnly` /
+  `useCachedReport` filters.** Examples:
+    - `{type: "shorting_items"}` — show only shorts.
+    - `{net: "BAT+"}` — show only findings on BAT+.
+    - `{summaryOnly: true}` — counts by type+severity, no items.
+    - `{useCachedReport: true}` — skip the kicad-cli re-run (~2-5s);
+      read the previous violations file.
+
+Backward-compatible: existing `severity` param still works; the
+response keeps `violations` and `violationsFile` fields. New top-level
+fields: `total`, `summary`, `filters`.
+
+Tests: 14 new in `tests/test_drc_violations.py` (parser + filter
+matrix). 1067 total passing.
+
 ### Placement-constraint v1: decoupling_audit + place_near (develop, 2026-05-15)
 
 Two new MCP tools land the schematic-resident placement-constraint

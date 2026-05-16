@@ -4,11 +4,37 @@ Design rules command implementations for KiCAD interface
 
 import logging
 import os
+import re
 from typing import Any, Dict, List, Optional, Tuple
 
 import pcbnew
 
 logger = logging.getLogger("kicad_interface")
+
+# Patterns for extracting structured fields from kicad-cli's per-item
+# description strings (e.g. "Track [BAT+] on F.Cu, length 0.6500 mm",
+# "Pad 1 of C9", "Footprint R27").
+_NET_RE = re.compile(r"\[([^\]]+)\]")
+_LAYER_RE = re.compile(r"\bon\s+([A-Za-z0-9_]+\.[A-Za-z0-9_]+)")
+_LENGTH_RE = re.compile(r"length\s+([\d.]+)\s*mm", re.IGNORECASE)
+_REF_RE = re.compile(r"\b(?:Pad\s+\S+\s+of\s+|Footprint\s+)([A-Z][A-Z0-9_]*\d+)")
+
+
+def _parse_item_description(desc: str) -> Dict[str, Any]:
+    """Pull net, layer, length_mm, and component ref out of an item
+    description string. Best-effort; missing fields return None."""
+    if not desc:
+        return {"net": None, "layer": None, "length_mm": None, "ref": None}
+    net_m = _NET_RE.search(desc)
+    layer_m = _LAYER_RE.search(desc)
+    length_m = _LENGTH_RE.search(desc)
+    ref_m = _REF_RE.search(desc)
+    return {
+        "net": net_m.group(1) if net_m else None,
+        "layer": layer_m.group(1) if layer_m else None,
+        "length_mm": float(length_m.group(1)) if length_m else None,
+        "ref": ref_m.group(1) if ref_m else None,
+    }
 
 
 class DesignRuleCommands:
@@ -247,41 +273,62 @@ class DesignRuleCommands:
                 with open(json_output, "r", encoding="utf-8") as f:
                     drc_data = json.load(f)
 
-                # Parse violations from kicad-cli output
+                # Parse violations from kicad-cli output. kicad-cli writes
+                # violations and unconnected_items in SEPARATE top-level
+                # arrays; both are real DRC findings and both belong in our
+                # consolidated response.
                 violations = []
                 violation_counts: dict[str, int] = {}
                 severity_counts = {"error": 0, "warning": 0, "info": 0}
 
-                for violation in drc_data.get("violations", []):
-                    vtype = violation.get("type", "unknown")
-                    vseverity = violation.get("severity", "error")
-
-                    # Extract location from first item's pos (kicad-cli JSON format)
-                    items = violation.get("items", [])
+                def _normalise(raw: Dict[str, Any], default_type: str) -> Dict[str, Any]:
+                    vtype = raw.get("type", default_type)
+                    vseverity = raw.get("severity", "error")
+                    items_raw = raw.get("items", []) or []
+                    items_out: List[Dict[str, Any]] = []
+                    for it in items_raw:
+                        pos = it.get("pos") or {}
+                        item_desc = it.get("description", "") or ""
+                        parsed = _parse_item_description(item_desc)
+                        items_out.append(
+                            {
+                                "description": item_desc,
+                                "pos": {
+                                    "x": pos.get("x", 0),
+                                    "y": pos.get("y", 0),
+                                    "unit": "mm",
+                                },
+                                "uuid": it.get("uuid", ""),
+                                **parsed,
+                            }
+                        )
                     loc_x, loc_y = 0, 0
-                    if items and "pos" in items[0]:
-                        loc_x = items[0]["pos"].get("x", 0)
-                        loc_y = items[0]["pos"].get("y", 0)
+                    if items_out:
+                        loc_x = items_out[0]["pos"]["x"]
+                        loc_y = items_out[0]["pos"]["y"]
+                    return {
+                        "type": vtype,
+                        "severity": vseverity,
+                        "message": raw.get("description", ""),
+                        "items": items_out,
+                        "location": {"x": loc_x, "y": loc_y, "unit": "mm"},
+                    }
 
-                    violations.append(
-                        {
-                            "type": vtype,
-                            "severity": vseverity,
-                            "message": violation.get("description", ""),
-                            "location": {
-                                "x": loc_x,
-                                "y": loc_y,
-                                "unit": "mm",
-                            },
-                        }
-                    )
+                for raw in drc_data.get("violations", []):
+                    v = _normalise(raw, default_type="unknown")
+                    violations.append(v)
+                    violation_counts[v["type"]] = violation_counts.get(v["type"], 0) + 1
+                    if v["severity"] in severity_counts:
+                        severity_counts[v["severity"]] += 1
 
-                    # Count violations by type
-                    violation_counts[vtype] = violation_counts.get(vtype, 0) + 1
-
-                    # Count by severity
-                    if vseverity in severity_counts:
-                        severity_counts[vseverity] += 1
+                # Unconnected items live in a sibling array but ARE DRC
+                # findings (severity "error", type "unconnected_items").
+                for raw in drc_data.get("unconnected_items", []):
+                    v = _normalise(raw, default_type="unconnected_items")
+                    violations.append(v)
+                    violation_counts[v["type"]] = violation_counts.get(v["type"], 0) + 1
+                    if v["severity"] in severity_counts:
+                        severity_counts[v["severity"]] += 1
 
                 # Determine where to save the violations file
                 board_dir = os.path.dirname(board_file)
@@ -398,12 +445,22 @@ class DesignRuleCommands:
         return None
 
     def get_drc_violations(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """
-        Get list of DRC violations
+        """Return the consolidated list of DRC findings (violations +
+        unconnected items), with optional filtering.
 
-        Note: This command internally uses run_drc() which calls kicad-cli.
-        The old BOARD.GetDRCMarkers() API was removed in KiCAD 9.0.
-        This implementation provides backward compatibility by parsing kicad-cli output.
+        Params:
+          severity: "error" | "warning" | "info" | "all" (default "all")
+          type: str | list[str] — keep only findings whose ``type``
+                matches (e.g. "shorting_items", "unconnected_items",
+                ["track_dangling", "shorting_items"]).
+          net: str — keep only findings where some item is on this net
+               (parsed from kicad-cli item descriptions like
+               "Track [BAT+] on F.Cu").
+          summaryOnly: bool — return counts only, no individual items.
+                       Default false.
+          useCachedReport: bool — skip the kicad-cli re-run; read the
+                           previous violations file if it exists.
+                           Default false (always re-runs for freshness).
         """
         import json
 
@@ -416,39 +473,82 @@ class DesignRuleCommands:
                 }
 
             severity = params.get("severity", "all")
+            type_filter = params.get("type")
+            net_filter = params.get("net")
+            summary_only = bool(params.get("summaryOnly", False))
+            use_cached = bool(params.get("useCachedReport", False))
 
-            # Run DRC using kicad-cli (this saves violations to JSON file)
-            drc_result = self.run_drc({})
+            if isinstance(type_filter, str):
+                type_set = {type_filter}
+            elif isinstance(type_filter, (list, tuple)):
+                type_set = set(type_filter)
+            else:
+                type_set = None
 
-            if not drc_result.get("success"):
-                return drc_result  # Return the error from run_drc
+            board_file = self.board.GetFileName()
+            board_dir = os.path.dirname(board_file)
+            board_name = os.path.splitext(os.path.basename(board_file))[0]
+            violations_file = os.path.join(board_dir, f"{board_name}_drc_violations.json")
 
-            # Read violations from the saved JSON file
-            violations_file = drc_result.get("violationsFile")
-            if not violations_file or not os.path.exists(violations_file):
-                return {
-                    "success": False,
-                    "message": "Violations file not found",
-                    "errorDetails": "run_drc did not create violations file",
-                }
-
-            # Load violations from file
-            with open(violations_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
+            if use_cached and os.path.exists(violations_file):
+                with open(violations_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
+                logger.info(f"get_drc_violations: using cached report {violations_file}")
+            else:
+                drc_result = self.run_drc({})
+                if not drc_result.get("success"):
+                    return drc_result
+                violations_file = drc_result.get("violationsFile")
+                if not violations_file or not os.path.exists(violations_file):
+                    return {
+                        "success": False,
+                        "message": "Violations file not found",
+                        "errorDetails": "run_drc did not create violations file",
+                    }
+                with open(violations_file, "r", encoding="utf-8") as f:
+                    data = json.load(f)
 
             all_violations = data.get("violations", [])
 
-            # Filter by severity if specified
-            if severity != "all":
-                filtered_violations = [v for v in all_violations if v.get("severity") == severity]
-            else:
-                filtered_violations = all_violations
+            def _matches(v: Dict[str, Any]) -> bool:
+                if severity != "all" and v.get("severity") != severity:
+                    return False
+                if type_set is not None and v.get("type") not in type_set:
+                    return False
+                if net_filter:
+                    for it in v.get("items", []):
+                        if it.get("net") == net_filter:
+                            return True
+                    return False
+                return True
 
-            return {
+            filtered = [v for v in all_violations if _matches(v)]
+
+            # Compose summary counts from the filtered set.
+            counts_by_type: Dict[str, int] = {}
+            counts_by_severity: Dict[str, int] = {"error": 0, "warning": 0, "info": 0}
+            for v in filtered:
+                counts_by_type[v["type"]] = counts_by_type.get(v["type"], 0) + 1
+                sev = v.get("severity", "error")
+                counts_by_severity[sev] = counts_by_severity.get(sev, 0) + 1
+
+            response: Dict[str, Any] = {
                 "success": True,
-                "violations": filtered_violations,
-                "violationsFile": violations_file,  # Include file path for reference
+                "violationsFile": violations_file,
+                "total": len(filtered),
+                "summary": {
+                    "by_type": counts_by_type,
+                    "by_severity": counts_by_severity,
+                },
+                "filters": {
+                    "severity": severity,
+                    "type": list(type_set) if type_set else None,
+                    "net": net_filter,
+                },
             }
+            if not summary_only:
+                response["violations"] = filtered
+            return response
 
         except Exception as e:
             logger.error(f"Error getting DRC violations: {str(e)}")
