@@ -1051,7 +1051,9 @@ class RoutingCommands:
                 }
 
             # Identification parameters
-            trace_uuid = params.get("uuid")
+            # Accept both 'uuid' (legacy) and 'traceUuid' (TS schema name,
+            # matching delete_trace) so callers don't have to guess.
+            trace_uuid = params.get("traceUuid") or params.get("uuid")
             position = params.get("position")  # {x, y, unit}
 
             # Modification parameters
