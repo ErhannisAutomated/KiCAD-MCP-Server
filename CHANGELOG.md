@@ -4,6 +4,40 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### find_via_lane v4.1: Strategy H — clearance-aware via walk (develop, 2026-05-16)
+
+#155 added a post-placement via-vs-copper check that REFUSES the
+proposal when via1 or via2 would short to foreign copper on a
+different layer. But it was strictly reactive — if `_find_safe_via_point`
+walked into a clearance-failing position, the tool gave up.
+
+Strategy H makes the walk itself clearance-aware. At each sample
+along source→target, `_find_safe_via_point` now requires BOTH:
+
+  (a) the F.Cu approach segment from source to sample is clear, AND
+  (b) a through-via at the sample clears all foreign-net copper on
+      every copper layer by ≥ minClearance.
+
+The walker continues past clearance failures (unlike segment
+failures, which short-circuit the walk) because via-clearance
+violations aren't monotone — a later sample further from the
+offending trace may pass.
+
+When everything along the walk fails clearance, the diagnostic now
+distinguishes:
+
+  - `obstaclesFromLayer`: same-layer obstacles on the approach segment
+    (the original "no_safe_via_zone" cause)
+  - `viaClearanceAtEndpoint`: foreign-layer copper near the failing
+    endpoint that any through-via would short to (NEW)
+
+Verified on power_module C26 BB_VCC: even with the C26.1 pad as
+source and real minClearance=0.15 mm, Strategy H correctly returns
+`no_safe_via_zone` and the diagnostic reveals BB_SW1 (In1.Cu) and
+BB_COMP (In2.Cu) tracks overlapping the C26.1 region. C26 truly is
+unroutable with default 0.6 mm through vias in this layout — needs
+a microvia + component repositioning, or hand-routed F.Cu detour.
+
 ### find_via_lane v4: Strategy G — 4-corner Z-shape (develop, 2026-05-16)
 
 v3's Strategy F handles the "long horizontal blocker, both vias on

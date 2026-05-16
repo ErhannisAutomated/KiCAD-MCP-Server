@@ -1785,12 +1785,15 @@ class RoutingCommands:
              bbox CORNER with a 4-segment Z-shape (HVHV or VHVH pattern,
              4 corners × 2 patterns = 8 candidates).
 
-        Via clearance: after via1/via2 are chosen, both are validated
-        against all foreign-net copper on every copper layer; if the
-        via diameter would overlap (or come within `minClearance` of)
-        anything foreign, the tool refuses with `via_clearance_violation`
-        and lists what's too close. Through-via geometry, not just the
-        approach segment.
+        Via clearance: the walker that picks via1/via2 is now
+        clearance-aware (v4.1, Strategy H) — at each sample position
+        it checks BOTH (a) the F.Cu approach segment is clear AND (b)
+        a through-via at the sample would clear all foreign-net copper
+        on every layer by minClearance. So via1/via2 land at the
+        furthest position that's safe for both checks. After placement,
+        a final defense-in-depth verification still runs; if it ever
+        fails, the tool refuses with `via_clearance_violation` and
+        lists what's too close.
 
         Inputs:
           from, to        — {x, y, unit} points OR {ref, pad} pad lookups
@@ -1886,22 +1889,45 @@ class RoutingCommands:
                 }
 
             # --- Strategy B prep: find safe via insertion points on fromLayer ---
+            # via_diam_iu + min_clearance_iu enable Strategy H — the
+            # walker integrates via-vs-copper clearance, so via1/via2
+            # naturally land at the furthest position that's safe both
+            # for the F.Cu approach segment AND for the through-via's
+            # interaction with foreign copper on every other layer.
             via1 = self._find_safe_via_point(
-                from_pt, to_pt, from_id, net, margin_iu
+                from_pt, to_pt, from_id, net, margin_iu,
+                via_diam_iu=via_diam_iu,
+                min_clearance_iu=min_clearance_iu,
             )
             via2 = self._find_safe_via_point(
-                to_pt, from_pt, from_id, net, margin_iu
+                to_pt, from_pt, from_id, net, margin_iu,
+                via_diam_iu=via_diam_iu,
+                min_clearance_iu=min_clearance_iu,
             )
             if via1 is None or via2 is None:
+                # Distinguish failure mode: did the F.Cu segment hit an
+                # obstacle, or did via-clearance fail along the walk?
+                # Sample a few points near the failing endpoint and
+                # report what's actually blocking the via.
+                endpoint = from_pt if via1 is None else to_pt
+                _diag = self._via_clearance_violations(
+                    endpoint, via_diam_iu, net, min_clearance_iu
+                )[:3]
                 return {
                     "success": False, "strategy": "no_safe_via_zone",
                     "errorDetails": (
-                        "No clear zone on fromLayer adjacent to "
-                        + ("source" if via1 is None else "target")
-                        + " (obstacle hits before the safety margin). "
-                        "Add a small clear region or shorten safetyMargin."
+                        "No safe via insertion point on fromLayer "
+                        f"near {'source' if via1 is None else 'target'}. "
+                        "Either the F.Cu approach segment hits an "
+                        "obstacle within safetyMargin, OR a through-via "
+                        "anywhere along the walk shorts to nearby copper "
+                        f"on another layer (minClearance={min_clearance_mm} "
+                        f"mm, viaDiameter={via_diam_mm} mm). Hand-route a "
+                        "longer stub away from the dense area, reduce "
+                        "viaDiameter (microvia), or lower minClearance."
                     ),
                     "obstaclesFromLayer": obs_a,
+                    "viaClearanceAtEndpoint": _diag,
                 }
 
             # minimumStubLength: refuse if via1 too close to source pad or
@@ -2243,28 +2269,54 @@ class RoutingCommands:
         return None
 
     def _find_safe_via_point(self, from_pt, to_pt, layer_id, net,
-                              margin_iu, n_samples: int = 40):
+                              margin_iu, n_samples: int = 40,
+                              via_diam_iu: int = 0,
+                              min_clearance_iu: int = 0):
         """Walk from from_pt toward to_pt on layer; return the furthest
-        point along the line where the segment from_pt→point is clear,
-        pulled back by margin_iu along the direction. None if no clear
-        point exists (i.e. obstacle is too close to from_pt)."""
+        point along the line where (a) the segment from_pt→point is
+        clear on layer_id, AND (b) a through-via placed at point clears
+        all foreign-net copper on every copper layer by at least
+        min_clearance_iu. Pull-back by margin_iu along the direction.
+
+        When via_diam_iu=0 or min_clearance_iu=0 the via-clearance gate
+        is disabled and behavior matches the pre-Strategy-H walker
+        (segment check only).
+
+        Strategy H (v4.1): the via-clearance gate is what lets via1/
+        via2 walk past nearby-but-different-layer copper that would
+        otherwise short to the through via (e.g. C26 via1 vs a B.Cu
+        BB_BOOT2 track 0.13 mm away — same-layer F.Cu walk was clear,
+        but the via would have shorted). The loop continues past via-
+        clearance failures (doesn't break) because a later sample,
+        further from the offending trace, may pass.
+        """
         dx = to_pt.x - from_pt.x
         dy = to_pt.y - from_pt.y
         total = (dx * dx + dy * dy) ** 0.5
         if total == 0:
             return from_pt
+        check_via_clearance = via_diam_iu > 0 and min_clearance_iu > 0
         best_t = 0.0
         for i in range(1, n_samples + 1):
             t = i / n_samples
             px = int(from_pt.x + t * dx)
             py = int(from_pt.y + t * dy)
             pt = pcbnew.VECTOR2I(px, py)
+            # Segment check: same-layer obstacles from from_pt → pt.
             if self._find_route_obstacles(from_pt, pt, layer_id, net):
-                break
+                break  # Once the segment hits an obstacle, all later
+                       # samples also cross it. Stop.
+            # Via clearance check: would a through via at pt short to
+            # nearby foreign-net copper on any layer? If yes, skip this
+            # sample but keep walking (clearance failures aren't
+            # monotone — further samples may clear the nearby trace).
+            if check_via_clearance and self._via_clearance_violations(
+                pt, via_diam_iu, net, min_clearance_iu
+            ):
+                continue
             best_t = t
         if best_t == 0.0:
             return None
-        # Pull back margin_iu along the direction
         best_len = best_t * total
         if best_len <= margin_iu:
             return None
