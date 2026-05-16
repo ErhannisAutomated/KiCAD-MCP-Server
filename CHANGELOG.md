@@ -4,6 +4,19 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### place_near: clearance margin around pads in foreign-track check (develop, 2026-05-17)
+
+The strict bbox-overlap check from the earlier track-collision fix
+still missed sub-DRC near-touches. C10's USB_VBUS pad ended 0.009 mm
+from a BQ_PH trace — well under the default POWER_2A 0.13 mm
+clearance rule. Bboxes did not overlap (zero overlap), so the check
+passed; DRC then reported the clearance error post-placement.
+
+Add `clearanceMargin` parameter (default 0.15 mm) that inflates the
+pad bbox before testing against foreign-net tracks. 0.15 mm covers
+the default POWER_2A rule with a 20 µm cushion. Caller can tighten
+or relax per call. Same per-rejection diagnostic text as before.
+
 ### place_near: reject candidates that would short a foreign-net track (develop, 2026-05-17)
 
 `place_near` only checked candidate positions against other footprint

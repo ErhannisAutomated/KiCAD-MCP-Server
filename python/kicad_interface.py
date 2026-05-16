@@ -6706,6 +6706,12 @@ print("ok")
             skip_if_within = bool(params.get("skipIfWithin", True))
             board_path = params.get("boardPath")
             save_path = params.get("savePath", board_path)
+            # Safety margin (mm) added around each pad bbox before
+            # checking against foreign-net tracks. The strict overlap
+            # check passes a 0.009 mm gap that DRC's 0.13 mm clearance
+            # rejects (C10 incident, 2026-05-17). 0.15 mm covers the
+            # default POWER_2A netclass with a 20 µm cushion.
+            clearance_margin_mm = float(params.get("clearanceMargin", 0.15))
 
             if board_path:
                 board = pcbnew.LoadBoard(board_path)
@@ -6754,6 +6760,8 @@ print("ok")
                     break
             ref_layer = ref_fp.GetLayer() if ref_fp else target_fp.GetLayer()
 
+            scale_mm = 1_000_000
+
             stationary_bboxes = []
             for fp in board.GetFootprints():
                 if fp.GetReference() in moving_refs:
@@ -6781,22 +6789,24 @@ print("ok")
                     (tb.GetLeft(), tb.GetTop(), tb.GetRight(), tb.GetBottom())
                 )
 
+            clearance_margin_nm = int(clearance_margin_mm * scale_mm)
+
             def _pad_overlaps_foreign_track(
                 fp: Any, new_x: int, new_y: int, old_x: int, old_y: int
             ) -> Optional[str]:
                 """Return a reason string if any of fp's pads would land
-                on a track of a different net (cause: short), else None.
-                The offset (new_x - old_x, new_y - old_y) is applied to
-                every pad bbox before checking."""
+                on (or come within ``clearance_margin_mm`` of) a track of
+                a different net (cause: short or DRC clearance error),
+                else None. Offset = (new - old) applied to every pad."""
                 ox = new_x - old_x
                 oy = new_y - old_y
                 for pad in fp.Pads():
                     pad_net = pad.GetNetname()
                     pad_bb = pad.GetBoundingBox()
-                    pl = pad_bb.GetLeft() + ox
-                    pt = pad_bb.GetTop() + oy
-                    pr = pad_bb.GetRight() + ox
-                    pbot = pad_bb.GetBottom() + oy
+                    pl = pad_bb.GetLeft() + ox - clearance_margin_nm
+                    pt = pad_bb.GetTop() + oy - clearance_margin_nm
+                    pr = pad_bb.GetRight() + ox + clearance_margin_nm
+                    pbot = pad_bb.GetBottom() + oy + clearance_margin_nm
                     # Layer set: SMD pads land on a single copper layer; THT
                     # span all copper. Build the set once per pad.
                     pad_layers = [
@@ -6822,7 +6832,6 @@ print("ok")
             skipped: List[Dict[str, Any]] = []
             placed_bboxes: List[Tuple[int, int, int, int]] = list(stationary_bboxes)
 
-            scale_mm = 1_000_000
             max_dist_nm = max_dist * scale_mm
 
             # Candidate offsets: a 1mm-resolution polar grid out to max_dist.

@@ -65,12 +65,13 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
   // place_near
   server.tool(
     "place_near",
-    "Snap PCB footprints to within `maxDist` mm of a target pad or footprint, respecting bbox collisions with other components. Pairs naturally with `decoupling_audit`: audit to find too-far caps, then `place_near(refs=[\"C9\"], target=\"U1.10\", maxDist=3)`. The placement strategy searches a 1mm-resolution polar grid out to `maxDist` and picks the closest non-overlapping spot.",
+    "Snap PCB footprints to within `maxDist` mm of a target pad or footprint, respecting bbox collisions with other components AND foreign-net tracks (a pad landing on or within `clearanceMargin` mm of a track on a different net is rejected — prevents the shorting-items + clearance-violation class of move). Pairs naturally with `decoupling_audit`: audit to find too-far caps, then `place_near(refs=[\"C9\"], target=\"U1.10\", maxDist=3)`. The placement strategy searches a 1mm-resolution polar grid out to `maxDist` and picks the closest non-rejected spot.",
     {
       refs: z.array(z.string()).describe("Component references to move (e.g. [\"C9\", \"C10\"])."),
       target: z.string().describe("Anchor as `REF` (snap near footprint body) or `REF.PIN` (snap near a specific pad). Example: \"U1.10\"."),
       maxDist: z.number().optional().describe("Max distance in mm from target. Default 5.0 mm."),
       skipIfWithin: z.boolean().optional().describe("If true (default), components already within `maxDist` are left alone."),
+      clearanceMargin: z.number().optional().describe("Safety margin (mm) added around each pad bbox before checking against foreign-net tracks. Default 0.15 mm — clears the default POWER_2A 0.13 mm DRC rule with a 20 µm cushion."),
       boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
       savePath: z.string().optional().describe("Path to save the modified board. Defaults to `boardPath` (if provided)."),
     },

@@ -950,7 +950,7 @@ ROUTING_TOOLS = [
     {
         "name": "place_near",
         "title": "Place Near",
-        "description": "Snap PCB footprints to within maxDist mm of a target pad/footprint, respecting bbox collisions. Pairs with decoupling_audit: audit to find too-far caps, then place_near to fix.",
+        "description": "Snap PCB footprints to within maxDist mm of a target pad/footprint, respecting bbox collisions AND foreign-net tracks (within clearanceMargin mm). Pairs with decoupling_audit.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -972,6 +972,11 @@ ROUTING_TOOLS = [
                     "type": "boolean",
                     "description": "Leave components already within maxDist alone. Default true.",
                     "default": True,
+                },
+                "clearanceMargin": {
+                    "type": "number",
+                    "description": "Safety margin (mm) added to each pad bbox before checking foreign-net tracks. Default 0.15 (clears the POWER_2A 0.13 mm rule with 20 µm).",
+                    "default": 0.15,
                 },
                 "boardPath": {
                     "type": "string",
