@@ -1026,3 +1026,139 @@ def get_connections_for_net(schematic: Any, schematic_path: str, net_name: str) 
             logger.warning(f"Error processing sub-sheet {sub_path}: {e}")
 
     return all_pins
+
+
+def _process_single_sheet_all_nets(
+    schematic: Any,
+    schematic_path: str,
+) -> Dict[str, List[Dict]]:
+    """Return ``{net_name: [{component, pin}]}`` for one sheet in a single pass.
+
+    Bulk equivalent of calling :func:`_process_single_sheet` once per net —
+    the heavy setup (sexp load, wire-adjacency build, virtual-connection
+    parse, symbol-instance walk, per-lib pin-definition lookup) happens
+    exactly once, then BFS runs per net against the cached graph and pin
+    membership is checked in a single sweep.
+    """
+    try:
+        sexp = _load_sexp(schematic_path)
+    except Exception as e:
+        logger.warning(f"Could not load sexp for {schematic_path}: {e}")
+        return {}
+
+    all_wires = _parse_wires_sexp(sexp)
+    adjacency: List[Set[int]] = []
+    iu_to_wires: Dict[Tuple[int, int], Set[int]] = {}
+    if all_wires:
+        adjacency, iu_to_wires = _build_adjacency(all_wires)
+
+    point_to_label, label_to_points = _parse_virtual_connections(
+        schematic, schematic_path, sexp=sexp
+    )
+
+    # One BFS per net, against the cached adjacency.
+    net_to_points: Dict[str, Set[Tuple[int, int]]] = {}
+    for net_name, seeds in label_to_points.items():
+        net_points: Set[Tuple[int, int]] = set()
+        for seed_pt in seeds:
+            net_points.add(seed_pt)
+            if not all_wires:
+                continue
+            _visited, pts = _find_connected_wires(
+                seed_pt[0] / _IU_PER_MM,
+                seed_pt[1] / _IU_PER_MM,
+                all_wires,
+                iu_to_wires,
+                adjacency,
+                point_to_label=point_to_label,
+                label_to_points=label_to_points,
+            )
+            if pts:
+                net_points.update(pts)
+        net_to_points[net_name] = net_points
+
+    # Single pass over symbol instances: for each pin's world XY, check
+    # membership against every net's point set (cheap set lookups).
+    locator = PinLocator()
+    instances = _parse_symbol_instances_sexp(sexp)
+
+    result: Dict[str, List[Dict]] = {n: [] for n in net_to_points}
+    seen_per_net: Dict[str, Set[Tuple[str, str]]] = {n: set() for n in net_to_points}
+    pin_def_cache: Dict[str, Optional[Dict]] = {}
+
+    for inst in instances:
+        ref = inst["ref"]
+        if ref.startswith("_TEMPLATE") or ref.startswith("#"):
+            continue
+        try:
+            lib_id = inst["lib_id"]
+            if lib_id not in pin_def_cache:
+                pin_def_cache[lib_id] = locator.get_symbol_pins(
+                    Path(schematic_path), lib_id
+                )
+            pin_defs = pin_def_cache[lib_id]
+            if not pin_defs:
+                continue
+
+            sym_x = inst["x"]
+            sym_y = inst["y"]
+            sym_rot = inst["rotation"]
+            mirror_x = inst["mirror_x"]
+            mirror_y = inst["mirror_y"]
+
+            for pin_num, pdata in pin_defs.items():
+                abs_x, abs_y = WireDragger.pin_world_xy(
+                    pdata["x"], pdata["y"], sym_x, sym_y, sym_rot, mirror_x, mirror_y
+                )
+                pt = _to_iu(abs_x, abs_y)
+                ix, iy = pt
+                neighbours = {(ix + dx, iy + dy) for dx in (-1, 0, 1) for dy in (-1, 0, 1)}
+                for net_name, net_points in net_to_points.items():
+                    if not neighbours.isdisjoint(net_points):
+                        key = (ref, pin_num)
+                        if key not in seen_per_net[net_name]:
+                            seen_per_net[net_name].add(key)
+                            result[net_name].append({"component": ref, "pin": pin_num})
+        except Exception as e:
+            logger.warning(f"Error checking pins for {ref}: {e}")
+
+    return result
+
+
+def get_all_net_connections(
+    schematic: Any,
+    schematic_path: str,
+) -> Dict[str, List[Dict]]:
+    """Return ``{net_name: [{component, pin}]}`` merged across all sheets.
+
+    Bulk equivalent of calling :func:`get_connections_for_net` once per
+    net — does the per-sheet setup once and walks symbol pins once per
+    sheet. Use this when you need the full pin↔net topology (e.g.
+    decoupling-cap auto-discovery), not for a single-net spot lookup.
+    """
+    from skip import Schematic as SkipSchematic
+
+    merged: Dict[str, List[Dict]] = {}
+    seen_per_net: Dict[str, Set[Tuple[str, str]]] = {}
+
+    def _merge(net_map: Dict[str, List[Dict]]) -> None:
+        for net, pins in net_map.items():
+            seen = seen_per_net.setdefault(net, set())
+            out = merged.setdefault(net, [])
+            for pin in pins:
+                key = (pin["component"], pin["pin"])
+                if key not in seen:
+                    seen.add(key)
+                    out.append(pin)
+
+    _merge(_process_single_sheet_all_nets(schematic, schematic_path))
+
+    sub_sheets = _discover_sub_sheets(schematic_path)
+    for sub_path in sub_sheets:
+        try:
+            sub_sch = SkipSchematic(sub_path)
+            _merge(_process_single_sheet_all_nets(sub_sch, sub_path))
+        except Exception as e:
+            logger.warning(f"Error processing sub-sheet {sub_path}: {e}")
+
+    return merged

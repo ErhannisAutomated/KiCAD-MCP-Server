@@ -4,6 +4,34 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### decoupling_audit: ~40× faster on hierarchical schematics (develop, 2026-05-17)
+
+`discover_decoupling_pairs` previously called `get_connections_for_net`
+once per labelled net, and every call re-loaded each sheet's sexp tree,
+re-built wire adjacency, re-parsed labels, and re-walked symbol
+instances. On power_module (4 sheets, 55 nets) that was ~57 s — over
+the MCP request timeout, so `decoupling_audit` could not return.
+
+Fix: new bulk helpers in `wire_connectivity.py`:
+
+- **`_process_single_sheet_all_nets`** — does the heavy per-sheet setup
+  once, runs one BFS per labelled net against the cached graph, and
+  walks symbol pins exactly once to assign membership across all nets
+  in a single sweep.
+- **`get_all_net_connections`** — bulk equivalent of
+  `get_connections_for_net`; returns `{net_name: [{component, pin}]}`
+  merged across hierarchical sheets.
+
+`discover_decoupling_pairs` now consumes the bulk map. On the same
+power_module fixture: 57 s → 1.3 s (44×), with zero mismatches across
+all 55 nets.
+
+Tests: `tests/test_wire_connectivity_bulk.py` (6) — equivalence vs
+`get_connections_for_net` on synthetic on-disk fixtures covering label-
+at-pin, label-via-wire, multi-net same-symbol, shared rail, empty
+sheet, and floating label. All 108 tests across the changed area still
+pass.
+
 ### check_pcb_integrity: silent-corruption detector (develop, 2026-05-16)
 
 New MCP tool that catches a class of bug DRC will NOT catch — positions

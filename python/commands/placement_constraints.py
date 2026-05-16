@@ -419,12 +419,7 @@ def discover_decoupling_pairs(
     """
     from commands.pin_locator import PinLocator
     from commands.schematic import SchematicManager
-    from commands.wire_connectivity import (
-        _discover_sub_sheets,
-        _load_sexp,
-        _parse_labels_sexp,
-        get_connections_for_net,
-    )
+    from commands.wire_connectivity import get_all_net_connections
 
     pairs: List[DecouplingPair] = []
     parse_errors: List[Dict[str, str]] = []
@@ -435,26 +430,15 @@ def discover_decoupling_pairs(
     if top_sch_obj is None:
         return [], [{"ref": "(root)", "anchor": top_path, "badClause": "could not load schematic"}]
 
-    # Collect every net name across top + sub-sheets via labels.
-    net_names: set = set()
-    sheet_paths = [top_path] + _discover_sub_sheets(top_path)
-    for sp in sheet_paths:
-        try:
-            sexp = _load_sexp(sp)
-            _, label_to_points = _parse_labels_sexp(sexp)
-            net_names.update(label_to_points.keys())
-        except Exception as e:
-            logger.debug(f"net-name collect failed on {sp}: {e}")
-
-    # Build inverse map: (ref, pin_num) -> net.
+    # Build the full pin↔net map in one pass across all sheets (bulk
+    # variant of get_connections_for_net — ~40× faster on power_module
+    # because the per-sheet setup runs once instead of once per net).
+    net_to_pins = get_all_net_connections(top_sch_obj, top_path)
     pin_net: Dict[Tuple[str, str], str] = {}
-    for net in sorted(net_names):
-        try:
-            for conn in get_connections_for_net(top_sch_obj, top_path, net):
-                key = (conn["component"], str(conn["pin"]))
-                pin_net.setdefault(key, net)
-        except Exception as e:
-            logger.debug(f"connections-for-net failed on {net}: {e}")
+    for net, conns in net_to_pins.items():
+        for conn in conns:
+            key = (conn["component"], str(conn["pin"]))
+            pin_net.setdefault(key, net)
 
     # Pin electrical types come from the symbol library — fetch via PinLocator.
     by_ref_lib: Dict[str, Tuple[Path, str]] = {}
