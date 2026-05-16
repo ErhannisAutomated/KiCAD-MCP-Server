@@ -4,6 +4,38 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### find_via_lane v4: Strategy G — 4-corner Z-shape (develop, 2026-05-16)
+
+v3's Strategy F handles the "long horizontal blocker, both vias on
+the same side" case with a single L-shape past one bbox edge. But
+when via1 and via2 STRADDLE the blocker (one north, one south of
+a horizontal trace) AND the L-shape east/west legs hit secondary
+obstacles near the bbox, no single-bend HVH solution exists. The
+working detour is a Π-shape (north + east + south + west) that
+extends past BOTH a y-edge AND an x-edge of the bbox — i.e. routes
+around a bbox CORNER, not just an edge.
+
+Strategy G: 4-segment Z-shapes around each of the 4 bbox corners
+× 2 patterns (HVHV starting vertical, VHVH starting horizontal)
+= 8 candidate detours. Each shape's 4 segments are validated by
+`_find_route_obstacles`; the first all-clear shape wins. Uses a
+wider clearance margin than Strategy F (via_radius +
+min_clearance + 0.4 mm) because end-of-trace vias often sit AT
+the bbox edge.
+
+Failure response adds `zShapesTried`: per-corner, per-pattern,
+per-leg blocker list — parallels the `bboxLshapesTried` field
+from Strategy F so the caller can see exactly which detour failed
+where.
+
+Verified on power_module C26 BB_VCC (Z-shape NE corner HVHV finds
+a valid 4-segment B.Cu route: north of bbox → east of bbox → south
+past bbox → west to via2). C26 still doesn't ship through the
+full flow because #155's via-clearance check catches that via1
+itself is 0.13 mm from the BB_BOOT2 track — that's a separate
+problem (Strategy H "via re-walk", filed as task #156) and not a
+Strategy G bug. The strategy itself produces correct geometry.
+
 ### find_via_lane: validate via-vs-nearby-copper clearance (develop, 2026-05-16)
 
 `_find_safe_via_point` and Strategy F only checked SEGMENT-vs-foreign

@@ -1779,6 +1779,11 @@ class RoutingCommands:
              4 L-shapes — one extending past each bbox edge + clearance
              margin. Bypasses long blockers (e.g. a 20 mm horizontal
              trace) that the blind ±waypoint_max sweep can't escape.
+          G. 4-corner Z-shape (v4): when via1 and via2 straddle the bbox
+             (one on each side of the blocker) AND the L-shape east/west
+             legs hit secondary obstacles near the bbox, route around a
+             bbox CORNER with a 4-segment Z-shape (HVHV or VHVH pattern,
+             4 corners × 2 patterns = 8 candidates).
 
         Via clearance: after via1/via2 are chosen, both are validated
         against all foreign-net copper on every copper layer; if the
@@ -2108,15 +2113,92 @@ class RoutingCommands:
                         "leg3_blocked": leg3[:3],
                     })
 
+            # --- Strategy G (v4): 4-segment Z-shape around bbox corners ---
+            # When via1 and via2 straddle the bbox (one on each side of
+            # the blocker) AND the L-shape east/west legs hit secondary
+            # obstacles in the bbox vicinity, the single-bend HVH can't
+            # dodge them. A 4-segment Z-shape goes around a bbox CORNER
+            # instead of past a single edge — extending past BOTH an
+            # x-edge AND a y-edge of the bbox simultaneously. 4 corners
+            # × 2 patterns (HVHV starting vertical, VHVH starting
+            # horizontal) = 8 candidate detours.
+            tried_z = []
+            if bbox is not None:
+                xmin, ymin, xmax, ymax = bbox
+                # Wider clearance than Strategy F — corner detours often
+                # need to dodge end-of-trace vias that sit at the bbox
+                # edge. Pad the safety margin to include min_clearance
+                # plus an extra 0.4 mm to be on the safe side.
+                clear_g_iu = int(
+                    (via_diam_mm / 2 + min_clearance_mm + 0.4) * 1_000_000
+                )
+                corners = [
+                    ("ne", int(xmax + clear_g_iu), int(ymin - clear_g_iu)),
+                    ("nw", int(xmin - clear_g_iu), int(ymin - clear_g_iu)),
+                    ("se", int(xmax + clear_g_iu), int(ymax + clear_g_iu)),
+                    ("sw", int(xmin - clear_g_iu), int(ymax + clear_g_iu)),
+                ]
+                for corner_label, ext_x, ext_y in corners:
+                    # HVHV: via1 → (via1.x, ext_y) → (ext_x, ext_y)
+                    #     → (ext_x, via2.y) → via2
+                    c1 = pcbnew.VECTOR2I(via1.x, ext_y)
+                    c2 = pcbnew.VECTOR2I(ext_x, ext_y)
+                    c3 = pcbnew.VECTOR2I(ext_x, via2.y)
+                    legs = [
+                        self._find_route_obstacles(via1, c1, via_id, net),
+                        self._find_route_obstacles(c1, c2, via_id, net),
+                        self._find_route_obstacles(c2, c3, via_id, net),
+                        self._find_route_obstacles(c3, via2, via_id, net),
+                    ]
+                    if not any(legs):
+                        return self._emit_via_jumper(
+                            from_pt, via1, via2, to_pt, [c1, c2, c3],
+                            from_layer, via_layer, width_mm,
+                            via_diam_mm, via_drill_mm, net, apply,
+                            strategy=f"via_jumper_z_{corner_label}_hvhv",
+                        )
+                    tried_z.append({
+                        "corner": corner_label, "pattern": "hvhv",
+                        "leg1_blocked": legs[0][:2],
+                        "leg2_blocked": legs[1][:2],
+                        "leg3_blocked": legs[2][:2],
+                        "leg4_blocked": legs[3][:2],
+                    })
+                    # VHVH: via1 → (ext_x, via1.y) → (ext_x, ext_y)
+                    #     → (via2.x, ext_y) → via2
+                    c1 = pcbnew.VECTOR2I(ext_x, via1.y)
+                    c2 = pcbnew.VECTOR2I(ext_x, ext_y)
+                    c3 = pcbnew.VECTOR2I(via2.x, ext_y)
+                    legs = [
+                        self._find_route_obstacles(via1, c1, via_id, net),
+                        self._find_route_obstacles(c1, c2, via_id, net),
+                        self._find_route_obstacles(c2, c3, via_id, net),
+                        self._find_route_obstacles(c3, via2, via_id, net),
+                    ]
+                    if not any(legs):
+                        return self._emit_via_jumper(
+                            from_pt, via1, via2, to_pt, [c1, c2, c3],
+                            from_layer, via_layer, width_mm,
+                            via_diam_mm, via_drill_mm, net, apply,
+                            strategy=f"via_jumper_z_{corner_label}_vhvh",
+                        )
+                    tried_z.append({
+                        "corner": corner_label, "pattern": "vhvh",
+                        "leg1_blocked": legs[0][:2],
+                        "leg2_blocked": legs[1][:2],
+                        "leg3_blocked": legs[2][:2],
+                        "leg4_blocked": legs[3][:2],
+                    })
+
             return {
                 "success": False, "strategy": "blocked_on_via_layer",
                 "errorDetails": (
                     f"viaLayer ({via_layer}) is blocked: tried straight, "
                     f"perpendicular-offset waypoint, 2D grid search, "
                     f"axis-aligned L-shape within ±{waypoint_max_mm} mm, "
-                    "and obstacle-bbox-aware L-shape — all hit foreign-net "
-                    "copper. Try a different viaLayer, increase "
-                    "waypointSearchMax, or hand-route around."
+                    "obstacle-bbox-aware L-shape, and 4-corner Z-shape — "
+                    "all hit foreign-net copper. Try a different viaLayer, "
+                    "increase waypointSearchMax, or hand-route around."
                 ),
                 "via1": _pt_dict(via1),
                 "via2": _pt_dict(via2),
@@ -2128,6 +2210,7 @@ class RoutingCommands:
                     if bbox else None
                 ),
                 "bboxLshapesTried": tried_bbox,
+                "zShapesTried": tried_z,
             }
 
         except Exception as e:
