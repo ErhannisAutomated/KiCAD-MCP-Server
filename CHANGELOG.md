@@ -21,14 +21,20 @@ Three subchecks (selectable via `checks=[...]`):
   geometrically valid). **Mixed drift** (pads off by different deltas)
   → error (the catastrophic shape-corruption case).
 
-- **`footprint_overlap`** — silk-excluded bbox-overlap detection on
-  the SAME copper layer (refined 2026-05-16 from the original
-  centre-inside-bbox per user feedback — partial overlaps are just as
-  much a bug as full nesting). Reports overlap area in mm². Severity:
-  **error** if area > 0.1 mm² OR one centre is inside the other's
-  bbox (full nesting, the C24-inside-L2 bug); **warning** otherwise.
+- **`footprint_overlap`** — bbox-overlap detection on the SAME copper
+  layer, distinguishing pad-copper overlap (real short risk) from
+  courtyard-only overlap (assembly concern). Refined twice on
+  2026-05-16 per user feedback: first from centre-inside to
+  bbox-overlap, then to also compute pad-extent overlap separately.
+  Reports both `bbox_overlap_mm2` (courtyard) and `pad_overlap_mm2`
+  (copper) so callers can see which kind. Severity:
+    * **error** if pads overlap (real short risk) OR one centre is
+      inside the other's bbox (full nesting, the C24-inside-L2 bug).
+    * **warning** if only courtyards overlap (parts inside each
+      other's manufacturing keep-out; assembly concern, not an
+      electrical bug).
   Edge-touch slivers below `min_overlap_mm2` (default 0.01) skipped.
-  Same-layer filter prevents the obvious front/back false positives.
+  Same-layer filter prevents front/back false positives.
 
 - **`stacked_pads`** — within a single footprint, ≥2 differently-
   numbered pads on DIFFERENT nets at the same XY. Skip rules: same
@@ -37,10 +43,11 @@ Three subchecks (selectable via `checks=[...]`):
   real bug.
 
 Implementation in `python/commands/integrity.py`. Tested on
-power_module v11c: detected 3 real bbox-overlap errors (R10/L1,
-L2/C25, R25/J1 — partial overlaps 0.15-0.26 mm²) and 2 cosmetic
-pad-rotation warnings on R26/R27 (remnants of past `apply_positions.py`
-damage, electrically benign for symmetric resistor pads).
+power_module v11c: 0 errors, 5 warnings — 3 courtyard overlaps
+(R10/L1, L2/C25, R25/J1 — bboxes touch by 0.15-0.26 mm², pads don't)
+and 2 cosmetic pad-rotation drifts (R26/R27, remnants of past
+`apply_positions.py` damage, electrically benign for symmetric
+resistor pads).
 
 Tests: 19 in `tests/test_pcb_integrity.py` (mocked BOARD/FP/PAD).
 1086 total passing.

@@ -142,24 +142,50 @@ def check_pad_rotation(board: Any) -> List[Dict[str, Any]]:
 _MIN_OVERLAP_MM2 = 0.01  # below this, just edges touching — skip
 
 
+def _pad_extent_bbox(fp: Any) -> Optional[Tuple[int, int, int, int]]:
+    """Union bbox of all the footprint's pads (the actual copper +
+    keep-out region, smaller than ``GetBoundingBox`` which also
+    includes the courtyard). Returns None if no pads or if pads can't
+    expose a usable bbox (e.g. test stubs)."""
+    xs: List[int] = []
+    ys: List[int] = []
+    try:
+        for pad in fp.Pads():
+            bb = pad.GetBoundingBox()
+            xs.extend([int(bb.GetLeft()), int(bb.GetRight())])
+            ys.extend([int(bb.GetTop()), int(bb.GetBottom())])
+    except (TypeError, ValueError, AttributeError):
+        return None
+    if not xs:
+        return None
+    return (min(xs), min(ys), max(xs), max(ys))
+
+
+def _rect_overlap(a: Tuple[int, int, int, int], b: Tuple[int, int, int, int]) -> Tuple[int, int, int, int]:
+    """Return overlap rectangle (x0, y0, x1, y1). If no overlap, x0>=x1
+    or y0>=y1."""
+    return (max(a[0], b[0]), max(a[1], b[1]), min(a[2], b[2]), min(a[3], b[3]))
+
+
 def check_footprint_overlap(board: Any, min_overlap_mm2: float = _MIN_OVERLAP_MM2) -> List[Dict[str, Any]]:
-    """Find footprints whose silk-excluded bboxes overlap on the SAME
-    copper layer.
+    """Find footprints with overlapping bboxes on the SAME copper layer.
 
-    Returns one finding per overlapping pair, with the overlap area
-    reported so callers can judge severity. Overlaps below
-    ``min_overlap_mm2`` (default 0.01 mm² — basically just edges
-    touching) are skipped.
+    Returns one finding per pair, with overlap area in mm² reported
+    twice: ``bbox_overlap_mm2`` (silk-excluded courtyard-inclusive,
+    the manufacturing keep-out) and ``pad_overlap_mm2`` (just the pad
+    extents — actual copper). Overlaps below ``min_overlap_mm2``
+    skipped.
 
-    Severity scaling:
-      * **error** if overlap area > 0.1 mm² (meaningful collision) OR
-        one footprint's centre is inside the other's bbox (full nesting,
-        like the 2026-05-14 C24-inside-L2 bug).
-      * **warning** otherwise (small overlap; usually a tight-but-legal
-        placement worth a look).
+    Severity:
+      * **error** if pads actually overlap (real short risk) OR
+        one footprint's centre is inside the other's bbox (full
+        nesting, e.g. the 2026-05-14 C24-inside-L2 bug).
+      * **warning** if courtyards/bboxes overlap but pads don't
+        (parts placed inside each other's manufacturing keep-out;
+        assembly concern, not an electrical bug).
 
-    Same-layer filter prevents the obvious false positive of front-side
-    components nested under a back-side battery holder.
+    Same-layer filter prevents the obvious false positive of
+    front-side parts nested under a back-side battery holder.
     """
     findings: List[Dict[str, Any]] = []
     fps_info = []
@@ -170,6 +196,7 @@ def check_footprint_overlap(board: Any, min_overlap_mm2: float = _MIN_OVERLAP_MM
             "ref": fp.GetReference(),
             "centre": (pos.x, pos.y),
             "bbox": (bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom()),
+            "pad_bbox": _pad_extent_bbox(fp),
             "layer": fp.GetLayer(),
             "layer_name": _fp_layer_name(board, fp),
         })
@@ -177,40 +204,58 @@ def check_footprint_overlap(board: Any, min_overlap_mm2: float = _MIN_OVERLAP_MM
     n = len(fps_info)
     for i in range(n):
         a = fps_info[i]
-        al, at, ar, ab = a["bbox"]
         for j in range(i + 1, n):
             b = fps_info[j]
             if a["layer"] != b["layer"]:
                 continue
-            bl, bt, br, bb_ = b["bbox"]
-            ix0 = max(al, bl)
-            iy0 = max(at, bt)
-            ix1 = min(ar, br)
-            iy1 = min(ab, bb_)
+            # Courtyard/bbox overlap first — broader screen.
+            ix0, iy0, ix1, iy1 = _rect_overlap(a["bbox"], b["bbox"])
             if ix0 >= ix1 or iy0 >= iy1:
                 continue
-            area_mm2 = ((ix1 - ix0) * (iy1 - iy0)) / 1_000_000_000_000
-            if area_mm2 < min_overlap_mm2:
+            bbox_area = ((ix1 - ix0) * (iy1 - iy0)) / 1_000_000_000_000
+            if bbox_area < min_overlap_mm2:
                 continue
-            # Detect full nesting — either centre inside the other's bbox.
+            # Pad-extent overlap — narrower, real electrical risk.
+            pad_area = 0.0
+            if a["pad_bbox"] and b["pad_bbox"]:
+                px0, py0, px1, py1 = _rect_overlap(a["pad_bbox"], b["pad_bbox"])
+                if px0 < px1 and py0 < py1:
+                    pad_area = ((px1 - px0) * (py1 - py0)) / 1_000_000_000_000
+            # Full nesting?
             ax, ay = a["centre"]
             bx, by = b["centre"]
+            bl, bt, br, bb_ = b["bbox"]
+            al, at, ar, ab = a["bbox"]
             a_in_b = bl <= ax <= br and bt <= ay <= bb_
             b_in_a = al <= bx <= ar and at <= by <= ab
             full_nesting = a_in_b or b_in_a
-            severity = "error" if (area_mm2 > 0.1 or full_nesting) else "warning"
+            # Severity & classification.
+            if pad_area >= min_overlap_mm2:
+                severity = "error"
+                kind = "pad_copper_overlap"
+            elif full_nesting:
+                severity = "error"
+                kind = "full_nesting"
+            else:
+                severity = "warning"
+                kind = "courtyard_overlap"
             nesting_note = ""
             if a_in_b:
                 nesting_note = f" {a['ref']} centre is INSIDE {b['ref']}."
             elif b_in_a:
                 nesting_note = f" {b['ref']} centre is INSIDE {a['ref']}."
+            pad_note = ""
+            if pad_area >= min_overlap_mm2:
+                pad_note = f" PAD COPPER OVERLAPS by {pad_area:.3f} mm² — likely short."
             findings.append({
                 "type": "footprint_bbox_overlap",
+                "kind": kind,
                 "severity": severity,
                 "ref_a": a["ref"],
                 "ref_b": b["ref"],
                 "layer": a["layer_name"],
-                "overlap_mm2": round(area_mm2, 3),
+                "bbox_overlap_mm2": round(bbox_area, 3),
+                "pad_overlap_mm2": round(pad_area, 3),
                 "overlap_w_mm": round((ix1 - ix0) / 1_000_000, 2),
                 "overlap_h_mm": round((iy1 - iy0) / 1_000_000, 2),
                 "full_nesting": full_nesting,
@@ -221,7 +266,7 @@ def check_footprint_overlap(board: Any, min_overlap_mm2: float = _MIN_OVERLAP_MM
                 },
                 "message": (
                     f"{a['ref']} and {b['ref']} bboxes overlap by "
-                    f"{area_mm2:.3f} mm² on {a['layer_name']}." + nesting_note
+                    f"{bbox_area:.3f} mm² on {a['layer_name']}." + nesting_note + pad_note
                 ),
             })
     return findings

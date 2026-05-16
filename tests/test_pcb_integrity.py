@@ -53,19 +53,38 @@ def _mk_pad(number: str, pos_mm: tuple, rot_deg: float = 0.0, net: str = ""):
     return pad
 
 
+def _mk_pad_with_bbox(number: str, pos_mm: tuple, bbox_mm: tuple,
+                      rot_deg: float = 0.0, net: str = ""):
+    """A pad whose GetBoundingBox returns the given bbox (needed for
+    the pad-extent overlap check)."""
+    pad = MagicMock()
+    pad.GetNumber.return_value = number
+    pad.GetPosition.return_value = _mk_pos(*pos_mm)
+    pad.GetNetname.return_value = net
+    pad.GetBoundingBox.return_value = _mk_bbox(*bbox_mm)
+    orient = MagicMock()
+    orient.AsDegrees.return_value = rot_deg
+    pad.GetOrientation.return_value = orient
+    return pad
+
+
 def _mk_fp(ref: str, pos_mm: tuple, rot_deg: float = 0.0,
            pads: list = None, lib_id: str = "Foo:Bar",
-           layer: int = 0, bbox: tuple = None):
+           layer: int = 0, bbox: tuple = None,
+           pad_bbox: tuple = None):
     fp = MagicMock()
     fp.GetReference.return_value = ref
     fp.GetPosition.return_value = _mk_pos(*pos_mm)
     orient = MagicMock()
     orient.AsDegrees.return_value = rot_deg
     fp.GetOrientation.return_value = orient
+    # If pads supplied, expose them. Otherwise, synthesise one pad with
+    # the requested pad_bbox so the pad-overlap check has data.
+    if pads is None and pad_bbox is not None:
+        pads = [_mk_pad_with_bbox("1", pos_mm, pad_bbox)]
     fp.Pads.return_value = pads or []
     fp.GetLayer.return_value = layer
     if bbox is None:
-        # Default bbox: small box around the centre.
         cx, cy = pos_mm
         bbox = (cx - 1, cy - 1, cx + 1, cy + 1)
     fp.GetBoundingBox.return_value = _mk_bbox(*bbox)
@@ -142,58 +161,64 @@ class TestCheckPadRotation:
 
 class TestCheckFootprintOverlap:
     def test_c24_inside_l2_case(self):
-        # L2: inductor at (62, 80), bbox 5×5 mm
-        l2 = _mk_fp("L2", (62, 80), bbox=(59.5, 77.5, 64.5, 82.5))
-        # C24 placed inside L2's bbox — the 2026-05-14 bug.
-        c24 = _mk_fp("C24", (62, 80), bbox=(61, 79, 63, 81))
+        # Full nesting — C24's centre is inside L2's bbox. Pads don't
+        # overlap (L2 inductor pads are at the edges; C24 is in the
+        # middle empty space) but full nesting is always an error.
+        l2 = _mk_fp("L2", (62, 80), bbox=(59.5, 77.5, 64.5, 82.5),
+                    pad_bbox=(59.5, 77.5, 60.0, 82.5))
+        c24 = _mk_fp("C24", (62, 80), bbox=(61, 79, 63, 81),
+                     pad_bbox=(61, 79, 61.5, 81))
         board = _mk_board([l2, c24])
         findings = check_footprint_overlap(board)
         assert len(findings) == 1
         f = findings[0]
         assert {f["ref_a"], f["ref_b"]} == {"L2", "C24"}
         assert f["severity"] == "error"
+        assert f["kind"] == "full_nesting"
         assert f["full_nesting"] is True
-        assert f["overlap_mm2"] == 4.0  # 2×2 mm² nested fully
 
-    def test_partial_overlap_above_error_threshold(self):
-        # Two footprints overlapping by 0.5×2 = 1 mm² — above 0.1.
-        # Centres (0,0) and (1.5,0) are each outside the other's bbox.
-        a = _mk_fp("R1", (0, 0), bbox=(-1, -1, 1, 1))
-        b = _mk_fp("R2", (1.5, 0), bbox=(0.5, -1, 2.5, 1))
+    def test_pad_copper_overlap_is_error(self):
+        # Two footprints whose PADS actually overlap — real short risk.
+        a = _mk_fp("R1", (0, 0), bbox=(-1, -1, 1, 1), pad_bbox=(-0.5, -0.5, 0.5, 0.5))
+        b = _mk_fp("R2", (0.3, 0), bbox=(-0.7, -1, 1.3, 1), pad_bbox=(-0.2, -0.5, 0.8, 0.5))
         board = _mk_board([a, b])
         findings = check_footprint_overlap(board)
         assert len(findings) == 1
         assert findings[0]["severity"] == "error"
-        assert findings[0]["overlap_mm2"] == 1.0
-        assert findings[0]["full_nesting"] is False
+        assert findings[0]["kind"] == "pad_copper_overlap"
+        assert findings[0]["pad_overlap_mm2"] > 0
 
-    def test_small_overlap_is_warning(self):
-        # 0.5 × 0.05 = 0.025 mm² — above default min_overlap (0.01) but
-        # below error threshold (0.1).
-        a = _mk_fp("R1", (0, 0), bbox=(-1, -1, 1, 1))
-        b = _mk_fp("R2", (1.45, 0), bbox=(0.5, -0.05, 2.5, 0.05))
+    def test_courtyard_overlap_no_pad_overlap_is_warning(self):
+        # The v11c case: bboxes touch, pads don't.
+        a = _mk_fp("R10", (0, 0), bbox=(-1, -1, 1, 1), pad_bbox=(-0.8, -0.8, 0.8, 0.8))
+        b = _mk_fp("L1", (1.7, 0), bbox=(0.7, -1, 2.7, 1), pad_bbox=(0.9, -0.8, 2.5, 0.8))
         board = _mk_board([a, b])
         findings = check_footprint_overlap(board)
         assert len(findings) == 1
         assert findings[0]["severity"] == "warning"
+        assert findings[0]["kind"] == "courtyard_overlap"
+        assert findings[0]["pad_overlap_mm2"] == 0
 
     def test_edge_touch_skipped(self):
         # Sliver overlap (0.005 mm²) — below default min_overlap.
-        a = _mk_fp("R1", (0, 0), bbox=(-1, -1, 1, 1))
-        b = _mk_fp("R2", (1.49, 0), bbox=(0.5, -0.005, 2.5, 0.005))
+        a = _mk_fp("R1", (0, 0), bbox=(-1, -1, 1, 1), pad_bbox=(-0.5, -0.5, 0.5, 0.5))
+        b = _mk_fp("R2", (1.49, 0), bbox=(0.5, -0.005, 2.5, 0.005),
+                   pad_bbox=(1.0, -0.005, 2.5, 0.005))
         board = _mk_board([a, b])
         assert check_footprint_overlap(board) == []
 
     def test_same_layer_required(self):
         # Front-side cap "inside" back-side battery holder is fine.
-        bat = _mk_fp("BAT1", (50, 50), layer=31, bbox=(0, 0, 100, 100))
-        cap = _mk_fp("C1", (50, 50), layer=0, bbox=(49, 49, 51, 51))
+        bat = _mk_fp("BAT1", (50, 50), layer=31, bbox=(0, 0, 100, 100),
+                     pad_bbox=(0, 0, 100, 100))
+        cap = _mk_fp("C1", (50, 50), layer=0, bbox=(49, 49, 51, 51),
+                     pad_bbox=(49, 49, 51, 51))
         board = _mk_board([bat, cap])
         assert check_footprint_overlap(board) == []
 
     def test_no_overlap_when_disjoint(self):
-        a = _mk_fp("R1", (0, 0), bbox=(-1, -1, 1, 1))
-        b = _mk_fp("R2", (10, 0), bbox=(9, -1, 11, 1))
+        a = _mk_fp("R1", (0, 0), bbox=(-1, -1, 1, 1), pad_bbox=(-0.5, -0.5, 0.5, 0.5))
+        b = _mk_fp("R2", (10, 0), bbox=(9, -1, 11, 1), pad_bbox=(9.5, -0.5, 10.5, 0.5))
         board = _mk_board([a, b])
         assert check_footprint_overlap(board) == []
 
