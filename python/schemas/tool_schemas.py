@@ -560,16 +560,17 @@ COMPONENT_TOOLS = [
                     "type": "string",
                     "description": "Component reference designator",
                 },
-                "padName": {
+                "pad": {
                     "type": "string",
-                    "description": "Pad name or number (e.g., '1', '2', 'A1')",
+                    "description": "Pad number or name (e.g., '1', '2', 'A1')",
                 },
-                "padNumber": {
+                "unit": {
                     "type": "string",
-                    "description": "Alternative to padName - pad number",
+                    "enum": ["mm", "inch"],
+                    "description": "Unit for coordinates (default: mm)",
                 },
             },
-            "required": ["reference"],
+            "required": ["reference", "pad"],
         },
     },
     {
@@ -786,6 +787,55 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "check_route_segment",
+        "title": "Check Route Segment",
+        "description": (
+            "Pre-flight check: would a straight segment from start to end on "
+            "the given layer cross foreign-net copper? Returns "
+            "{clear, obstacles[]} without committing the route. Same "
+            "obstacle detection as route_trace's default checkObstacles — "
+            "use this to enumerate candidate paths before committing one."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "start": {
+                    "type": "object",
+                    "description": "Start position",
+                    "properties": {
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "unit": {"type": "string"},
+                    },
+                    "required": ["x", "y"],
+                },
+                "end": {
+                    "type": "object",
+                    "description": "End position",
+                    "properties": {
+                        "x": {"type": "number"},
+                        "y": {"type": "number"},
+                        "unit": {"type": "string"},
+                    },
+                    "required": ["x", "y"],
+                },
+                "layer": {
+                    "type": "string",
+                    "description": "PCB layer (e.g., F.Cu, B.Cu)",
+                    "default": "F.Cu",
+                },
+                "net": {
+                    "type": "string",
+                    "description": (
+                        "Net name you intend to route — same-net copper "
+                        "isn't counted as an obstacle."
+                    ),
+                },
+            },
+            "required": ["start", "end", "layer", "net"],
+        },
+    },
+    {
         "name": "add_via",
         "title": "Add Via",
         "description": "Adds a via (plated through-hole) to connect traces between layers.",
@@ -810,6 +860,35 @@ ROUTING_TOOLS = [
                 },
             },
             "required": ["x", "y", "diameter", "drill"],
+        },
+    },
+    {
+        "name": "dedupe_traces",
+        "title": "Dedupe Traces",
+        "description": (
+            "Remove exact-duplicate tracks (and optionally vias) left over "
+            "from autoroute SES re-imports or scripted re-routes. Two "
+            "tracks match if they share (layer, width, net) and their "
+            "endpoints coincide in either order; vias match by (position, "
+            "drill, width, net). Default is dry-run — pass apply=true to "
+            "actually delete the extras."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "apply": {
+                    "type": "boolean",
+                    "description": "Actually delete duplicates (default false = dry-run preview).",
+                },
+                "net": {
+                    "type": "string",
+                    "description": "Optional net filter — only dedupe tracks on this net.",
+                },
+                "includeVias": {
+                    "type": "boolean",
+                    "description": "Also dedupe vias (default true).",
+                },
+            },
         },
     },
     {

@@ -4,6 +4,45 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### dedupe_traces (new tool, develop, 2026-05-18)
+
+Autoroute SES re-imports leave behind exact-duplicate tracks — same
+(start, end, layer, width, net) — because the importer adds new
+segments without checking whether the existing board already carries
+them. On power_module after the latest autoroute pass, 30+ such
+duplicates were visible across BB_VCC, BB_HDRV1/2, BB_LDRV1/2, and
+REGOUT. They don't affect electrical behaviour but bloat the file,
+slow queries, and obscure manual editing.
+
+New `dedupe_traces` tool buckets tracks by canonical key (endpoints
+sorted so A→B and B→A hash equal) and via key (position, drill,
+width, net), then keeps one per bucket and reports the rest. Default
+is dry-run; pass `apply=true` to actually remove. Optional `net`
+filter scopes the dedupe to a single net.
+
+### check_route_segment (new tool, develop, 2026-05-18)
+
+A pre-flight obstacle check, extracted from the `_find_route_obstacles`
+helper that route_pad_to_pad and route_trace already use. Same
+detection (foreign-net tracks/vias/pads on the segment's layer), no
+commit. Returns `{clear, obstacleCount, obstacles[]}`.
+
+Use case: when planning a waypointed route, enumerate candidate
+geometries and pick a clear one without the round-trip cost of
+route_trace + run_drc + delete_trace per attempt.
+
+### get_pad_position: accept `pad` as canonical param (develop, 2026-05-18)
+
+The TS schema for `get_pad_position` declared `pad`, but the Python
+impl read `padName` or `padNumber` — neither matching the TS
+contract. Callers got "Missing pad identifier" errors when sending
+the schema-documented param.
+
+Standardise on `pad` (matching the route_pad_to_pad family).
+`padName` and `padNumber` remain accepted as legacy aliases for
+backward compat; the Python TOOL_SCHEMAS entry now lists `pad` and
+makes it required, with the unit param documented.
+
 ### route_trace: refuse routes through foreign-net copper by default (develop, 2026-05-18)
 
 `route_trace` previously committed every segment unconditionally, so a

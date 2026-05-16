@@ -69,6 +69,45 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Check route segment tool (pre-flight, no commit)
+  server.tool(
+    "check_route_segment",
+    "Pre-flight check: would a straight segment from start to end on the given layer (for the given net) cross foreign-net copper? Returns {clear, obstacles[]} without committing the route. Same obstacle detection as route_trace's default checkObstacles, useful for plan-first workflows where you want to enumerate candidate paths before committing one. Cheaper than route_trace + run_drc + delete_trace round-trips when iterating.",
+    {
+      start: z
+        .object({
+          x: z.number(),
+          y: z.number(),
+          unit: z.string().optional(),
+        })
+        .describe("Start position"),
+      end: z
+        .object({
+          x: z.number(),
+          y: z.number(),
+          unit: z.string().optional(),
+        })
+        .describe("End position"),
+      layer: z.string().describe("PCB layer (e.g., F.Cu, B.Cu)"),
+      net: z
+        .string()
+        .describe(
+          "Net name you intend to route — same-net copper isn't counted as an obstacle.",
+        ),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("check_route_segment", args);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
   // Add via tool
   server.tool(
     "add_via",
@@ -114,6 +153,37 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
     async (args: any) => {
       const result = await callKicadScript("add_copper_pour", args);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
+  // Dedupe traces tool
+  server.tool(
+    "dedupe_traces",
+    "Remove exact-duplicate tracks (and optionally vias) left over from autoroute SES re-imports or scripted re-routes. Two tracks match if they share (layer, width, net) and their endpoints coincide in either order; vias match by (position, drill, width, net). Default is dry-run — pass apply=true to actually delete the extras. Use net filter to limit scope.",
+    {
+      apply: z
+        .boolean()
+        .optional()
+        .describe("Actually delete duplicates (default false = dry-run preview)."),
+      net: z
+        .string()
+        .optional()
+        .describe("Optional net filter — only dedupe tracks on this net."),
+      includeVias: z
+        .boolean()
+        .optional()
+        .describe("Also dedupe vias (default true)."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("dedupe_traces", args);
       return {
         content: [
           {

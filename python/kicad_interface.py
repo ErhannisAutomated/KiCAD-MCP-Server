@@ -340,8 +340,10 @@ class KiCADInterface:
             # Routing commands
             "add_net": self.routing_commands.add_net,
             "route_trace": self.routing_commands.route_trace,
+            "check_route_segment": self.routing_commands.check_route_segment,
             "add_via": self.routing_commands.add_via,
             "delete_trace": self.routing_commands.delete_trace,
+            "dedupe_traces": self.routing_commands.dedupe_traces,
             "query_traces": self.routing_commands.query_traces,
             "audit_plane_cuts": self.routing_commands.audit_plane_cuts,
             "decoupling_audit": self._handle_decoupling_audit,

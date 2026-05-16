@@ -640,7 +640,14 @@ class ComponentCommands:
                 }
 
             reference = params.get("reference")
-            pad_name = params.get("padName") or params.get("padNumber")
+            # `pad` is the canonical name (matches the TS schema and the rest
+            # of the route_* tools); `padName`/`padNumber` are accepted as
+            # legacy aliases for callers still on the old contract.
+            pad_name = (
+                params.get("pad")
+                or params.get("padName")
+                or params.get("padNumber")
+            )
 
             if not reference:
                 return {
@@ -652,7 +659,7 @@ class ComponentCommands:
                 return {
                     "success": False,
                     "message": "Missing pad identifier",
-                    "errorDetails": "padName or padNumber parameter is required",
+                    "errorDetails": "pad parameter is required",
                 }
 
             # Find the component

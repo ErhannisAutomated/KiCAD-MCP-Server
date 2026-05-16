@@ -501,6 +501,122 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def dedupe_traces(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Remove exact-duplicate tracks (and optionally vias) left over
+        from autoroute SES re-imports and similar.
+
+        Two tracks are duplicates iff they share (layer, width, net) and
+        their endpoints match (in either order — direction-insensitive).
+        Two vias are duplicates iff they share (position, drill, width,
+        net). Endpoint comparison uses 1 IU tolerance to absorb float
+        round-trip artifacts.
+
+        Default mode is dry-run (preview-only); pass apply=true to
+        actually remove. Optional net filter to limit scope. Returns the
+        list of removable UUIDs and per-group counts.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            apply = bool(params.get("apply", False))
+            net_filter = params.get("net")
+            include_vias = bool(params.get("includeVias", True))
+
+            # Bucket tracks by their canonical key. Endpoints canonicalised
+            # by sorting so (A→B) and (B→A) hash equal.
+            groups: Dict[tuple, List[Any]] = {}
+            for item in list(self.board.Tracks()):
+                if net_filter and item.GetNetname() != net_filter:
+                    continue
+                is_via = item.Type() == pcbnew.PCB_VIA_T
+                if is_via and not include_vias:
+                    continue
+                if is_via:
+                    pos = item.GetPosition()
+                    try:
+                        width = item.GetWidth(pcbnew.F_Cu)
+                    except TypeError:
+                        width = item.GetWidth()
+                    key = (
+                        "via",
+                        item.GetNetname(),
+                        int(pos.x),
+                        int(pos.y),
+                        int(item.GetDrill()),
+                        int(width),
+                    )
+                else:
+                    s, e = item.GetStart(), item.GetEnd()
+                    a = (int(s.x), int(s.y))
+                    b = (int(e.x), int(e.y))
+                    if a > b:
+                        a, b = b, a
+                    key = (
+                        "track",
+                        item.GetLayer(),
+                        item.GetNetname(),
+                        int(item.GetWidth()),
+                        a,
+                        b,
+                    )
+                groups.setdefault(key, []).append(item)
+
+            # First in each group survives; the rest are duplicates.
+            duplicates: List[Any] = []
+            duplicate_groups: List[Dict[str, Any]] = []
+            for key, members in groups.items():
+                if len(members) <= 1:
+                    continue
+                extras = members[1:]
+                duplicates.extend(extras)
+                duplicate_groups.append(
+                    {
+                        "kind": key[0],
+                        "net": key[2] if key[0] == "via" else key[2],
+                        "duplicate_count": len(extras),
+                        "kept_uuid": str(members[0].m_Uuid.AsString()),
+                        "removed_uuids": [
+                            str(x.m_Uuid.AsString()) for x in extras
+                        ],
+                    }
+                )
+
+            removed_count = 0
+            if apply and duplicates:
+                for item in duplicates:
+                    # RemoveNative — same SWIG note as delete_trace.
+                    self.board.RemoveNative(item)
+                    removed_count += 1
+                self.board.SetModified()
+
+            return {
+                "success": True,
+                "applied": apply,
+                "duplicateGroupCount": len(duplicate_groups),
+                "duplicateItemCount": len(duplicates),
+                "removedCount": removed_count if apply else 0,
+                "groups": duplicate_groups,
+                "message": (
+                    f"{'Removed' if apply else 'Found'} "
+                    f"{len(duplicates)} duplicate item(s) across "
+                    f"{len(duplicate_groups)} group(s)"
+                    + ("" if apply else " (dry-run; pass apply=true to delete)")
+                ),
+            }
+
+        except Exception as e:
+            logger.error(f"Error in dedupe_traces: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to dedupe traces",
+                "errorDetails": str(e),
+            }
+
     def delete_trace(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Delete a trace from the PCB"""
         try:
@@ -1642,6 +1758,74 @@ class RoutingCommands:
         dx = p1.x - p2.x
         dy = p1.y - p2.y
         return (dx * dx + dy * dy) ** 0.5
+
+    def check_route_segment(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Pre-flight check: would a straight segment from start to end on
+        the given layer (for the given net) cross foreign-net copper?
+
+        Returns {clear: bool, obstacles: [...]} without mutating the board.
+        Useful for plan-first workflows: enumerate candidate routes, pick a
+        clear one, then commit with route_trace. Same obstacle detection as
+        route_trace's checkObstacles default, just without the commit.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            start = params.get("start")
+            end = params.get("end")
+            layer = params.get("layer", "F.Cu")
+            net = params.get("net")
+
+            if not start or not end:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": "start and end points are required",
+                }
+            if not net:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": (
+                        "net is required (obstacles are computed relative "
+                        "to the net you intend to route — same-net copper "
+                        "isn't an obstacle)"
+                    ),
+                }
+
+            layer_id = self.board.GetLayerID(layer)
+            if layer_id < 0:
+                return {
+                    "success": False,
+                    "message": "Invalid layer",
+                    "errorDetails": f"Layer '{layer}' does not exist",
+                }
+
+            start_pt = self._get_point(start)
+            end_pt = self._get_point(end)
+            obstacles = self._find_route_obstacles(start_pt, end_pt, layer_id, net)
+            return {
+                "success": True,
+                "clear": not obstacles,
+                "obstacleCount": len(obstacles),
+                "obstacles": obstacles,
+                "start": {"x": start_pt.x / 1e6, "y": start_pt.y / 1e6, "unit": "mm"},
+                "end": {"x": end_pt.x / 1e6, "y": end_pt.y / 1e6, "unit": "mm"},
+                "layer": layer,
+                "net": net,
+            }
+        except Exception as e:
+            logger.error(f"Error in check_route_segment: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to check route segment",
+                "errorDetails": str(e),
+            }
 
     def _find_route_obstacles(
         self,
