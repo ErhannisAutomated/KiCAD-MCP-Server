@@ -4,6 +4,38 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### place_near: reject candidates that would short a foreign-net track (develop, 2026-05-17)
+
+`place_near` only checked candidate positions against other footprint
+bboxes. On power_module, placing C6 near U1.8 landed C6's GND pad on
+top of an existing REGOUT trace, creating two `shorting_items` and two
+`solder_mask_bridge` errors. Bbox-only collision is not enough when
+the board is already routed.
+
+Add a per-pad track-collision check: for each candidate offset, every
+pad's translated bbox is tested against existing tracks on the pad's
+copper layer. Tracks on the pad's own net are skipped (they
+electrically belong); tracks on a different net cause rejection. Vias
+are not yet checked — they span every layer and over-rejection on
+small targets is the immediate risk; revisit if via-induced shorts
+appear. When all candidates are rejected, the `skipped` message
+includes the most recent rejection reason (bbox vs track, and the net
+involved) so the caller can diagnose quickly.
+
+### run_drc: auto-save in-memory board before invoking kicad-cli (develop, 2026-05-17)
+
+`run_drc` ran `kicad-cli pcb drc` against `self.board.GetFileName()`
+— the on-disk file — so any in-memory mutations made via
+`place_near`, `move_component`, etc. were invisible. The first
+post-placement DRC silently returned the pre-placement baseline,
+concealing the C6 short until a manual `save_project` was called.
+
+Save `self.board` to its source path immediately before the
+kicad-cli invocation. Failures are logged and the run continues so a
+read-only filesystem doesn't abort DRC entirely. The same gap likely
+affects every other kicad-cli tool (autoroute, export_gerber, …);
+they will be fixed as they bite.
+
 ### decoupling_audit: ~40× faster on hierarchical schematics (develop, 2026-05-17)
 
 `discover_decoupling_pairs` previously called `get_connections_for_net`

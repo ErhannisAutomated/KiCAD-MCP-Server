@@ -6763,6 +6763,61 @@ print("ok")
                 bb = fp.GetBoundingBox(False)
                 stationary_bboxes.append((bb.GetLeft(), bb.GetTop(), bb.GetRight(), bb.GetBottom()))
 
+            # Per-layer track collision set: a pad of net X landing on a
+            # track of net Y (X != Y) creates a short — bbox-only checks
+            # against footprints miss this (caught the C6→U1.8 incident,
+            # 2026-05-17). Group track bboxes by (layer, net) for fast
+            # per-pad lookup.
+            tracks_by_layer_net: Dict[Tuple[int, str], List[Tuple[int, int, int, int]]] = {}
+            for trk in board.GetTracks():
+                # PCB_TRACK + PCB_ARC (PCB_VIA spans every layer, skip for now —
+                # vias are rare in cap-placement vicinity and adding them risks
+                # over-rejection; revisit if we hit a via-induced short).
+                if trk.GetClass() == "PCB_VIA":
+                    continue
+                tb = trk.GetBoundingBox()
+                key = (trk.GetLayer(), trk.GetNetname())
+                tracks_by_layer_net.setdefault(key, []).append(
+                    (tb.GetLeft(), tb.GetTop(), tb.GetRight(), tb.GetBottom())
+                )
+
+            def _pad_overlaps_foreign_track(
+                fp: Any, new_x: int, new_y: int, old_x: int, old_y: int
+            ) -> Optional[str]:
+                """Return a reason string if any of fp's pads would land
+                on a track of a different net (cause: short), else None.
+                The offset (new_x - old_x, new_y - old_y) is applied to
+                every pad bbox before checking."""
+                ox = new_x - old_x
+                oy = new_y - old_y
+                for pad in fp.Pads():
+                    pad_net = pad.GetNetname()
+                    pad_bb = pad.GetBoundingBox()
+                    pl = pad_bb.GetLeft() + ox
+                    pt = pad_bb.GetTop() + oy
+                    pr = pad_bb.GetRight() + ox
+                    pbot = pad_bb.GetBottom() + oy
+                    # Layer set: SMD pads land on a single copper layer; THT
+                    # span all copper. Build the set once per pad.
+                    pad_layers = [
+                        layer for layer in (pcbnew.F_Cu, pcbnew.B_Cu)
+                        if pad.IsOnLayer(layer)
+                    ]
+                    for layer in pad_layers:
+                        for (track_layer, track_net), bboxes in tracks_by_layer_net.items():
+                            if track_layer != layer:
+                                continue
+                            if track_net == pad_net:
+                                continue
+                            for (tl, tt, tr, tb_) in bboxes:
+                                if not (pr <= tl or pl >= tr or pbot <= tt or pt >= tb_):
+                                    return (
+                                        f"pad {pad.GetNumber()} ({pad_net or '<no net>'}) "
+                                        f"would overlap a track on net "
+                                        f"{track_net or '<no net>'}"
+                                    )
+                return None
+
             moved: List[Dict[str, Any]] = []
             skipped: List[Dict[str, Any]] = []
             placed_bboxes: List[Tuple[int, int, int, int]] = list(stationary_bboxes)
@@ -6812,6 +6867,7 @@ print("ok")
                 origin_dy = cur.y - (bb.GetTop() + bb_h // 2)
 
                 best: Optional[Tuple[int, int, Tuple[int, int, int, int]]] = None
+                last_reject_reason: Optional[str] = None
                 for dx, dy in offsets:
                     cand_x = target_pos.x + dx
                     cand_y = target_pos.y + dy
@@ -6825,19 +6881,22 @@ print("ok")
                     for (l, t, r2, b) in placed_bboxes:
                         if not (cand_right <= l or cand_left >= r2 or cand_bottom <= t or cand_top >= b):
                             overlaps = True
+                            last_reject_reason = "bbox overlap with another footprint"
                             break
                     if overlaps:
+                        continue
+                    track_clash = _pad_overlaps_foreign_track(fp, cand_x, cand_y, cur.x, cur.y)
+                    if track_clash:
+                        last_reject_reason = track_clash
                         continue
                     best = (cand_x, cand_y, cand_box)
                     break
 
                 if best is None:
-                    skipped.append(
-                        {
-                            "ref": ref,
-                            "reason": f"no clear spot within {max_dist} mm of {target}",
-                        }
-                    )
+                    reason = f"no clear spot within {max_dist} mm of {target}"
+                    if last_reject_reason:
+                        reason += f" (closest rejection: {last_reject_reason})"
+                    skipped.append({"ref": ref, "reason": reason})
                     continue
 
                 new_x, new_y, new_box = best

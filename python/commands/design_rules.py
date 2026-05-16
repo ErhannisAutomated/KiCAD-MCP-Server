@@ -223,6 +223,16 @@ class DesignRuleCommands:
                     "errorDetails": "Cannot run DRC without a saved board file",
                 }
 
+            # Persist any in-memory mutations so kicad-cli reads the
+            # current state, not a stale on-disk copy. Without this,
+            # a place_near / move_component followed immediately by
+            # run_drc silently returned baseline results (caught when
+            # the C6→U1.8 short was invisible to DRC, 2026-05-17).
+            try:
+                self.board.Save(board_file)
+            except Exception as save_err:
+                logger.warning(f"Pre-DRC save failed (continuing): {save_err}")
+
             # Find kicad-cli executable
             kicad_cli = self._find_kicad_cli()
             if not kicad_cli:
