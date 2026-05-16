@@ -346,6 +346,7 @@ class KiCADInterface:
             "audit_plane_cuts": self.routing_commands.audit_plane_cuts,
             "decoupling_audit": self._handle_decoupling_audit,
             "place_near": self._handle_place_near,
+            "check_pcb_integrity": self._handle_check_pcb_integrity,
             "modify_trace": self.routing_commands.modify_trace,
             "copy_routing_pattern": self.routing_commands.copy_routing_pattern,
             "get_nets_list": self.routing_commands.get_nets_list,
@@ -6464,6 +6465,40 @@ print("ok")
                 "success": False,
                 "message": f"Failed to get datasheet URL: {str(e)}",
             }
+
+    def _handle_check_pcb_integrity(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Run silent-corruption integrity checks on the loaded PCB.
+
+        Catches bugs that pass DRC but break the design: pad rotation
+        not propagated from footprint rotation, footprints stacked on
+        top of each other on the same layer, pads stacked within a
+        single footprint.
+
+        Required: nothing (uses the currently-loaded board).
+        Optional: ``boardPath`` to load a specific board; ``checks`` to
+        restrict to a subset (default: all).
+        """
+        logger.info("Running check_pcb_integrity")
+        try:
+            from commands.integrity import run_integrity_checks
+
+            board_path = params.get("boardPath")
+            checks = params.get("checks")
+
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+            return run_integrity_checks(board, checks=checks)
+        except Exception as e:
+            logger.error(f"Error in check_pcb_integrity: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
 
     def _handle_decoupling_audit(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Find decoupling caps (or any constrained component) too far

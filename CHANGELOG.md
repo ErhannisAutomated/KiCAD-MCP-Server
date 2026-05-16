@@ -4,6 +4,42 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### check_pcb_integrity: silent-corruption detector (develop, 2026-05-16)
+
+New MCP tool that catches a class of bug DRC will NOT catch — positions
+look correct to every automated check (DRC ratsnest uses pad centres,
+freerouting uses pad centres) but the SHAPES are wrong. Both the
+2026-05-14 apply_positions.py pad-rotation incident and the
+C24-inside-L2 placement bug would have been caught.
+
+Three subchecks (selectable via `checks=[...]`):
+
+- **`pad_rotation`** — for footprints with 2+ instances of the same
+  lib_id, the per-pad orientation relative to the footprint's own
+  orientation must be consistent across instances. **Uniform drift**
+  (all pads off by the same delta) → warning (cosmetic; pad layout
+  geometrically valid). **Mixed drift** (pads off by different deltas)
+  → error (the catastrophic shape-corruption case).
+
+- **`footprint_overlap`** — one footprint's centre falls inside
+  another's silk-excluded bbox on the SAME copper layer. Same-layer
+  filter prevents the obvious false positive of front-side parts
+  nested under a back-side battery holder.
+
+- **`stacked_pads`** — within a single footprint, ≥2 differently-
+  numbered pads on DIFFERENT nets at the same XY. Skip rules: same
+  pad number (thermal pad copies), empty pad number (mounting pads),
+  same net (USB-C A1/B12 GND pair convention). What's left is the
+  real bug.
+
+Implementation in `python/commands/integrity.py`. Tested on
+power_module v11c: detected 2 cosmetic pad-rotation warnings on
+R26/R27 — real signal of past `apply_positions.py` damage, but
+electrically benign for symmetric resistor pads.
+
+Tests: 16 new in `tests/test_pcb_integrity.py` (mocked BOARD/FP/PAD).
+1083 total passing.
+
 ### get_drc_violations: include unconnected_items, add filters (develop, 2026-05-16)
 
 Two changes that compose: a real bug fix and a long-requested filter surface.

@@ -892,6 +892,28 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "check_pcb_integrity",
+        "title": "Check PCB Integrity",
+        "description": "Silent-corruption detector that runs subchecks DRC will NOT catch: pad_rotation (multi-instance per-pad orientation drift; uniform=warning, mixed=error), footprint_overlap (centre inside another's bbox on same layer), stacked_pads (≥2 differently-numbered pads on different nets at the same XY).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "checks": {
+                    "type": "array",
+                    "items": {
+                        "type": "string",
+                        "enum": ["pad_rotation", "footprint_overlap", "stacked_pads"],
+                    },
+                    "description": "Subset of subchecks to run. Default: all three.",
+                },
+                "boardPath": {
+                    "type": "string",
+                    "description": "Path to .kicad_pcb. Defaults to currently-loaded board.",
+                },
+            },
+        },
+    },
+    {
         "name": "decoupling_audit",
         "title": "Decoupling Audit",
         "description": "Find decoupling caps (or any constrained component) too far from their target IC pin on the PCB. Reads Placement_Anchor properties on schematic symbols AND auto-discovers cap↔IC power-pin pairs by net analysis. Property grammar: 'Placement_Anchor = \"U1.10/within=3mm[; U1.9/within=3mm]\"'. The property lives on the SCHEMATIC symbol (PCB sync drops most custom props). Controlled by 'mcp_constraint_version: 1' in .kicad_pro.",

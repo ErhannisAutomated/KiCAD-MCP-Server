@@ -43,6 +43,25 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
+  // check_pcb_integrity
+  server.tool(
+    "check_pcb_integrity",
+    "Silent-corruption detector for PCB layouts. Runs subchecks that catch bugs DRC will NOT catch: (1) pad_rotation — for footprints with multiple instances of the same lib_id, flags any whose per-pad orientation drifts from siblings (uniform drift = warning; mixed deltas = error, the dangerous \"shape corruption\" case from 2026-05-14 apply_positions). (2) footprint_overlap — flags a footprint whose centre falls inside another's bbox on the same copper layer. (3) stacked_pads — flags ≥2 differently-numbered pads on different nets at the same XY (catches the USB-C 16P symptom directly; same-net or same-number stacking is treated as intentional).",
+    {
+      checks: z
+        .array(z.enum(["pad_rotation", "footprint_overlap", "stacked_pads"]))
+        .optional()
+        .describe("Subset of subchecks to run. Default: all three."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("check_pcb_integrity", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // place_near
   server.tool(
     "place_near",
