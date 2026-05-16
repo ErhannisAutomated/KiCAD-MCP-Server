@@ -1780,6 +1780,13 @@ class RoutingCommands:
              margin. Bypasses long blockers (e.g. a 20 mm horizontal
              trace) that the blind ±waypoint_max sweep can't escape.
 
+        Via clearance: after via1/via2 are chosen, both are validated
+        against all foreign-net copper on every copper layer; if the
+        via diameter would overlap (or come within `minClearance` of)
+        anything foreign, the tool refuses with `via_clearance_violation`
+        and lists what's too close. Through-via geometry, not just the
+        approach segment.
+
         Inputs:
           from, to        — {x, y, unit} points OR {ref, pad} pad lookups
           net             — net name (required)
@@ -1833,6 +1840,9 @@ class RoutingCommands:
             waypoint_max_mm = float(params.get("waypointSearchMax", 10.0))
             min_stub_mm = float(params.get("minimumStubLength", 0.0))
             min_stub_iu = int(min_stub_mm * 1_000_000)
+            min_clearance_mm = float(params.get("minClearance", 0.15))
+            min_clearance_iu = int(min_clearance_mm * 1_000_000)
+            via_diam_iu = int(via_diam_mm * 1_000_000)
             apply = bool(params.get("apply", False))
 
             from_pt = self._resolve_route_endpoint(params.get("from"))
@@ -1920,6 +1930,37 @@ class RoutingCommands:
                         ),
                         "via2": _pt_dict(via2),
                     }
+
+            # --- Via clearance check (v3.1) ---
+            # _find_safe_via_point only checked SEGMENT-vs-copper clearance.
+            # Verify the via itself (a 0.6 mm default through via touches
+            # every copper layer) clears all foreign-net copper by at least
+            # via_radius + minClearance. Catches the "via lands on the right
+            # X/Y line but its diameter overlaps an adjacent QFN pin / pad
+            # row / nearby via" case (forcing function: CHG_OUT U3.10).
+            via1_clear = self._via_clearance_violations(
+                via1, via_diam_iu, net, min_clearance_iu
+            )
+            via2_clear = self._via_clearance_violations(
+                via2, via_diam_iu, net, min_clearance_iu
+            )
+            if via1_clear or via2_clear:
+                return {
+                    "success": False,
+                    "strategy": "via_clearance_violation",
+                    "errorDetails": (
+                        "Proposed via overlaps foreign-net copper (the "
+                        "segment is clear but the via diameter isn't). "
+                        "Increase minimumStubLength to push the via further "
+                        "from the pad, reduce viaDiameter (e.g. microvia), "
+                        "or hand-route. minClearance="
+                        f"{min_clearance_mm} mm, viaDiameter={via_diam_mm} mm."
+                    ),
+                    "via1": _pt_dict(via1),
+                    "via2": _pt_dict(via2),
+                    "via1Violations": via1_clear,
+                    "via2Violations": via2_clear,
+                }
 
             # --- Strategy B: straight via-jumper on viaLayer ---
             obs_b = self._find_route_obstacles(via1, via2, via_id, net)
@@ -2429,6 +2470,105 @@ class RoutingCommands:
                     f"'{pad.GetNetname() or '<no net>'}' "
                     f"at ({pc.x / 1e6:.2f},{pc.y / 1e6:.2f})"
                 )
+        return out
+
+    def _via_clearance_violations(
+        self,
+        pos: pcbnew.VECTOR2I,
+        via_diameter_iu: int,
+        net_name: str,
+        min_clearance_iu: int,
+    ) -> list:
+        """For a proposed THROUGH via centered at `pos` with the given
+        diameter, return human-readable descriptions of all foreign-net
+        copper that comes within (via_radius + min_clearance) of the via's
+        edge. Through vias touch every copper layer, so this checks all
+        copper layers; track segments are checked on their own layer only.
+
+        Used by find_via_lane to validate via1/via2 before committing —
+        the segment-clearance check in _find_safe_via_point doesn't catch
+        the case where the via itself (0.6 mm default) overlaps adjacent
+        pads/vias/tracks even though the *segment* approaching the via
+        point is clear. Returns empty list when the via placement passes.
+        """
+        via_radius_iu = via_diameter_iu // 2
+        px, py = pos.x, pos.y
+        out: list = []
+
+        for t in self.board.Tracks():
+            if t.GetNetname() == net_name:
+                continue
+            if t.Type() == pcbnew.PCB_VIA_T:
+                tp = t.GetPosition()
+                try:
+                    tw = t.GetWidth(pcbnew.F_Cu)
+                except TypeError:
+                    tw = t.GetWidth()
+                center_dist = ((tp.x - px) ** 2 + (tp.y - py) ** 2) ** 0.5
+                gap = center_dist - via_radius_iu - tw / 2.0
+                if gap < min_clearance_iu:
+                    out.append(
+                        f"via on net '{t.GetNetname() or '<no net>'}' "
+                        f"at ({tp.x / 1e6:.2f},{tp.y / 1e6:.2f}) "
+                        f"({gap / 1e6:.3f} mm gap, "
+                        f"need ≥{min_clearance_iu / 1e6:.3f} mm)"
+                    )
+            else:
+                if not pcbnew.IsCopperLayer(t.GetLayer()):
+                    continue
+                ts, te = t.GetStart(), t.GetEnd()
+                # Point-to-segment distance (clamped)
+                vx, vy = te.x - ts.x, te.y - ts.y
+                seg_len_sq = vx * vx + vy * vy
+                if seg_len_sq == 0:
+                    sd = ((px - ts.x) ** 2 + (py - ts.y) ** 2) ** 0.5
+                else:
+                    tparam = max(0.0, min(
+                        1.0,
+                        ((px - ts.x) * vx + (py - ts.y) * vy) / seg_len_sq,
+                    ))
+                    qx = ts.x + tparam * vx
+                    qy = ts.y + tparam * vy
+                    sd = ((px - qx) ** 2 + (py - qy) ** 2) ** 0.5
+                tw = t.GetWidth()
+                gap = sd - via_radius_iu - tw / 2.0
+                if gap < min_clearance_iu:
+                    out.append(
+                        f"track on net '{t.GetNetname() or '<no net>'}' "
+                        f"on {self.board.GetLayerName(t.GetLayer())} "
+                        f"near ({ts.x / 1e6:.2f},{ts.y / 1e6:.2f}) "
+                        f"({gap / 1e6:.3f} mm gap)"
+                    )
+
+        # Pads — distance to pad bbox (conservative for non-rect shapes)
+        for fp in self.board.GetFootprints():
+            for pad in fp.Pads():
+                if pad.GetNetname() == net_name:
+                    continue
+                has_cu = any(
+                    pcbnew.IsCopperLayer(lid)
+                    and self.board.IsLayerEnabled(lid)
+                    for lid in pad.GetLayerSet().Seq()
+                )
+                if not has_cu:
+                    continue
+                bb = pad.GetBoundingBox()
+                tl = bb.GetOrigin()
+                br = bb.GetEnd()
+                dx = max(tl.x - px, 0, px - br.x)
+                dy = max(tl.y - py, 0, py - br.y)
+                bbox_dist = (dx * dx + dy * dy) ** 0.5
+                gap = bbox_dist - via_radius_iu
+                if gap < min_clearance_iu:
+                    pp = pad.GetPosition()
+                    out.append(
+                        f"pad {fp.GetReference()}-{pad.GetNumber()} on net "
+                        f"'{pad.GetNetname() or '<no net>'}' "
+                        f"at ({pp.x / 1e6:.2f},{pp.y / 1e6:.2f}) "
+                        f"({gap / 1e6:.3f} mm gap, "
+                        f"need ≥{min_clearance_iu / 1e6:.3f} mm)"
+                    )
+
         return out
 
     def _obstacle_union_bbox(self, items) -> Optional[tuple]:

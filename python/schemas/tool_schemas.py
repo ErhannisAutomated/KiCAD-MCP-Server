@@ -861,6 +861,16 @@ ROUTING_TOOLS = [
                         "keep vias out of the pad footprint. Default 0 (off)."
                     ),
                 },
+                "minClearance": {
+                    "type": "number",
+                    "description": (
+                        "Minimum gap (mm) between the proposed via's edge "
+                        "and any foreign-net copper on any layer. Refuses "
+                        "with `via_clearance_violation` if the via diameter "
+                        "would overlap or come within this distance of an "
+                        "adjacent pad/via/track. Default 0.15."
+                    ),
+                },
                 "waypointSearchMax": {
                     "type": "number",
                     "description": (

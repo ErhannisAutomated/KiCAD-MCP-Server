@@ -110,6 +110,12 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         .describe(
           "Refuse when the safe via insertion point is closer than this to source or target pad, mm. Set ≥1 mm when from/to are component pads to keep vias out of the pad footprint. Default 0 (off).",
         ),
+      minClearance: z
+        .number()
+        .optional()
+        .describe(
+          "Minimum gap (mm) required between the proposed via's edge and any foreign-net copper on any layer. Validated after via placement — refuses with `via_clearance_violation` if the via diameter would overlap (or come within this distance of) an adjacent pad/via/track. Default 0.15.",
+        ),
       waypointSearchMax: z
         .number()
         .optional()

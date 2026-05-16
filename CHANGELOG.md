@@ -4,6 +4,43 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### find_via_lane: validate via-vs-nearby-copper clearance (develop, 2026-05-16)
+
+`_find_safe_via_point` and Strategy F only checked SEGMENT-vs-foreign
+clearance. They never asked "does the proposed via itself — typically
+a 0.6 mm through via touching all copper layers — clear nearby foreign
+copper?" Result: on dense areas like a 0.5 mm-pitch QFN, the tool
+would return a via_jumper proposal with a via center inside or just
+next to a foreign-net pad. Concretely on power_module CHG_OUT
+U3.10↔L1.2 (2026-05-16): via2 landed at (48.514, 70.221) with a
+0.046 mm gap to pad U3-11 (GND, different net) — a guaranteed short
+if applied.
+
+This adds:
+
+  - **New helper `_via_clearance_violations(pos, diameter, net,
+    min_clearance)`**: iterates the board's tracks (segment distance
+    on its own copper layer), vias (centre-to-centre distance, any
+    layer), and pads (distance to bbox, any copper layer) and
+    returns a human-readable list of foreign copper within
+    (via_radius + min_clearance) of the via edge.
+  - **`minClearance` param** to `find_via_lane` (default 0.15 mm,
+    matches a typical POWER_2A rule on this project).
+  - **Refusal path**: after `_find_safe_via_point` returns via1/via2
+    and the minimumStubLength check passes, both vias are validated;
+    if either has any clearance violation, the tool refuses with
+    `strategy: "via_clearance_violation"` and includes
+    `via1Violations` / `via2Violations` so the caller can see what
+    each via would have shorted to (with per-element gap in mm).
+
+Verified on CHG_OUT case: tool now returns 5 violations for via2
+(pad U3-9, pad U3-11 with the 0.046 mm gap, two GND tracks, one
+BAT+ track) plus 2 for via1 (BQ_VREF tracks), matching the
+hand-analysis from session 5. Pad bbox is used as a conservative
+approximation — slightly over-rejects for non-rectangular pads
+(rounded, polygon) but is good enough for first-pass safety; can
+be tightened later if false positives bite.
+
 ### get_component_pads: return `layers` per pad (develop, 2026-05-16)
 
 `get_component_pads` previously omitted which copper layer(s) each
