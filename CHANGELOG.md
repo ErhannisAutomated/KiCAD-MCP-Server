@@ -4,6 +4,35 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Auto-save coverage: add place_near + 8 other PCB mutators to the set (develop, 2026-05-16)
+
+The `_BOARD_MUTATING_COMMANDS` set in `kicad_interface.py` triggers
+`_auto_save_board()` after every SWIG board mutation, so the on-disk
+.kicad_pcb stays current even when the caller forgets to call
+`save_project`. The set was incomplete — `place_near` and several
+other mutators were missing, so their changes lived in `self.board`
+in memory but were never written to disk. Anything that read the
+file externally (`kicad-cli`, an out-of-process render script,
+`pcbnew.LoadBoard` from the user's own Python) got the *previous*
+state and silently drifted from MCP's view.
+
+Caught during the power_module placement restart (2026-05-16):
+all 49 caps/resistors moved by `place_near` looked fine via
+`get_component_pads` (which reads from `self.board`) but were
+still in the parking strip when I ran `kicad-cli` to render the
+board. An explicit `save_project` made them appear.
+
+Added to the auto-save set:
+- `place_near` (the trigger case)
+- `dedupe_traces`, `modify_trace`, `copy_routing_pattern`,
+  `route_differential_pair` (routing.py mutators)
+- `edit_component`, `duplicate_component`, `place_component_array`,
+  `align_components` (component.py mutators)
+
+The existing per-handler `if save_path: board.Save(save_path)`
+guard in `place_near` is retained for the `boardPath`/`savePath`
+override path (callers that load a different board).
+
 ### find_via_lane v4.1: Strategy H — clearance-aware via walk (develop, 2026-05-16)
 
 #155 added a post-placement via-vs-copper check that REFUSES the

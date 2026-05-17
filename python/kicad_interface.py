@@ -604,16 +604,29 @@ class KiCADInterface:
                 "errorDetails": f"{str(e)}\n{traceback_str}",
             }
 
-    # Board-mutating commands that trigger auto-save on SWIG path
+    # Board-mutating commands that trigger auto-save on SWIG path.
+    # Any command that mutates self.board (or a board it loaded from
+    # boardPath) but does NOT explicitly call .Save() itself must be in
+    # this set, or its changes will be lost on the next external read
+    # (kicad-cli, render scripts, fresh pcbnew.LoadBoard).
     _BOARD_MUTATING_COMMANDS = {
         "place_component",
         "move_component",
         "rotate_component",
         "delete_component",
+        "edit_component",
+        "duplicate_component",
+        "place_component_array",
+        "align_components",
+        "place_near",
         "route_trace",
         "route_pad_to_pad",
+        "route_differential_pair",
         "add_via",
         "delete_trace",
+        "dedupe_traces",
+        "modify_trace",
+        "copy_routing_pattern",
         "add_net",
         "add_board_outline",
         "add_mounting_hole",
