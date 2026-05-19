@@ -43,6 +43,25 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
+  // analyze_congestion
+  server.tool(
+    "analyze_congestion",
+    "Routing-congestion analyzer. Divides the board into a grid (default 5 mm cells) and reports per-cell pad density × ratsnest density so you can see WHERE the current placement is blocking routing. Read-only. Ratsnest data comes from the DRC `unconnected_items` list — run `get_drc_violations` or `run_drc` first (the tool will auto-find the default cache JSON in the project dir). Returns the top-N most congested cells (each with its member components — those are the candidates to move) plus per-net difficulty (max cell score along each unrouted net's ratsnest, so you can prioritise nets most likely to need re-placement to route at all). Pairs with `place_near`: identify hotspots, then `place_near` the listed components to less-saturated targets.",
+    {
+      cellSizeMm: z.number().optional().describe("Grid cell size in mm (default 5.0). Smaller = finer resolution but noisier; 4-5 mm matches typical IC + decoupling-cap clusters."),
+      topN: z.number().optional().describe("Number of hotspot cells to return (default 15)."),
+      netDifficultyTopN: z.number().optional().describe("Cap on the per-net difficulty list (default 20)."),
+      drcViolationsPath: z.string().optional().describe("Explicit path to the DRC violations JSON. Defaults to the cache file in the project dir created by a prior get_drc_violations/run_drc call."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("analyze_congestion", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // check_pcb_integrity
   server.tool(
     "check_pcb_integrity",

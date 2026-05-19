@@ -4,6 +4,46 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### analyze_congestion: grid-based routing-congestion analyzer (develop, 2026-05-19)
+
+Read-only tool that divides the board into a grid (default 5 mm cells)
+and reports per-cell pad density × ratsnest density. Output ranks
+hotspots by score, with each hotspot listing its member components so
+the caller knows exactly which footprints to consider moving. Pairs
+naturally with `place_near` for guided re-placement.
+
+Background: I scouted the OSS PCB-autoplacement landscape (with an
+Explore subagent) before building this. Verdict: no usable maintained
+OSS PCB autoplacer exists. Academic tools (RePlAce, DREAMPlace) target
+10⁶-cell IC design, not hobby PCBs. KiCad community has nothing. The
+constraint-driven `place_near` + iterative-reroute pattern this repo
+already uses IS the state of practice — what's been missing is
+*where* to focus the moves. This tool answers that.
+
+Implementation: pad density counts each pad bbox against every grid
+cell it overlaps; ratsnest density walks each unconnected-item segment
+from the DRC `unconnected_items` cache (the tool auto-finds the
+default `<project>_drc_violations.json` if no explicit
+`drcViolationsPath` is passed). Per-cell score = pads × rats.
+Per-net difficulty = max cell score along the net's ratsnest line,
+so nets that traverse the densest cells bubble up as "needs
+re-placement to route at all" candidates.
+
+Validation: ran on the power_module post-spread-pass. Top hotspots
+matched eyeball judgment exactly — U3 charger cluster, U1 BMS
+cluster, and the U4 + BAT1 overlap region all flagged with scores
+240-272 (next-highest cells score 60-110).
+
+Filed in response to my failed routing pass: 1.5 mm POWER_4A trace
+couldn't escape U4's 0.65 mm pin pitch, and the surrounding cap
+density left no detour channels. Manual "look at the board, decide
+what to move" was slow and wrong. Want metrics.
+
+Code: `python/commands/congestion.py` (~250 lines, no deps beyond
+`pcbnew`). Test: smoke-tested via direct Python; no pytest yet (depends
+on real `pcbnew`, which conftest stubs — same pattern as the place_near
+auto-save fix).
+
 ### Auto-save coverage: add place_near + 8 other PCB mutators to the set (develop, 2026-05-16)
 
 The `_BOARD_MUTATING_COMMANDS` set in `kicad_interface.py` triggers

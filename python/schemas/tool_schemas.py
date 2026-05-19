@@ -1099,6 +1099,39 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "analyze_congestion",
+        "title": "Analyze Routing Congestion",
+        "description": "Grid-based routing-congestion analyzer. Divides the board into cells (default 5 mm) and computes per-cell pad density × ratsnest density. Returns top-N hotspots (each with member components — those are the candidates to move) plus per-net difficulty (max cell score along the ratsnest, so you can prioritise nets most likely to need re-placement). Read-only. Ratsnest data comes from the DRC unconnected_items cache — run get_drc_violations or run_drc first; the tool auto-finds the default cache JSON.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "cellSizeMm": {
+                    "type": "number",
+                    "description": "Grid cell size in mm. Smaller = finer but noisier. Default 5.0.",
+                    "default": 5.0,
+                },
+                "topN": {
+                    "type": "number",
+                    "description": "Number of hotspot cells to return. Default 15.",
+                    "default": 15,
+                },
+                "netDifficultyTopN": {
+                    "type": "number",
+                    "description": "Cap on the per-net difficulty list. Default 20.",
+                    "default": 20,
+                },
+                "drcViolationsPath": {
+                    "type": "string",
+                    "description": "Explicit path to a DRC violations JSON. Defaults to the project-dir cache file from a prior get_drc_violations/run_drc call.",
+                },
+                "boardPath": {
+                    "type": "string",
+                    "description": "Path to .kicad_pcb. Defaults to currently-loaded board.",
+                },
+            },
+        },
+    },
+    {
         "name": "check_pcb_integrity",
         "title": "Check PCB Integrity",
         "description": "Silent-corruption detector that runs subchecks DRC will NOT catch: pad_rotation (multi-instance per-pad orientation drift; uniform=warning, mixed=error), footprint_overlap (centre inside another's bbox on same layer), stacked_pads (≥2 differently-numbered pads on different nets at the same XY).",

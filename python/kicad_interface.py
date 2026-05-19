@@ -350,6 +350,7 @@ class KiCADInterface:
             "decoupling_audit": self._handle_decoupling_audit,
             "place_near": self._handle_place_near,
             "check_pcb_integrity": self._handle_check_pcb_integrity,
+            "analyze_congestion": self._handle_analyze_congestion,
             "modify_trace": self.routing_commands.modify_trace,
             "copy_routing_pattern": self.routing_commands.copy_routing_pattern,
             "get_nets_list": self.routing_commands.get_nets_list,
@@ -6514,6 +6515,59 @@ print("ok")
             return run_integrity_checks(board, checks=checks)
         except Exception as e:
             logger.error(f"Error in check_pcb_integrity: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_analyze_congestion(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Grid-based routing-congestion analysis.
+
+        Divides the board into a grid (default 5 mm cells) and reports
+        per-cell (pad density × ratsnest density) so the caller can see
+        WHERE the placement blocks routing. Ratsnest data comes from
+        the DRC ``unconnected_items`` list; if no ``drcViolationsPath``
+        is passed, this tool falls back to the default cache file in the
+        project dir (created by a prior ``get_drc_violations`` or
+        ``run_drc`` call). Read-only.
+
+        Optional:
+          - ``boardPath``: load a specific board (default: current).
+          - ``cellSizeMm``: grid resolution (default 5.0).
+          - ``topN``: hotspot count to return (default 15).
+          - ``drcViolationsPath``: explicit path to a DRC JSON.
+          - ``netDifficultyTopN``: per-net difficulty list cap (default 20).
+        """
+        logger.info("Running analyze_congestion")
+        try:
+            from commands.congestion import analyze_congestion
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+
+            drc_path = params.get("drcViolationsPath")
+            if not drc_path:
+                # Default cache: <project_dir>/<project>_drc_violations.json
+                pcb_path = Path(board.GetFileName())
+                candidate = pcb_path.parent / f"{pcb_path.stem}_drc_violations.json"
+                if candidate.exists():
+                    drc_path = str(candidate)
+
+            return analyze_congestion(
+                board,
+                cell_size_mm=float(params.get("cellSizeMm", 5.0)),
+                top_n=int(params.get("topN", 15)),
+                drc_violations_path=drc_path,
+                net_difficulty_top_n=int(params.get("netDifficultyTopN", 20)),
+            )
+        except Exception as e:
+            logger.error(f"Error in analyze_congestion: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
     def _handle_decoupling_audit(self, params: Dict[str, Any]) -> Dict[str, Any]:
