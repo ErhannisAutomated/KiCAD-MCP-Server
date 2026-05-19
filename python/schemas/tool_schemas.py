@@ -1099,6 +1099,38 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "relax_placement",
+        "title": "Relax Placement (Force-Directed)",
+        "description": "Force-directed PCB placement relaxation: springs along ratsnest segments + pair repulsion + anchors. Reports before/after ratsnest length and crossing count. Use dryRun to try parameters. Anchors default to J*/SW*/BAT* and through-hole footprints; override with lockedRefs.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "lockedRefs": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Refs to keep fixed (overrides default).",
+                },
+                "maxIters": {"type": "number", "description": "Iterations. Default 200.", "default": 200},
+                "kAttract": {"type": "number", "description": "Spring constant. Default 0.02.", "default": 0.02},
+                "kRepulseStep": {"type": "number", "description": "Repulsion strength. Default 1.0.", "default": 1.0},
+                "minGapMm": {"type": "number", "description": "Padding before overlap detection. Default 0.3.", "default": 0.3},
+                "stepMm": {"type": "number", "description": "Max move per iter. Default 1.0.", "default": 1.0},
+                "damping": {"type": "number", "description": "Step damping per iter. Default 0.99.", "default": 0.99},
+                "keepInBbox": {
+                    "type": "object",
+                    "properties": {
+                        "left": {"type": "number"}, "top": {"type": "number"},
+                        "right": {"type": "number"}, "bottom": {"type": "number"},
+                    },
+                    "description": "Keep-in rectangle in mm. Default: board edge bbox.",
+                },
+                "dryRun": {"type": "boolean", "description": "Compute without applying.", "default": False},
+                "drcViolationsPath": {"type": "string", "description": "Path to DRC JSON. Defaults to project-dir cache."},
+                "boardPath": {"type": "string", "description": "Path to .kicad_pcb."},
+            },
+        },
+    },
+    {
         "name": "get_ratsnest",
         "title": "Get Ratsnest",
         "description": "Read-only inspection of the ratsnest (unrouted pad-pair connections). Returns per-segment endpoints with parsed refs/pads, net, length, plus pairwise geometric crossing detection on different nets. Source: DRC unconnected_items cache from a prior get_drc_violations/run_drc call (auto-discovered).",

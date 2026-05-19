@@ -352,6 +352,7 @@ class KiCADInterface:
             "check_pcb_integrity": self._handle_check_pcb_integrity,
             "analyze_congestion": self._handle_analyze_congestion,
             "get_ratsnest": self._handle_get_ratsnest,
+            "relax_placement": self._handle_relax_placement,
             "modify_trace": self.routing_commands.modify_trace,
             "copy_routing_pattern": self.routing_commands.copy_routing_pattern,
             "get_nets_list": self.routing_commands.get_nets_list,
@@ -621,6 +622,7 @@ class KiCADInterface:
         "place_component_array",
         "align_components",
         "place_near",
+        "relax_placement",
         "route_trace",
         "route_pad_to_pad",
         "route_differential_pair",
@@ -6626,6 +6628,69 @@ print("ok")
             )
         except Exception as e:
             logger.error(f"Error in get_ratsnest: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_relax_placement(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Force-directed PCB placement relaxation.
+
+        Pulls connected components together (springs along ratsnest
+        segments) while pushing overlapping ones apart, keeping
+        anchored components fixed (connectors, BAT-type, switches by
+        default; or pass ``lockedRefs`` to override). Reports
+        before/after ratsnest length + crossing count so the caller
+        can judge whether the relax helped.
+
+        ``dryRun`` computes new positions without writing them — use
+        it to try parameters first. Default behavior writes through
+        (auto-save persists).
+        """
+        logger.info("Running relax_placement")
+        try:
+            from commands.pcb_autoplacer import relax_placement
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+
+            drc_path = params.get("drcViolationsPath")
+            if not drc_path:
+                pcb_path = Path(board.GetFileName())
+                candidate = pcb_path.parent / f"{pcb_path.stem}_drc_violations.json"
+                if candidate.exists():
+                    drc_path = str(candidate)
+
+            keep_in = params.get("keepInBbox")
+            if keep_in and isinstance(keep_in, dict):
+                keep_in_tuple = (
+                    float(keep_in["left"]), float(keep_in["top"]),
+                    float(keep_in["right"]), float(keep_in["bottom"]),
+                )
+            else:
+                keep_in_tuple = None
+
+            return relax_placement(
+                board,
+                drc_violations_path=drc_path,
+                locked_refs=params.get("lockedRefs"),
+                max_iters=int(params.get("maxIters", 200)),
+                k_attract=float(params.get("kAttract", 0.02)),
+                k_repulse_step=float(params.get("kRepulseStep", 1.0)),
+                min_gap_mm=float(params.get("minGapMm", 0.30)),
+                step_mm=float(params.get("stepMm", 1.0)),
+                damping=float(params.get("damping", 0.99)),
+                keep_in_bbox=keep_in_tuple,
+                dry_run=bool(params.get("dryRun", False)),
+            )
+        except Exception as e:
+            logger.error(f"Error in relax_placement: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
     def _handle_decoupling_audit(self, params: Dict[str, Any]) -> Dict[str, Any]:

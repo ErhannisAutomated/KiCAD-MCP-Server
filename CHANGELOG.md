@@ -4,6 +4,42 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### relax_placement: force-directed PCB placement relaxation (develop, 2026-05-19)
+
+v1 of the PCB autoplacer (task #183). Pulls connected components
+together (springs along ratsnest segments) while pushing overlapping
+ones apart (pair-wise bbox repulsion), keeping anchored components
+fixed (J*/SW*/BAT* + through-hole-dominant footprints by default).
+Reports before/after total ratsnest length + crossing count and a
+list of the biggest moves so the caller can judge whether to keep
+the result. `dryRun` mode tries parameters without writing back.
+
+Why this exists: I was getting cascading-collision failures every
+time I moved an IC by hand — its place_near'd satellites stayed in
+the old neighborhood and crashed into whatever ended up there. The
+autoplacer moves everything together so the cluster relocates as a
+unit.
+
+Smoke test on the power_module post-board-resize:
+  - 1369 mm → 1014 mm ratsnest length (-26%)
+  - 60 → 55 crossings (-8%, modest, see caveat below)
+  - 66 of 71 components moved (5 anchors: BAT1, J1, J2, J3, SW1)
+  - 88 bbox overlaps still pending in the last iteration (see caveat)
+
+Caveats (v1, to address in v2 - tasks #184, #185):
+  1. Crossing count uses component-center positions for ratsnest
+     endpoints. The "real" ratsnest uses pad positions, so the v1
+     metric undercounts crossings (60 vs the 224 get_ratsnest reports
+     on the same board). Direction-of-change is still correct.
+  2. Last-iteration overlaps not fully resolved — default damping of
+     0.99 over 200 iters shrinks step size to ~0.13 mm, while springs
+     keep pulling. Need to tune (higher kRepulseStep + lower damping)
+     or run multiple passes.
+
+Same load path as the rest of the placement tools: DRC
+unconnected_items cache (auto-discovered) for the ratsnest, pcbnew
+SWIG for footprint positions/bboxes.
+
 ### get_ratsnest: read-only inspection of the ratsnest (develop, 2026-05-19)
 
 Returns per-segment ratsnest data (from/to pad refs + positions, net,

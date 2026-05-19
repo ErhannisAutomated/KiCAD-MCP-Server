@@ -43,6 +43,33 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
+  // relax_placement
+  server.tool(
+    "relax_placement",
+    "Force-directed PCB placement relaxation. Pulls connected components together (springs along ratsnest segments) while pushing overlapping ones apart, keeping anchored components fixed (J*/SW*/BAT* and through-hole-dominant footprints by default; override with lockedRefs). Iterates max_iters times with damping. Use dryRun=true to try parameters before committing. Reports before/after total ratsnest length and crossing count so you know whether it helped — if delta is positive (length grew), revert and tune. Source: DRC unconnected_items cache from prior get_drc_violations/run_drc call.",
+    {
+      lockedRefs: z.array(z.string()).optional().describe("Refs to keep fixed (overrides the J/SW/BAT default). Pass empty array to anchor nothing."),
+      maxIters: z.number().optional().describe("Number of iterations (default 200)."),
+      kAttract: z.number().optional().describe("Spring constant per mm of error (default 0.02). Higher = faster convergence but oscillation risk."),
+      kRepulseStep: z.number().optional().describe("Repulsion strength: fraction of bbox-overlap pushed per iter (default 1.0 = resolve fully in one step)."),
+      minGapMm: z.number().optional().describe("Min padding added around each bbox before computing overlap. Default 0.3 mm."),
+      stepMm: z.number().optional().describe("Max movement per component per iter (force magnitude cap). Default 1.0 mm."),
+      damping: z.number().optional().describe("Step-size multiplier per iter (default 0.99 — gentle anneal)."),
+      keepInBbox: z.object({
+        left: z.number(), top: z.number(), right: z.number(), bottom: z.number(),
+      }).optional().describe("Keep-in rectangle in mm. Default: board Edge.Cuts bbox tightened by 1 mm."),
+      dryRun: z.boolean().optional().describe("Compute new positions without applying. Default false."),
+      drcViolationsPath: z.string().optional().describe("Path to DRC JSON. Defaults to project-dir cache."),
+      boardPath: z.string().optional().describe("Path to .kicad_pcb. Defaults to currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("relax_placement", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // get_ratsnest
   server.tool(
     "get_ratsnest",
