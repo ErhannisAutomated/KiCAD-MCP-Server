@@ -1099,6 +1099,54 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "get_ratsnest",
+        "title": "Get Ratsnest",
+        "description": "Read-only inspection of the ratsnest (unrouted pad-pair connections). Returns per-segment endpoints with parsed refs/pads, net, length, plus pairwise geometric crossing detection on different nets. Source: DRC unconnected_items cache from a prior get_drc_violations/run_drc call (auto-discovered).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "netFilter": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Restrict to these nets.",
+                },
+                "refFilter": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": "Restrict to segments touching these refs.",
+                },
+                "includeSegments": {
+                    "type": "boolean",
+                    "description": "Emit per-segment list (default true).",
+                    "default": True,
+                },
+                "includeCrossings": {
+                    "type": "boolean",
+                    "description": "Detect segment crossings on different nets (default true, O(N²)).",
+                    "default": True,
+                },
+                "maxSegments": {
+                    "type": "number",
+                    "description": "Cap on segment list size. Default 1000.",
+                    "default": 1000,
+                },
+                "topNCrossingsPerRef": {
+                    "type": "number",
+                    "description": "Cap on per-ref crossing-contributors list. Default 10.",
+                    "default": 10,
+                },
+                "drcViolationsPath": {
+                    "type": "string",
+                    "description": "Explicit path to DRC JSON. Defaults to project-dir cache.",
+                },
+                "boardPath": {
+                    "type": "string",
+                    "description": "Path to .kicad_pcb. Defaults to currently-loaded board.",
+                },
+            },
+        },
+    },
+    {
         "name": "analyze_congestion",
         "title": "Analyze Routing Congestion",
         "description": "Grid-based routing-congestion analyzer. Divides the board into cells (default 5 mm) and computes per-cell pad density × ratsnest density. Returns top-N hotspots (each with member components — those are the candidates to move) plus per-net difficulty (max cell score along the ratsnest, so you can prioritise nets most likely to need re-placement). Read-only. Ratsnest data comes from the DRC unconnected_items cache — run get_drc_violations or run_drc first; the tool auto-finds the default cache JSON.",

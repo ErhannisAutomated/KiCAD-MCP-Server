@@ -4,6 +4,34 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### get_ratsnest: read-only inspection of the ratsnest (develop, 2026-05-19)
+
+Returns per-segment ratsnest data (from/to pad refs + positions, net,
+length) plus pairwise geometric crossing detection between segments
+on different nets. Includes per-ref crossing-contribution rollup so
+the caller can see *which components* are driving the crossing count.
+
+Source: same DRC unconnected_items cache as analyze_congestion (pcbnew
+SWIG's `GetConnectivity().GetRatsnestForNet()` returns opaque
+non-iterable objects from Python; the JSON-file detour is the
+practical entry point).
+
+Crossing detection is strict-interior segment-segment intersection
+(endpoint-touching ignored, so shared pads on multi-pad fan-outs
+don't false-positive). Opt-out via `includeCrossings: false` if you
+only want segment endpoints.
+
+Filed because re-placing on raw congestion data wasn't enough — I
+spread the BMS/charger groups north, the congestion analyzer said
+"much better", but routing was still going to be ugly. User pointed
+out the classic heuristic: minimize ratsnest crossings. This is the
+inspection tool for that. The companion mover (force-directed PCB
+autoplacer) is task #183.
+
+First validation on power_module post-board-resize: 182 segments,
+1423 mm total, 224 crossings, top contributor U4 at 146 (~65% of all
+crossings). Tells me exactly where to focus the next placement pass.
+
 ### analyze_congestion: grid-based routing-congestion analyzer (develop, 2026-05-19)
 
 Read-only tool that divides the board into a grid (default 5 mm cells)

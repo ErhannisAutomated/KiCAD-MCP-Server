@@ -351,6 +351,7 @@ class KiCADInterface:
             "place_near": self._handle_place_near,
             "check_pcb_integrity": self._handle_check_pcb_integrity,
             "analyze_congestion": self._handle_analyze_congestion,
+            "get_ratsnest": self._handle_get_ratsnest,
             "modify_trace": self.routing_commands.modify_trace,
             "copy_routing_pattern": self.routing_commands.copy_routing_pattern,
             "get_nets_list": self.routing_commands.get_nets_list,
@@ -6568,6 +6569,63 @@ print("ok")
             )
         except Exception as e:
             logger.error(f"Error in analyze_congestion: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_get_ratsnest(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Return per-segment ratsnest data + crossing detection.
+
+        Read-only inspection of the connectivity work-list. Sourced
+        from the DRC unconnected_items cache (run get_drc_violations
+        or run_drc first; this handler auto-discovers the default
+        cache file in the project dir).
+
+        Optional:
+          - ``netFilter``: list of net names to restrict to.
+          - ``refFilter``: list of refs to restrict to (segments whose
+            endpoint touches a ref in this list).
+          - ``includeSegments``: emit segment list (default true).
+          - ``includeCrossings``: detect segment-segment crossings on
+            different nets (default true, O(N²)).
+          - ``maxSegments``: cap segment list size (default 1000).
+          - ``topNCrossingsPerRef``: cap top-contributors list (default 10).
+          - ``drcViolationsPath``: explicit DRC JSON path; default the
+            project-dir cache file.
+        """
+        logger.info("Running get_ratsnest")
+        try:
+            from commands.ratsnest import get_ratsnest
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+
+            drc_path = params.get("drcViolationsPath")
+            if not drc_path:
+                pcb_path = Path(board.GetFileName())
+                candidate = pcb_path.parent / f"{pcb_path.stem}_drc_violations.json"
+                if candidate.exists():
+                    drc_path = str(candidate)
+
+            return get_ratsnest(
+                board,
+                drc_violations_path=drc_path,
+                net_filter=params.get("netFilter"),
+                ref_filter=params.get("refFilter"),
+                include_segments=params.get("includeSegments", True),
+                include_crossings=params.get("includeCrossings", True),
+                max_segments=int(params.get("maxSegments", 1000)),
+                top_n_crossings_per_ref=int(params.get("topNCrossingsPerRef", 10)),
+            )
+        except Exception as e:
+            logger.error(f"Error in get_ratsnest: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
     def _handle_decoupling_audit(self, params: Dict[str, Any]) -> Dict[str, Any]:

@@ -43,6 +43,28 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
+  // get_ratsnest
+  server.tool(
+    "get_ratsnest",
+    "Read-only inspection of the ratsnest (the list of pad-pair connections still needing routes — what KiCAD draws as thin lines). Returns per-segment endpoints (with parsed component refs and pad numbers), net, length, plus pairwise geometric crossing detection on different nets. Use this to evaluate \"is this layout routable?\" and to debug placement decisions. Pairs with analyze_congestion (which shows dense regions): ratsnest shows which lines have to thread through those regions. Source: DRC unconnected_items cache from a prior get_drc_violations/run_drc call.",
+    {
+      netFilter: z.array(z.string()).optional().describe("Restrict to these nets (e.g. [\"BAT+\",\"V12_OUT\"])."),
+      refFilter: z.array(z.string()).optional().describe("Restrict to segments touching these component refs (e.g. [\"U1\",\"U3\"])."),
+      includeSegments: z.boolean().optional().describe("Emit the per-segment list (default true). Set false for summary-only."),
+      includeCrossings: z.boolean().optional().describe("Detect segment-segment crossings on different nets (default true, O(N²))."),
+      maxSegments: z.number().optional().describe("Cap on the segment list size (default 1000)."),
+      topNCrossingsPerRef: z.number().optional().describe("Cap on the per-ref crossing-contributors list (default 10)."),
+      drcViolationsPath: z.string().optional().describe("Explicit path to a DRC violations JSON. Defaults to the project-dir cache from a prior get_drc_violations/run_drc call."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("get_ratsnest", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // analyze_congestion
   server.tool(
     "analyze_congestion",
