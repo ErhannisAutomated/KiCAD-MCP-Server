@@ -6631,20 +6631,20 @@ print("ok")
             return {"success": False, "message": str(e)}
 
     def _handle_relax_placement(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Force-directed PCB placement relaxation.
+        """v2 unified force-directed PCB placement relaxation.
 
-        Pulls connected components together (springs along ratsnest
-        segments) while pushing overlapping ones apart, keeping
-        anchored components fixed (connectors, BAT-type, switches by
-        default; or pass ``lockedRefs`` to override). Reports
-        before/after ratsnest length + crossing count so the caller
-        can judge whether the relax helped.
+        Pulls connected components together via pin-wise springs
+        (strength resolved per net-class) and pushes overlapping
+        bodies apart via OBB-cubic-ramp repulsion. Anchored components
+        (connectors, BAT/SW/J* refs by default; override via
+        ``lockedRefs``) stay fixed.
 
-        ``dryRun`` computes new positions without writing them — use
-        it to try parameters first. Default behavior writes through
-        (auto-save persists).
+        Schedule: cluster (springs only) → spread (repulsion ramps in)
+        → snap (rotation snap ramps in) → relax (full snap, low temp).
+
+        ``dryRun`` computes new positions without writing them.
         """
-        logger.info("Running relax_placement")
+        logger.info("Running relax_placement (v2)")
         try:
             from commands.pcb_autoplacer import relax_placement
 
@@ -6660,34 +6660,19 @@ print("ok")
                     "errorDetails": "Pass boardPath= or call open_project first",
                 }
 
-            drc_path = params.get("drcViolationsPath")
-            if not drc_path:
-                pcb_path = Path(board.GetFileName())
-                candidate = pcb_path.parent / f"{pcb_path.stem}_drc_violations.json"
-                if candidate.exists():
-                    drc_path = str(candidate)
-
-            keep_in = params.get("keepInBbox")
-            if keep_in and isinstance(keep_in, dict):
-                keep_in_tuple = (
-                    float(keep_in["left"]), float(keep_in["top"]),
-                    float(keep_in["right"]), float(keep_in["bottom"]),
-                )
-            else:
-                keep_in_tuple = None
-
             return relax_placement(
                 board,
-                drc_violations_path=drc_path,
                 locked_refs=params.get("lockedRefs"),
-                max_iters=int(params.get("maxIters", 200)),
-                k_attract=float(params.get("kAttract", 0.02)),
-                k_repulse_step=float(params.get("kRepulseStep", 1.0)),
-                min_gap_mm=float(params.get("minGapMm", 0.30)),
-                step_mm=float(params.get("stepMm", 1.0)),
-                damping=float(params.get("damping", 0.99)),
-                keep_in_bbox=keep_in_tuple,
+                margin_mm=float(params.get("marginMm", 1.0)),
+                spring_k=float(params.get("springK", 0.1)),
+                repulsion_k_peak=float(params.get("repulsionKPeak", 30.0)),
+                rotation_snap_peak=float(params.get("rotationSnapPeak", 3.0)),
+                cluster_iters=int(params.get("clusterIters", 30)),
+                spread_iters=int(params.get("spreadIters", 40)),
+                snap_iters=int(params.get("snapIters", 30)),
+                relax_iters=int(params.get("relaxIters", 20)),
                 dry_run=bool(params.get("dryRun", False)),
+                auto_classify_planes=bool(params.get("autoClassifyPlanes", True)),
             )
         except Exception as e:
             logger.error(f"Error in relax_placement: {e}", exc_info=True)

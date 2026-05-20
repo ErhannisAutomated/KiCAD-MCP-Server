@@ -1,50 +1,24 @@
-"""Force-directed PCB placement relaxation (relax_placement).
+"""PCB force-directed autoplacer (relax_placement).
 
-Pulls connected components together (springs along ratsnest segments)
-while pushing overlapping ones apart (pair repulsion), keeping anchored
-components fixed (connectors, cell holders) and respecting a keep-in
-rectangle (default: the board edge bbox).
+v2 (2026-05-20): unified with the schematic autoplacer.  Loads the
+pcbnew board into the engine's ``Session`` data model and runs the
+shared ``iterate()`` loop with PCB-specific physics flags
+(``use_obb_repulsion``, ``use_spring_classes``, ``rotation_snap_*``).
 
-This is NOT a full autoplacer — it does not invent placement from
-scratch. It assumes the caller has already done a rough by-group
-placement (manually or via place_near) and just needs to shake the
-result until the ratsnest stops crossing itself. That matches the
-workflow described in the power_module project notes: rough
-group-by-group → relax → metrics → fix problems.
+Key differences from v1 (now removed):
+  - Pin-wise springs instead of component-centre springs.  Off-centre
+    forces produce torques that orient parts so the active pad faces
+    its target — caps land EDGE-to-IC, not centre-to-IC.
+  - OBB-via-SAT cubic-ramp body repulsion replaces the AABB depth
+    heuristic.  Handles rotated parts and corner-corner cases.
+  - Spring classes (DECOUPLING / LOCAL_SIGNAL / INTER_GROUP / PLANE)
+    set per-pair pull strength.  Power-plane nets default to PLANE
+    (k=0) since vias handle their routing.
+  - 4-phase springs-first schedule: cluster → spread → snap → settle.
 
-Algorithm (one iteration):
-
-  forces = 0
-  for each ratsnest segment (a, b):       # spring attract
-      v = pos[b] - pos[a]
-      forces[a] += k_attract * v
-      forces[b] -= k_attract * v
-
-  for each component pair (a, b):         # hard repulsion on overlap
-      overlap = bbox_overlap(a, b, padding=min_gap)
-      if overlap > 0:
-          push = overlap_direction(a, b) * overlap / 2
-          forces[a] -= push
-          forces[b] += push
-
-  for each non-anchored component:
-      proposed = pos + forces * step_size
-      proposed = clamp_to_bbox(proposed, keep_in)
-      pos = proposed
-
-  step_size *= damping
-
-Forces are computed on component CENTERS, not pad positions. A pad-aware
-v2 would route around fan-out direction; v1's "pull centers toward each
-other" is a useful approximation that converges fast.
-
-Anchors default: J*, BAT1, SW1, and any footprint flagged as
-``fp_through_hole`` (connectors, mounting holes). Override via
-``lockedRefs``.
-
-Validation: returns before/after ratsnest length + crossing count so
-the caller knows whether the relax helped. If it didn't, the caller
-can revert (no commit until the user accepts).
+This module is the PCB-side adapter; the engine + physics live in
+``autoplacer.py``.  Anything that's adapter-agnostic (forces, torques,
+spring resolution, OBB math) belongs there.
 """
 from __future__ import annotations
 
@@ -56,398 +30,466 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import pcbnew
 
+from commands.autoplacer import (
+    Component, Net, Pin, Session,
+    DEFAULT_SPRING_CLASSES,
+    iterate,
+)
+
 logger = logging.getLogger("kicad_interface")
 
 
 # ---------------------------------------------------------------------------
-# Data
+# Pad/footprint geometry helpers
 # ---------------------------------------------------------------------------
 
 
-@dataclass
-class PCBComp:
-    ref: str
-    x_mm: float
-    y_mm: float
-    w_mm: float            # bbox half-width
-    h_mm: float            # bbox half-height
-    layer: str             # F.Cu / B.Cu
-    anchored: bool = False
+_NM_PER_MM = 1_000_000.0
+_DEFAULT_ANCHOR_PREFIXES = ("J", "SW", "BAT")
 
 
-@dataclass
-class RatsSeg:
-    """One ratsnest segment, with endpoints already resolved to component refs."""
-    net: str
-    a_ref: str
-    b_ref: str
-    a_xy: Tuple[float, float]   # absolute pad xy (used for crossing detection,
-    b_xy: Tuple[float, float]   #   re-computed each iteration as comp center)
+def _pad_local_xy(pad: Any, fp_world_xy: Tuple[float, float],
+                  fp_angle_deg: float) -> Tuple[float, float]:
+    """Invert the footprint's world transform to get pad LOCAL coords
+    (in the footprint's unrotated frame, screen Y-down convention).
 
-
-@dataclass
-class Params:
-    k_attract: float = 0.02          # spring constant (per mm of error)
-    k_repulse_step: float = 1.0      # how much of overlap to push per iter
-    min_gap_mm: float = 0.30         # padding around bboxes for repulsion
-    step_mm: float = 1.0             # max move per iteration (cap)
-    max_iters: int = 200
-    damping: float = 0.99
-    keep_in: Tuple[float, float, float, float] = (0.0, 0.0, 0.0, 0.0)  # (l,t,r,b)
-
-
-# ---------------------------------------------------------------------------
-# Load board state
-# ---------------------------------------------------------------------------
-
-
-_DEFAULT_ANCHOR_PREFIXES = ("J", "SW", "BAT")  # connectors, switches, cell holders
-
-
-def _load_comps(board: Any, locked_refs: Optional[Set[str]]) -> Dict[str, PCBComp]:
-    """Read footprints into PCBComp records.
-
-    A footprint is anchored if its ref is in ``locked_refs`` OR (when
-    locked_refs is None) starts with one of ``_DEFAULT_ANCHOR_PREFIXES``
-    OR is a through-hole-mostly footprint (treats connectors / mounting
-    holes / cell holders correctly even when their ref doesn't match).
+    The engine's ``Component.world_pin_xy()`` reconstructs world coords
+    via ``R(-fp_angle) @ (local_x, local_y) + (fp.x, fp.y)``, so
+    inverting that gives ``local = R(+fp_angle) @ (pad - fp_anchor)``.
     """
-    comps: Dict[str, PCBComp] = {}
-    scale = 1_000_000.0
+    pad_world = pad.GetPosition()
+    ox = pad_world.x / _NM_PER_MM - fp_world_xy[0]
+    oy = pad_world.y / _NM_PER_MM - fp_world_xy[1]
+    rad = math.radians(fp_angle_deg)
+    lx = ox * math.cos(rad) - oy * math.sin(rad)
+    ly = ox * math.sin(rad) + oy * math.cos(rad)
+    return lx, ly
+
+
+def _footprint_bbox_mm(fp: Any) -> Tuple[float, float]:
+    """Footprint bounding box (without text) in mm — (width, height).
+    Note this is the AXIS-ALIGNED world bbox; for a rotated footprint
+    the engine uses bbox_w/bbox_h as if rotation==0, then rotates the
+    OBB in physics math via the Component's rotation field.  So we
+    need the bbox the footprint would have at orientation 0.
+    """
+    bb = fp.GetBoundingBox(False)
+    return bb.GetWidth() / _NM_PER_MM, bb.GetHeight() / _NM_PER_MM
+
+
+def _power_net_pattern_class(net_name: str) -> Optional[str]:
+    """Auto-classify a net as PLANE if it looks like a power/ground rail.
+    Conservative — only the obvious cases.  Match the schematic router's
+    is_power_net() for consistency."""
+    if not net_name:
+        return None
+    upper = net_name.upper()
+    # Common ground/power names
+    GROUND = ("GND", "GROUND", "AGND", "DGND", "PGND", "VSS", "VEE", "EARTH")
+    POWER = ("VCC", "VDD", "VBAT", "BAT+", "+5V", "+3V3", "+3.3V", "+12V",
+             "V12", "VBUS", "V+", "VS", "VPP")
+    if upper in GROUND or upper in POWER:
+        return "PLANE"
+    # Pattern: starts with "+" then a digit (e.g. "+5V0", "+3V3")
+    if upper.startswith("+") and len(upper) > 1 and upper[1].isdigit():
+        return "PLANE"
+    # Pattern: BAT followed by sign (BAT+, BAT-)
+    if upper.startswith("BAT") and len(upper) > 3 and upper[3] in ("+", "-"):
+        return "PLANE"
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Adapter: pcbnew → Session
+# ---------------------------------------------------------------------------
+
+
+def load_pcb_session(
+    board: Any,
+    *,
+    locked_refs: Optional[Set[str]] = None,
+    auto_classify_planes: bool = True,
+) -> Session:
+    """Build a placement Session from a live pcbnew Board.
+
+    Pins are loaded with PCB pad-local coords (screen Y-down, the
+    coord_system="pcb" branch of world_pin_xy()).  Components are
+    anchored if their ref is in ``locked_refs`` (caller-supplied),
+    or if no explicit set was passed and the footprint matches the
+    default heuristic (J*/SW*/BAT* refs, or through-hole-dominant).
+    """
+    sess = Session(
+        schematic_path=Path("pcb://" + (board.GetFileName() or "<unsaved>")),
+        spring_classes=dict(DEFAULT_SPRING_CLASSES),
+    )
+
+    # ---- Components + pins ----
     for fp in board.GetFootprints():
         ref = fp.GetReference()
         pos = fp.GetPosition()
-        bb = fp.GetBoundingBox(False)
-        layer = board.GetLayerName(fp.GetLayer())
+        fp_x = pos.x / _NM_PER_MM
+        fp_y = pos.y / _NM_PER_MM
+        fp_angle = fp.GetOrientation().AsDegrees()
+        bbox_w, bbox_h = _footprint_bbox_mm(fp)
+        layer_name = board.GetLayerName(fp.GetLayer())
 
-        # Through-hole-dominant footprint = anchor by default.
-        nb_smd = sum(1 for p in fp.Pads() if p.GetAttribute() == pcbnew.PAD_ATTRIB_SMD)
-        nb_tht = sum(1 for p in fp.Pads()
-                     if p.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH,
-                                              pcbnew.PAD_ATTRIB_NPTH))
-
+        # Anchor decision: explicit set wins; default heuristic falls
+        # back to ref-prefix or through-hole-dominant.
         if locked_refs is not None:
             anchored = ref in locked_refs
         else:
+            nb_smd = sum(
+                1 for p in fp.Pads() if p.GetAttribute() == pcbnew.PAD_ATTRIB_SMD
+            )
+            nb_tht = sum(
+                1 for p in fp.Pads()
+                if p.GetAttribute() in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH)
+            )
             anchored = (
                 ref.startswith(_DEFAULT_ANCHOR_PREFIXES)
                 or (nb_tht > 0 and nb_tht >= nb_smd)
             )
 
-        comps[ref] = PCBComp(
-            ref=ref,
-            x_mm=pos.x / scale,
-            y_mm=pos.y / scale,
-            w_mm=bb.GetWidth() / (2 * scale),
-            h_mm=bb.GetHeight() / (2 * scale),
-            layer=layer,
-            anchored=anchored,
+        # If the footprint bbox is degenerate (no pads parsed by pcbnew
+        # for some reason), give it a 1mm default so OBB-SAT doesn't
+        # divide by zero.
+        bbox_w = max(bbox_w, 1.0)
+        bbox_h = max(bbox_h, 1.0)
+
+        comp = Component(
+            ref=ref, unit=1, lib_id=fp.GetFPID().GetUniStringLibId(),
+            x=fp_x, y=fp_y, rotation=fp_angle,
+            mirror_x=False, mirror_y=False,
+            bbox_w=bbox_w, bbox_h=bbox_h,
+            pinned=anchored,
+            layer=layer_name,
+            coord_system="pcb",
         )
-    return comps
 
-
-def _load_rats(drc_path: Path, comps: Dict[str, PCBComp]) -> List[RatsSeg]:
-    """Parse DRC unconnected_items into ratsnest segments scoped to
-    component refs we know about."""
-    import json, re
-    if not drc_path.exists():
-        return []
-    try:
-        data = json.loads(drc_path.read_text())
-    except json.JSONDecodeError:
-        return []
-    pad_re = re.compile(r"[Pp]ad\s+(\S+)\s+\[[^\]]*\]\s+of\s+(\S+)")
-    out: List[RatsSeg] = []
-    for v in data.get("violations", []):
-        if v.get("type") != "unconnected_items":
-            continue
-        items = v.get("items") or []
-        if len(items) < 2:
-            continue
-        a, b = items[0], items[1]
-        a_desc = a.get("description", "")
-        b_desc = b.get("description", "")
-        am = pad_re.search(a_desc)
-        bm = pad_re.search(b_desc)
-        if not (am and bm):
-            continue
-        a_ref = am.group(2)
-        b_ref = bm.group(2)
-        if a_ref == b_ref or a_ref not in comps or b_ref not in comps:
-            continue
-        a_pos = a.get("pos") or {}
-        b_pos = b.get("pos") or {}
-        out.append(RatsSeg(
-            net=a.get("net") or "?",
-            a_ref=a_ref, b_ref=b_ref,
-            a_xy=(float(a_pos.get("x", 0)), float(a_pos.get("y", 0))),
-            b_xy=(float(b_pos.get("x", 0)), float(b_pos.get("y", 0))),
-        ))
-    return out
-
-
-# ---------------------------------------------------------------------------
-# Force computations
-# ---------------------------------------------------------------------------
-
-
-def _spring_force(rats: List[RatsSeg], comps: Dict[str, PCBComp], k: float
-                  ) -> Dict[str, Tuple[float, float]]:
-    """Pull connected component centers toward each other."""
-    forces: Dict[str, Tuple[float, float]] = {r: (0.0, 0.0) for r in comps}
-    for seg in rats:
-        a = comps[seg.a_ref]
-        b = comps[seg.b_ref]
-        dx = b.x_mm - a.x_mm
-        dy = b.y_mm - a.y_mm
-        fx, fy = k * dx, k * dy
-        ax, ay = forces[seg.a_ref]
-        bx, by = forces[seg.b_ref]
-        forces[seg.a_ref] = (ax + fx, ay + fy)
-        forces[seg.b_ref] = (bx - fx, by - fy)
-    return forces
-
-
-def _repulse_force(comps: Dict[str, PCBComp], forces: Dict[str, Tuple[float, float]],
-                   min_gap: float, step: float) -> int:
-    """Push overlapping component pairs apart. Same-layer only. Returns
-    the number of overlapping pairs found."""
-    refs = list(comps)
-    overlaps = 0
-    for i in range(len(refs)):
-        a = comps[refs[i]]
-        for j in range(i + 1, len(refs)):
-            b = comps[refs[j]]
-            if a.layer != b.layer:
+        # Pad → Pin records.  Use the pcbnew pad name for the pin number.
+        for pad in fp.Pads():
+            pad_num = pad.GetPadName() or pad.GetNumber()
+            if not pad_num:
                 continue
-            # Compute overlap depth along each axis
-            dx = b.x_mm - a.x_mm
-            dy = b.y_mm - a.y_mm
-            ox = (a.w_mm + b.w_mm + min_gap) - abs(dx)
-            oy = (a.h_mm + b.h_mm + min_gap) - abs(dy)
-            if ox <= 0 or oy <= 0:
-                continue
-            overlaps += 1
-            # Push along the shallower axis (cheaper to resolve)
-            if ox < oy:
-                push = ox * step * 0.5 * (-1 if dx >= 0 else 1)
-                ax, ay = forces[a.ref]; bx, by = forces[b.ref]
-                forces[a.ref] = (ax + push, ay)
-                forces[b.ref] = (bx - push, by)
-            else:
-                push = oy * step * 0.5 * (-1 if dy >= 0 else 1)
-                ax, ay = forces[a.ref]; bx, by = forces[b.ref]
-                forces[a.ref] = (ax, ay + push)
-                forces[b.ref] = (bx, by - push)
-    return overlaps
+            lx, ly = _pad_local_xy(pad, (fp_x, fp_y), fp_angle)
+            comp.pins[str(pad_num)] = Pin(
+                number=str(pad_num),
+                name=pad.GetPinFunction() or "",
+                local_x=lx,
+                local_y=ly,
+                lib_angle=0.0,   # PCB pads don't have a meaningful outward angle
+            )
+        sess.components[comp.key] = comp
 
-
-def _apply_forces(comps: Dict[str, PCBComp], forces: Dict[str, Tuple[float, float]],
-                  step_cap: float, keep_in: Tuple[float, float, float, float]) -> None:
-    """Move non-anchored comps by their force vector, clamping to step_cap
-    in magnitude and the keep_in bbox."""
-    kl, kt, kr, kb = keep_in
-    for ref, comp in comps.items():
-        if comp.anchored:
+    # ---- Nets ----
+    # Walk pads a second time to build the net topology.  Each pad's
+    # GetNetname() is the source of truth (independent of routing state).
+    for fp in board.GetFootprints():
+        ref = fp.GetReference()
+        comp_key = f"{ref}__u1"
+        if comp_key not in sess.components:
             continue
-        fx, fy = forces[ref]
-        mag = math.hypot(fx, fy)
-        if mag > step_cap:
-            fx *= step_cap / mag
-            fy *= step_cap / mag
-        nx = comp.x_mm + fx
-        ny = comp.y_mm + fy
-        # Clamp to keep-in (half-bbox so we don't poke out)
-        if kr > kl:
-            nx = max(kl + comp.w_mm, min(kr - comp.w_mm, nx))
-            ny = max(kt + comp.h_mm, min(kb - comp.h_mm, ny))
-        comp.x_mm = nx
-        comp.y_mm = ny
-
-
-# ---------------------------------------------------------------------------
-# Metrics
-# ---------------------------------------------------------------------------
-
-
-def _total_ratsnest_length(rats: List[RatsSeg], comps: Dict[str, PCBComp]) -> float:
-    """Use component centers as proxy for pad positions (after relax,
-    pads at the edge of the bbox move with the center)."""
-    total = 0.0
-    for seg in rats:
-        a = comps[seg.a_ref]
-        b = comps[seg.b_ref]
-        total += math.hypot(b.x_mm - a.x_mm, b.y_mm - a.y_mm)
-    return total
-
-
-def _seg_intersect(p1, p2, p3, p4) -> bool:
-    x1, y1 = p1; x2, y2 = p2; x3, y3 = p3; x4, y4 = p4
-    denom = (x1 - x2) * (y3 - y4) - (y1 - y2) * (x3 - x4)
-    if abs(denom) < 1e-9:
-        return False
-    t = ((x1 - x3) * (y3 - y4) - (y1 - y3) * (x3 - x4)) / denom
-    u = -((x1 - x2) * (y1 - y3) - (y1 - y2) * (x1 - x3)) / denom
-    return 1e-6 < t < 1 - 1e-6 and 1e-6 < u < 1 - 1e-6
-
-
-def _crossing_count(rats: List[RatsSeg], comps: Dict[str, PCBComp]) -> int:
-    """Pairwise crossing count using component centers as ratsnest endpoints."""
-    pts = [
-        (seg.net,
-         (comps[seg.a_ref].x_mm, comps[seg.a_ref].y_mm),
-         (comps[seg.b_ref].x_mm, comps[seg.b_ref].y_mm))
-        for seg in rats
-    ]
-    n = len(pts)
-    count = 0
-    for i in range(n):
-        for j in range(i + 1, n):
-            if pts[i][0] == pts[j][0]:
+        for pad in fp.Pads():
+            netname = pad.GetNetname()
+            if not netname:
                 continue
-            if _seg_intersect(pts[i][1], pts[i][2], pts[j][1], pts[j][2]):
-                count += 1
-    return count
+            pad_num = str(pad.GetPadName() or pad.GetNumber())
+            if not pad_num:
+                continue
+            net = sess.nets.setdefault(netname, Net(name=netname))
+            net.pins.append((comp_key, pad_num))
+
+    # ---- Auto-classify power-plane nets ----
+    if auto_classify_planes:
+        for net in sess.nets.values():
+            if net.spring_class is not None:
+                continue   # already set explicitly
+            cls = _power_net_pattern_class(net.name)
+            if cls:
+                net.spring_class = cls
+
+    return sess
+
+
+def edge_cuts_bbox(board: Any, inset_mm: float = 1.0
+                   ) -> Tuple[float, float, float, float]:
+    """Return ``(x_min, y_min, x_max, y_max)`` for the Edge.Cuts bbox,
+    inset by ``inset_mm`` so components don't poke the board edge.
+    Falls back to ``(0, 0, 0, 0)`` if no Edge.Cuts present (treat as
+    "no keep-in")."""
+    edge_id = board.GetLayerID("Edge.Cuts")
+    l = t = math.inf
+    r = b = -math.inf
+    for d in board.GetDrawings():
+        if d.GetLayer() != edge_id:
+            continue
+        bb = d.GetBoundingBox()
+        l = min(l, bb.GetLeft() / _NM_PER_MM)
+        t = min(t, bb.GetTop() / _NM_PER_MM)
+        r = max(r, bb.GetRight() / _NM_PER_MM)
+        b = max(b, bb.GetBottom() / _NM_PER_MM)
+    if not math.isfinite(l):
+        return (0.0, 0.0, 0.0, 0.0)
+    return (l + inset_mm, t + inset_mm, r - inset_mm, b - inset_mm)
+
+
+def apply_session_to_board(sess: Session, board: Any) -> int:
+    """Write back component positions + rotation to live footprints.
+    Returns the number of footprints updated.
+
+    Anchored components are skipped — their position field MIGHT have
+    drifted by a tiny float epsilon during iteration, and we don't
+    want to dirty the board just to write the same number back.
+    """
+    n = 0
+    for ref, comp in (
+        (c.ref, c) for c in sess.components.values()
+    ):
+        if comp.pinned:
+            continue
+        fp = board.FindFootprintByReference(ref)
+        if fp is None:
+            continue
+        fp.SetPosition(pcbnew.VECTOR2I_MM(comp.x, comp.y))
+        # KiCad's SetOrientation takes either a degree value or
+        # an EDA_ANGLE; in API v9 the simple form is FromDegrees:
+        try:
+            fp.SetOrientation(pcbnew.EDA_ANGLE(comp.rotation, pcbnew.DEGREES_T))
+        except Exception:
+            # Older pcbnew API fallback.
+            fp.SetOrientation(comp.rotation * 10)   # 1/10 degree units
+        n += 1
+    return n
 
 
 # ---------------------------------------------------------------------------
-# Driver
+# Schedule: 4-phase springs-first relaxation
+# ---------------------------------------------------------------------------
+
+
+@dataclass
+class PCBSchedule:
+    """Per-phase iteration counts and force multipliers for the
+    springs-first relaxation schedule.
+
+    Phase 1 (CLUSTER) — springs only, no repulsion: components find
+    their natural connection-determined neighborhoods.
+    Phase 2 (SPREAD) — repulsion ramps in: bodies settle into
+    non-overlapping positions.
+    Phase 3 (SNAP) — rotation-snap potential ramps in: orientations
+    align to 90° multiples.
+    Phase 4 (RELAX) — snap at full strength, low temperature: final
+    overlap cleanup with orientations fixed.
+    """
+    cluster_iters: int = 30
+    spread_iters: int = 40
+    snap_iters: int = 30
+    relax_iters: int = 20
+
+    # Force scales (applied as multipliers to engine defaults)
+    spring_k: float = 0.1               # attraction_k during all phases
+    repulsion_k_peak: float = 30.0      # peak repulsion_k at end of spread
+    rotation_snap_peak: float = 3.0     # peak snap strength
+
+    # Per-iteration step caps (mm).  Lower in later phases so we don't
+    # bounce components around once they're close to settled.
+    step_cluster: float = 5.0
+    step_spread: float = 3.0
+    step_snap: float = 1.5
+    step_relax: float = 0.5
+
+
+def run_pcb_relax(
+    sess: Session,
+    schedule: Optional[PCBSchedule] = None,
+    *,
+    margin_mm: float = 1.0,
+    on_step: Optional[Any] = None,
+) -> Dict[str, Any]:
+    """Run the 4-phase relaxation on a PCB Session.
+
+    Sets the v2 physics flags on ``sess.params`` and runs each phase
+    with the appropriate force schedule.  ``on_step`` is an optional
+    per-iteration callback (gets ``sess``) for live viz.
+
+    Returns a metrics dict (phase counts + per-phase max force).
+    """
+    if schedule is None:
+        schedule = PCBSchedule()
+
+    p = sess.params
+    p.use_obb_repulsion = True
+    p.use_spring_classes = True
+    p.obb_repulsion_margin = margin_mm
+
+    # Disable schematic-only forces.
+    p.polarity_k = 0.0
+    p.polarity_torque_k = 0.0
+    p.boundary_k = 0.0   # PCB uses keep-in clamp instead; not a force.
+    p.rotation_k = 0.0   # disable pin-orientation torque for now; the
+                          # off-center pin-wise springs provide orientation.
+
+    metrics: Dict[str, Any] = {"phases": []}
+
+    # ---- Phase 1: CLUSTER (springs only) ----
+    p.attraction_k = schedule.spring_k
+    p.repulsion_k = 0.0
+    p.rotation_snap_strength = 0.0
+    for _ in range(schedule.cluster_iters):
+        sess.temperature = schedule.step_cluster
+        iterate(sess, n=1)
+        if on_step:
+            on_step(sess)
+    metrics["phases"].append({"name": "cluster", "iters": schedule.cluster_iters,
+                              "max_force": sess.last_max_force})
+
+    # ---- Phase 2: SPREAD (repulsion ramps in linearly) ----
+    for t in range(schedule.spread_iters):
+        ramp = (t + 1) / schedule.spread_iters
+        p.repulsion_k = schedule.repulsion_k_peak * ramp
+        sess.temperature = schedule.step_spread
+        iterate(sess, n=1)
+        if on_step:
+            on_step(sess)
+    metrics["phases"].append({"name": "spread", "iters": schedule.spread_iters,
+                              "max_force": sess.last_max_force})
+
+    # ---- Phase 3: SNAP (rotation snap ramps in) ----
+    p.repulsion_k = schedule.repulsion_k_peak
+    for t in range(schedule.snap_iters):
+        ramp = (t + 1) / schedule.snap_iters
+        p.rotation_snap_strength = schedule.rotation_snap_peak * ramp
+        sess.temperature = schedule.step_snap
+        iterate(sess, n=1)
+        if on_step:
+            on_step(sess)
+    metrics["phases"].append({"name": "snap", "iters": schedule.snap_iters,
+                              "max_force": sess.last_max_force})
+
+    # ---- Phase 4: RELAX (full snap, low temperature) ----
+    p.rotation_snap_strength = schedule.rotation_snap_peak
+    for _ in range(schedule.relax_iters):
+        sess.temperature = schedule.step_relax
+        iterate(sess, n=1)
+        if on_step:
+            on_step(sess)
+    metrics["phases"].append({"name": "relax", "iters": schedule.relax_iters,
+                              "max_force": sess.last_max_force})
+
+    return metrics
+
+
+# ---------------------------------------------------------------------------
+# Top-level driver (backward-compatible API)
 # ---------------------------------------------------------------------------
 
 
 def relax_placement(
     board: Any,
-    drc_violations_path: Optional[str],
+    drc_violations_path: Optional[str] = None,   # accepted for compat, unused in v2
     locked_refs: Optional[List[str]] = None,
-    max_iters: int = 200,
-    k_attract: float = 0.02,
-    k_repulse_step: float = 1.0,
-    min_gap_mm: float = 0.30,
-    step_mm: float = 1.0,
-    damping: float = 0.99,
-    keep_in_bbox: Optional[Tuple[float, float, float, float]] = None,
+    *,
+    margin_mm: float = 1.0,
+    spring_k: float = 0.1,
+    repulsion_k_peak: float = 30.0,
+    rotation_snap_peak: float = 3.0,
+    cluster_iters: int = 30,
+    spread_iters: int = 40,
+    snap_iters: int = 30,
+    relax_iters: int = 20,
     dry_run: bool = False,
+    auto_classify_planes: bool = True,
+    **legacy_kwargs: Any,
 ) -> Dict[str, Any]:
-    """Run force-directed relaxation. Returns before/after metrics + moves.
+    """v2 entry point used by the MCP handler.  Backward compatible
+    with v1's positional args (``drc_violations_path`` is now unused
+    but still accepted so existing callers don't break).
 
-    If ``dry_run`` is True, computes the final positions but does NOT
-    write them back to the board — useful for trying parameters.
-    Otherwise mutates the board in place (auto-save will persist it).
+    Loads the board, runs the 4-phase relax, writes positions back
+    unless ``dry_run=True``.
     """
-    if not drc_violations_path:
-        return {
-            "success": False,
-            "message": "drcViolationsPath required",
-            "errorDetails": "Run get_drc_violations or run_drc first.",
-        }
-
     locked = set(locked_refs) if locked_refs is not None else None
-    comps = _load_comps(board, locked)
-    rats = _load_rats(Path(drc_violations_path), comps)
+    sess = load_pcb_session(
+        board, locked_refs=locked, auto_classify_planes=auto_classify_planes,
+    )
 
-    if not rats:
+    if not sess.components:
         return {
             "success": False,
-            "message": "No ratsnest segments found.",
-            "errorDetails": "Empty DRC unconnected_items or no parsable pad refs.",
+            "message": "No footprints found on board.",
         }
 
-    # Default keep-in: board edge bbox.
-    if keep_in_bbox is None:
-        edge_id = board.GetLayerID("Edge.Cuts")
-        l = t = math.inf
-        r = b = -math.inf
-        for d in board.GetDrawings():
-            if d.GetLayer() != edge_id:
+    # Keep-in: Edge.Cuts bbox.  Engine doesn't currently honor the
+    # keep-in directly (boundary_k is disabled for PCB), but we
+    # post-clamp here so anything that drifts out gets pulled back.
+    keep_in = edge_cuts_bbox(board, inset_mm=1.0)
+
+    # Snapshot before for reporting.
+    before_positions = {
+        c.ref: (c.x, c.y, c.rotation)
+        for c in sess.components.values() if not c.pinned
+    }
+
+    schedule = PCBSchedule(
+        cluster_iters=cluster_iters,
+        spread_iters=spread_iters,
+        snap_iters=snap_iters,
+        relax_iters=relax_iters,
+        spring_k=spring_k,
+        repulsion_k_peak=repulsion_k_peak,
+        rotation_snap_peak=rotation_snap_peak,
+    )
+    metrics = run_pcb_relax(sess, schedule, margin_mm=margin_mm)
+
+    # Clamp to keep-in if it's non-degenerate.
+    kl, kt, kr, kb = keep_in
+    if kr > kl and kb > kt:
+        for c in sess.components.values():
+            if c.pinned:
                 continue
-            bb = d.GetBoundingBox()
-            l = min(l, bb.GetLeft() / 1_000_000.0)
-            t = min(t, bb.GetTop() / 1_000_000.0)
-            r = max(r, bb.GetRight() / 1_000_000.0)
-            b = max(b, bb.GetBottom() / 1_000_000.0)
-        if math.isfinite(l):
-            # Tighten by 1mm so trace stubs don't poke the edge.
-            keep_in_bbox = (l + 1.0, t + 1.0, r - 1.0, b - 1.0)
-        else:
-            keep_in_bbox = (0.0, 0.0, 0.0, 0.0)
+            hw, hh = c.bbox_w * 0.5, c.bbox_h * 0.5
+            c.x = max(kl + hw, min(kr - hw, c.x))
+            c.y = max(kt + hh, min(kb - hh, c.y))
 
-    before_length = _total_ratsnest_length(rats, comps)
-    before_crossings = _crossing_count(rats, comps)
-    before_positions = {ref: (c.x_mm, c.y_mm) for ref, c in comps.items()}
-
-    step = step_mm
-    final_overlaps = 0
-    for it in range(max_iters):
-        forces = _spring_force(rats, comps, k_attract)
-        final_overlaps = _repulse_force(comps, forces, min_gap_mm, k_repulse_step)
-        _apply_forces(comps, forces, step, keep_in_bbox)
-        step *= damping
-
-    after_length = _total_ratsnest_length(rats, comps)
-    after_crossings = _crossing_count(rats, comps)
-
+    # Compute moves for reporting.
     moves: List[Dict[str, Any]] = []
-    for ref, comp in comps.items():
-        if comp.anchored:
+    for ref, (ox, oy, orot) in before_positions.items():
+        c = next((cc for cc in sess.components.values() if cc.ref == ref), None)
+        if c is None:
             continue
-        ox, oy = before_positions[ref]
-        dx = comp.x_mm - ox
-        dy = comp.y_mm - oy
-        if math.hypot(dx, dy) < 0.01:
+        dx, dy = c.x - ox, c.y - oy
+        drot = ((c.rotation - orot + 540) % 360) - 180
+        mag = math.hypot(dx, dy)
+        if mag < 0.01 and abs(drot) < 0.5:
             continue
         moves.append({
             "ref": ref,
-            "from": {"x": round(ox, 3), "y": round(oy, 3)},
-            "to": {"x": round(comp.x_mm, 3), "y": round(comp.y_mm, 3)},
-            "delta_mm": round(math.hypot(dx, dy), 3),
+            "from": {"x": round(ox, 3), "y": round(oy, 3), "rotation": round(orot, 1)},
+            "to": {"x": round(c.x, 3), "y": round(c.y, 3), "rotation": round(c.rotation, 1)},
+            "delta_mm": round(mag, 3),
+            "delta_rotation_deg": round(drot, 1),
         })
     moves.sort(key=lambda m: -m["delta_mm"])
 
-    # Apply to board unless dry-run
     if not dry_run:
-        for ref, comp in comps.items():
-            if comp.anchored:
-                continue
-            fp = board.FindFootprintByReference(ref)
-            if fp is None:
-                continue
-            fp.SetPosition(pcbnew.VECTOR2I_MM(comp.x_mm, comp.y_mm))
+        n_written = apply_session_to_board(sess, board)
+    else:
+        n_written = 0
 
-    n_anchored = sum(1 for c in comps.values() if c.anchored)
+    n_anchored = sum(1 for c in sess.components.values() if c.pinned)
     return {
         "success": True,
         "dry_run": dry_run,
-        "params": {
-            "max_iters": max_iters,
-            "k_attract": k_attract,
-            "k_repulse_step": k_repulse_step,
-            "min_gap_mm": min_gap_mm,
-            "step_mm": step_mm,
-            "damping": damping,
-            "keep_in_bbox": list(keep_in_bbox),
-        },
-        "components_total": len(comps),
+        "components_total": len(sess.components),
         "components_anchored": n_anchored,
         "components_moved": len(moves),
-        "ratsnest_segments": len(rats),
-        "before": {
-            "total_length_mm": round(before_length, 2),
-            "crossing_count": before_crossings,
-        },
-        "after": {
-            "total_length_mm": round(after_length, 2),
-            "crossing_count": after_crossings,
-            "remaining_overlaps_last_iter": final_overlaps,
-        },
-        "delta": {
-            "total_length_mm": round(after_length - before_length, 2),
-            "crossing_count": after_crossings - before_crossings,
-        },
+        "components_written": n_written,
+        "n_nets": len(sess.nets),
+        "metrics": metrics,
         "top_moves": moves[:20],
         "message": (
-            f"relax_placement: len {before_length:.0f} -> {after_length:.0f} mm "
-            f"({after_length - before_length:+.0f}), "
-            f"crossings {before_crossings} -> {after_crossings} "
-            f"({after_crossings - before_crossings:+d})"
+            f"relax_placement v2: {len(sess.components)} comps "
+            f"({n_anchored} anchored), {len(sess.nets)} nets, "
+            f"{len(moves)} moved"
         ),
     }

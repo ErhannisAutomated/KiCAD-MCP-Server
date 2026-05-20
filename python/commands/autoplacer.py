@@ -27,7 +27,7 @@ import re
 import uuid as uuid_lib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import sexpdata
 from sexpdata import Symbol
@@ -63,6 +63,22 @@ class Component:
     bbox_w: float = 7.62     # default ~3 grid units; refined from lib at load
     bbox_h: float = 7.62
     pinned: bool = False     # if True, position locked
+    # ---- spring-class v2 fields (introduced 2026-05-20). Optional;
+    # absence means "use defaults" so existing schematics keep working.
+    spring_class: Optional[str] = None
+    # pin_classes: per-pin assignments.  Bare-string value = pad-general;
+    # dict value = {"*": pad_general, "REF.PIN": connection_specific, ...}.
+    pin_classes: Dict[str, Union[str, Dict[str, str]]] = field(default_factory=dict)
+    margin: Optional[float] = None   # per-component overlap margin (mm); None = use engine default
+    layer: str = "schematic"         # F.Cu / B.Cu for PCB; "schematic" otherwise
+    # Coordinate system for pin local coords:
+    #   "schematic"  pin.local_y stored in LIB Y-up (the historical
+    #                schematic flow); world_pin_xy() Y-flips it.
+    #   "pcb"        pin.local_y stored directly in screen Y-down
+    #                (PCB pad local position); world_pin_xy() skips the
+    #                flip.  KiCad's rotation convention (visual CCW)
+    #                is shared by both — handled by ``rad = -rotation``.
+    coord_system: str = "schematic"
 
     @property
     def key(self) -> str:
@@ -81,7 +97,12 @@ class Component:
         # lib Y-up → screen Y-down via initial flip, then optional mirror,
         # then rotation (math-CCW negated to match eeschema's screen-CCW).
         lx = pin.local_x
-        ly = -pin.local_y  # Y-flip
+        if self.coord_system == "pcb":
+            # PCB pad local coords are already in screen Y-down convention
+            # (pcbnew returns them that way); no flip needed.
+            ly = pin.local_y
+        else:
+            ly = -pin.local_y  # Y-flip (lib Y-up → screen Y-down)
         if self.mirror_x:
             ly = -ly
         if self.mirror_y:
@@ -105,6 +126,125 @@ class Component:
 class Net:
     name: str
     pins: List[Tuple[str, str]] = field(default_factory=list)  # [(component_ref, pin_number), ...]
+    spring_class: Optional[str] = None   # whole-net spring class override
+
+
+# ----------------------------------------------------------------------
+# Spring classes (v2; constraint_version >= 2)
+# ----------------------------------------------------------------------
+
+
+@dataclass(frozen=True)
+class SpringClass:
+    """Per-connection spring tuning.  spring_k is a unitless multiplier
+    on the engine's base attraction_k.  natural_length lets a spring
+    rest at a non-zero distance (e.g. BULK_DECOUPLING at 3-5mm).
+    """
+    name: str
+    spring_k: float
+    natural_length: float = 0.0
+
+
+# Defaults baked into code; written to .kicad_pro on first run so the
+# user can edit.  Kept intentionally small — add classes when a layout
+# demands one rather than pre-populating speculative entries.
+DEFAULT_SPRING_CLASSES: Dict[str, SpringClass] = {
+    "DECOUPLING":   SpringClass("DECOUPLING",   spring_k=5.0),
+    "LOCAL_SIGNAL": SpringClass("LOCAL_SIGNAL", spring_k=1.0),
+    "INTER_GROUP":  SpringClass("INTER_GROUP",  spring_k=0.3),
+    "PLANE":        SpringClass("PLANE",        spring_k=0.0),
+}
+
+DEFAULT_CLASS_NAME = "LOCAL_SIGNAL"
+
+# Specificity levels for hierarchy resolution (highest = most specific).
+_SPEC_CONNECTION = 4    # pad-X-toward-pad-Y override
+_SPEC_PAD_GENERAL = 3   # pad-X all connections
+_SPEC_NET = 2           # whole net
+_SPEC_COMPONENT = 1     # component-wide default
+_SPEC_DEFAULT = 0       # engine default
+
+
+def resolve_pair_class(
+    classes: Dict[str, SpringClass],
+    nets: Dict[str, "Net"],
+    comp_a: "Component", pin_a: str,
+    comp_b: "Component", pin_b: str,
+    net_name: Optional[str],
+) -> SpringClass:
+    """Resolve the spring class governing the A↔B connection.
+
+    Five-level hierarchy (most specific wins):
+      1. connection-specific: pad X says "for connection to specific pad Y: class C"
+      2. pad-general:         pad X says "for any of my connections: class C"
+      3. net-level:           whole-net spring_class
+      4. component-level:     component-wide default
+      5. engine default:      LOCAL_SIGNAL
+
+    Returns the SAME class for both endpoints — Newton's third law
+    requires the pair share one spring constant.  When both sides have
+    an applicable assignment at the same specificity level, max
+    spring_k wins (a strong pull on either side likely encodes real
+    intent).
+
+    Unknown class names fall through to the next specificity level
+    (logged at debug) so a typo in .kicad_pro doesn't crash the run.
+    """
+    default = classes.get(DEFAULT_CLASS_NAME) or SpringClass(DEFAULT_CLASS_NAME, 1.0)
+    candidates: List[Tuple[int, SpringClass]] = []
+
+    def _lookup(name: Optional[str]) -> Optional[SpringClass]:
+        if not name:
+            return None
+        cls = classes.get(name)
+        if cls is None:
+            logger.debug("resolve_pair_class: unknown class %r — ignoring", name)
+        return cls
+
+    # Pad-level (both connection-specific and pad-general) from each side.
+    for self_comp, self_pin, other_comp, other_pin in (
+        (comp_a, pin_a, comp_b, pin_b),
+        (comp_b, pin_b, comp_a, pin_a),
+    ):
+        spec = self_comp.pin_classes.get(self_pin)
+        if spec is None:
+            continue
+        if isinstance(spec, str):
+            cls = _lookup(spec)
+            if cls is not None:
+                candidates.append((_SPEC_PAD_GENERAL, cls))
+        elif isinstance(spec, dict):
+            target_key = f"{other_comp.ref}.{other_pin}"
+            if target_key in spec:
+                cls = _lookup(spec[target_key])
+                if cls is not None:
+                    candidates.append((_SPEC_CONNECTION, cls))
+            if "*" in spec:
+                cls = _lookup(spec["*"])
+                if cls is not None:
+                    candidates.append((_SPEC_PAD_GENERAL, cls))
+
+    # Net-level (resolves by name).
+    if net_name:
+        net = nets.get(net_name)
+        if net and net.spring_class:
+            cls = _lookup(net.spring_class)
+            if cls is not None:
+                candidates.append((_SPEC_NET, cls))
+
+    # Component-level.
+    for comp in (comp_a, comp_b):
+        cls = _lookup(comp.spring_class)
+        if cls is not None:
+            candidates.append((_SPEC_COMPONENT, cls))
+
+    # Engine default.
+    candidates.append((_SPEC_DEFAULT, default))
+
+    # Most specific wins; ties → max spring_k.
+    max_spec = max(c[0] for c in candidates)
+    at_max = [c for level, c in candidates if level == max_spec]
+    return max(at_max, key=lambda c: c.spring_k)
 
 
 @dataclass
@@ -148,6 +288,22 @@ class Params:
     exclude_power_nets_from_attraction: bool = True
     attraction_excluded_nets: Tuple[str, ...] = ()
 
+    # ---- Unified-engine (v2) opt-in flags. Default off → no behavior
+    # change for the schematic flow that's been working since 2026-05.
+    # The PCB schedule turns these on.
+    use_obb_repulsion: bool = False     # body-aware cubic-ramp instead of 1/r²
+    use_spring_classes: bool = False    # per-pair spring constant from class resolver
+    # Cubic-ramp body repulsion margin in mm; rectangles within this
+    # distance of each other feel the force.
+    obb_repulsion_margin: float = 1.0
+    # Strength of the periodic rotation-snap torque (degrees-per-iter
+    # scale).  0 = no snap (free rotation); high = strong 90° lock.
+    # Used by the PCB schedule annealed up across the run.
+    rotation_snap_strength: float = 0.0
+    # Snap potential period in degrees: 90 = 0°/90°/180°/270° minima
+    # (KiCad convention); 45 for finer steps.
+    rotation_snap_period: float = 90.0
+
     def is_bottom_polarity(self, name: str) -> bool:
         return name in self.bottom_polarity_nets
 
@@ -177,6 +333,12 @@ class Session:
     iteration: int = 0
     temperature: float = 30.0
     last_max_force: float = 0.0
+    # Spring-class registry — defaults to DEFAULT_SPRING_CLASSES; load_session
+    # may extend with classes read from .kicad_pro.  resolve_pair_class()
+    # uses this dict to look up class names assigned on components/pins/nets.
+    spring_classes: Dict[str, SpringClass] = field(
+        default_factory=lambda: dict(DEFAULT_SPRING_CLASSES)
+    )
 
 
 # ----------------------------------------------------------------------
@@ -533,6 +695,116 @@ def load_session(schematic_path: Path) -> Session:
 # ----------------------------------------------------------------------
 
 
+# ----------------------------------------------------------------------
+# OBB (oriented bounding box) geometry + cubic-ramp repulsion (v2)
+# ----------------------------------------------------------------------
+#
+# Used by the unified relax engine for both schematic and PCB.  The
+# original schematic path uses _component_pair_force (Coulomb-like
+# 1/r² between centres); that stays for backward compat, but new PCB
+# runs use this body-aware version.
+#
+# SAT (separating axis theorem) gives signed-distance along the
+# best separating axis.  For two non-overlapping rectangles whose
+# closest features are vertex-vertex (diagonal approach), this
+# is an UNDER-estimate of the true minimum distance — never worse
+# than truth, so the repulsion kicks in slightly early.  Acceptable
+# trade for simplicity; corner-vertex torque is a deferred follow-up.
+
+
+def _obb_corners(cx: float, cy: float, w: float, h: float,
+                 angle_deg: float) -> List[Tuple[float, float]]:
+    """Four corners of an OBB in world coords."""
+    rad = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    hw, hh = w * 0.5, h * 0.5
+    locals_ = [(hw, -hh), (hw, hh), (-hw, hh), (-hw, -hh)]
+    return [
+        (cx + lx * cos_a - ly * sin_a, cy + lx * sin_a + ly * cos_a)
+        for lx, ly in locals_
+    ]
+
+
+def _obb_axes(angle_deg: float) -> List[Tuple[float, float]]:
+    """Two unique edge normals of an OBB (unit vectors)."""
+    rad = math.radians(angle_deg)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    return [(cos_a, sin_a), (-sin_a, cos_a)]
+
+
+def _project(corners: List[Tuple[float, float]],
+             axis: Tuple[float, float]) -> Tuple[float, float]:
+    dots = [c[0] * axis[0] + c[1] * axis[1] for c in corners]
+    return min(dots), max(dots)
+
+
+def obb_separation(
+    cx_a: float, cy_a: float, w_a: float, h_a: float, angle_a: float,
+    cx_b: float, cy_b: float, w_b: float, h_b: float, angle_b: float,
+) -> Tuple[float, Tuple[float, float]]:
+    """Return ``(signed_gap, axis_ab)`` for two OBBs.
+
+    ``signed_gap`` is positive when the OBBs are separated (true gap
+    along the best separating axis) and negative when overlapping
+    (penetration depth — distance you'd need to push them along
+    ``axis_ab`` to just touch).  ``axis_ab`` is a unit vector pointing
+    from A toward B.
+
+    Edge case: if both OBBs are exactly co-located (zero gap on every
+    axis), returns ``(0.0, (1.0, 0.0))`` — a deterministic east-push so
+    superimposed components separate on the next iteration.
+    """
+    corners_a = _obb_corners(cx_a, cy_a, w_a, h_a, angle_a)
+    corners_b = _obb_corners(cx_b, cy_b, w_b, h_b, angle_b)
+    axes = _obb_axes(angle_a) + _obb_axes(angle_b)
+
+    best_gap = -math.inf
+    best_axis: Tuple[float, float] = (1.0, 0.0)
+
+    for ax, ay in axes:
+        axis = (ax, ay)
+        a_min, a_max = _project(corners_a, axis)
+        b_min, b_max = _project(corners_b, axis)
+        # Two candidate signed-gap signs (depending on which side of
+        # the projection B sits on).  Take the larger (= more positive).
+        gap_pos = b_min - a_max   # B is above A along axis
+        gap_neg = a_min - b_max   # A is above B along axis
+        if gap_pos >= gap_neg:
+            gap, sign = gap_pos, 1.0
+        else:
+            gap, sign = gap_neg, -1.0
+        if gap > best_gap:
+            best_gap = gap
+            best_axis = (ax * sign, ay * sign)
+
+    return best_gap, best_axis
+
+
+def obb_repulsion_force(
+    cx_a: float, cy_a: float, w_a: float, h_a: float, angle_a: float,
+    cx_b: float, cy_b: float, w_b: float, h_b: float, angle_b: float,
+    *, margin: float, k: float,
+) -> Tuple[float, float]:
+    """Cubic-ramp repulsive force on A pushing it away from B.
+
+    Magnitude: ``F = k * (1 - d/margin)^3`` for ``d < margin``;
+    zero otherwise.  ``d`` is the SAT signed gap, so penetration
+    (``d < 0``) yields ``ratio > 1`` — the cube amplifies, giving
+    overlap a strong restoring shove.  Margin is the "approach buffer"
+    distance at which the force first kicks in.
+    """
+    gap, axis_ab = obb_separation(
+        cx_a, cy_a, w_a, h_a, angle_a,
+        cx_b, cy_b, w_b, h_b, angle_b,
+    )
+    if gap >= margin:
+        return 0.0, 0.0
+    ratio = max(0.0, 1.0 - gap / margin)
+    magnitude = k * (ratio ** 3)
+    # axis_ab points A→B; force on A is in the −axis_ab direction.
+    return -axis_ab[0] * magnitude, -axis_ab[1] * magnitude
+
+
 def _component_pair_force(c1: Component, c2: Component, k: float) -> Tuple[float, float]:
     """Repulsive Coulomb-like force on c1 due to c2.  Falls off as 1/r²."""
     dx = c1.x - c2.x
@@ -675,6 +947,27 @@ def _torque_for_pin_orientation(c: Component, sess: Session) -> float:
     return total_torque * sess.params.rotation_k * 0.01
 
 
+def _torque_rotation_snap(c: Component, p: Params) -> float:
+    """Periodic torque that pulls rotation toward the nearest multiple
+    of ``rotation_snap_period`` degrees.
+
+    Potential: ``U(θ) = (1 − cos(2π θ/T))/2``, minima at θ = k·T.
+    Torque: ``T(θ) = −dU/dθ = −(π/T)·sin(2π θ/T)``, scaled by
+    ``rotation_snap_strength``.  Returned in degrees-per-iteration
+    units to stack with the other torques in iterate().
+    """
+    if p.rotation_snap_strength <= 0.0:
+        return 0.0
+    period = p.rotation_snap_period
+    if period <= 0.0:
+        return 0.0
+    # 2π θ/T in radians.  Note: c.rotation is in degrees.
+    phase = 2.0 * math.pi * c.rotation / period
+    # The torque pulls back toward the nearest minimum; sign flips
+    # twice per period giving the saw-tooth-like restoring behavior.
+    return -p.rotation_snap_strength * math.sin(phase)
+
+
 def _torque_polarity_orientation(c: Component, sess: Session) -> float:
     """Rotate components so polarity-net pins face their preferred
     direction: GND (and other ``bottom_polarity_nets``) → 270° (down
@@ -726,13 +1019,35 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
         comps = list(sess.components.values())
         for c in comps:
             fx = fy = 0.0
-            # Repulsion from other components
-            for other in comps:
-                if other is c:
-                    continue
-                rfx, rfy = _component_pair_force(c, other, p.repulsion_k)
-                fx += rfx
-                fy += rfy
+            # Repulsion from other components.  v2 PCB path uses OBB
+            # cubic-ramp (body-aware); legacy schematic path uses
+            # 1/r² Coulomb between centres.
+            if p.use_obb_repulsion:
+                for other in comps:
+                    if other is c:
+                        continue
+                    # Same-layer only: a F.Cu cap doesn't push a B.Cu cap.
+                    if c.layer != other.layer:
+                        continue
+                    # Per-component margin: max wins (more conservative side).
+                    margin = max(
+                        c.margin if c.margin is not None else p.obb_repulsion_margin,
+                        other.margin if other.margin is not None else p.obb_repulsion_margin,
+                    )
+                    rfx, rfy = obb_repulsion_force(
+                        c.x, c.y, c.bbox_w, c.bbox_h, c.rotation,
+                        other.x, other.y, other.bbox_w, other.bbox_h, other.rotation,
+                        margin=margin, k=p.repulsion_k,
+                    )
+                    fx += rfx
+                    fy += rfy
+            else:
+                for other in comps:
+                    if other is c:
+                        continue
+                    rfx, rfy = _component_pair_force(c, other, p.repulsion_k)
+                    fx += rfx
+                    fy += rfy
             # Boundary
             bfx, bfy = _boundary_force(c, p)
             fx += bfx
@@ -745,6 +1060,7 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
             torques[c.key] = (
                 _torque_for_pin_orientation(c, sess)
                 + _torque_polarity_orientation(c, sess)
+                + _torque_rotation_snap(c, p)
             )
 
         # Attraction along each net edge — every pair of pins on the
@@ -758,11 +1074,10 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
             pin_list = net.pins
             if len(pin_list) < 2:
                 continue
-            if p.is_excluded_from_attraction(net.name):
-                # Power rails (GND, VCC, ...) and other label-only nets
-                # don't pull their components together — they're routed
-                # as labels at apply time, so the layout shouldn't
-                # distort to bring them close.
+            # Legacy path: skip excluded power nets entirely.  v2 path:
+            # let resolve_pair_class assign PLANE (k=0) for power nets
+            # so we get the same result via the unified system.
+            if not p.use_spring_classes and p.is_excluded_from_attraction(net.name):
                 continue
             for i, (key_a, pin_a) in enumerate(pin_list):
                 for key_b, pin_b in pin_list[i + 1 :]:
@@ -772,8 +1087,18 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                     b = sess.components.get(key_b)
                     if a is None or b is None:
                         continue
+                    if p.use_spring_classes:
+                        cls = resolve_pair_class(
+                            sess.spring_classes, sess.nets,
+                            a, pin_a, b, pin_b, net.name,
+                        )
+                        eff_k = p.attraction_k * cls.spring_k
+                        if eff_k == 0.0:
+                            continue   # PLANE / opt-out class
+                    else:
+                        eff_k = p.attraction_k
                     afx, afy = _attractive_force_pinwise(
-                        a, pin_a, b, pin_b, p.attraction_k,
+                        a, pin_a, b, pin_b, eff_k,
                     )
                     forces[key_a] = (forces[key_a][0] + afx, forces[key_a][1] + afy)
                     forces[key_b] = (forces[key_b][0] - afx, forces[key_b][1] - afy)

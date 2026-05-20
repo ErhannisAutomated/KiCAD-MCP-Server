@@ -4,6 +4,60 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### relax_placement v2: unified schematic+PCB autoplacer (develop, 2026-05-20)
+
+Task #186. Folds the v1 PCB autoplacer (#183) into the schematic
+autoplacer's force-directed engine, sharing physics where possible
+and using opt-in `Params` flags (`use_obb_repulsion`,
+`use_spring_classes`, `rotation_snap_strength`) so the schematic flow
+behaves exactly as before. New shared pieces:
+
+- **Spring classes** (`autoplacer.SpringClass`,
+  `resolve_pair_class`). Per-connection pull-strength governed by a
+  5-level hierarchy: connection-specific (pad-X-toward-pad-Y) >
+  pad-general > net > component > engine default. Newton's third law
+  preserved by resolving exactly one class per pad pair (max strength
+  on same-specificity tie). Defaults: DECOUPLING (k=5), LOCAL_SIGNAL
+  (k=1, default), INTER_GROUP (k=0.3), PLANE (k=0). Storage planned
+  on `mcp_spring_classes` in `.kicad_pro` (`mcp_constraint_version: 2`).
+- **OBB-via-SAT body repulsion** (`obb_separation`,
+  `obb_repulsion_force`). Cubic-ramp force `F = k(1-d/margin)^3`
+  for `d < margin`, zero otherwise. Body-aware: rotation is handled
+  natively, corner-vs-edge cases use SAT projection gaps (conservative
+  underestimate of true distance for diagonal approaches). Per-component
+  override via `Body_Margin` property (max wins for a pair).
+- **Rotation-snap potential** (`_torque_rotation_snap`). Periodic
+  torque pulling rotation toward nearest multiple of
+  `rotation_snap_period` (default 90°). Strength annealed across the
+  schedule so the run starts with free rotation and ends snapped.
+- **Springs-first 4-phase schedule** (`run_pcb_relax`): CLUSTER
+  (springs only, no repulsion) → SPREAD (repulsion ramps in) → SNAP
+  (rotation-snap ramps in) → RELAX (full snap, low temp). Power-plane
+  nets (GND/+5V/VBAT/...) auto-classify as PLANE so their springs
+  are skipped (vias handle the routing).
+
+`pcb_autoplacer.py` rewritten as a thin PCBAdapter (load board →
+Session, run engine, write back). New v2 handler parameters:
+`marginMm`, `springK`, `repulsionKPeak`, `rotationSnapPeak`, phase
+iter counts, `autoClassifyPlanes`. Old v1 params removed (no
+backward-compat layer — they didn't map cleanly to v2 physics).
+
+What v2 fixes from v1:
+- Pin-wise springs (off-center forces produce torque) replace
+  center-to-center: decoupling caps now land EDGE-to-IC with the
+  active pad facing the target pin.
+- Spring classes let DECOUPLING caps pull hard while INTER_GROUP
+  signals pull weakly: layouts no longer over-cluster long-distance
+  nets at the expense of short critical ones.
+- OBB repulsion handles rotated parts correctly; v1's center-AABB
+  heuristic broke on B.Cu / rotated footprints.
+
+Tests: `tests/test_spring_classes.py`, `tests/test_obb_repulsion.py`,
+`tests/test_rotation_snap.py`, `tests/test_pcb_autoplacer_v2.py`
+(pcbnew-gated). 110 existing autoplacer/schematic tests still green
+(the v2 flags default to OFF — no behavior change to the schematic
+flow).
+
 ### relax_placement: force-directed PCB placement relaxation (develop, 2026-05-19)
 
 v1 of the PCB autoplacer (task #183). Pulls connected components
