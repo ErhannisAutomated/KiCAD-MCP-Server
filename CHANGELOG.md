@@ -4,6 +4,28 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### pcb_autoplacer_viz: live PCB tuning visualizer (develop, 2026-05-21)
+
+Parallel to the schematic ``autoplacer_viz.AutoplacerViz`` but
+PCB-aware: OBB-rotated component rectangles (rotation honored),
+ratsnest segments colored by resolved spring class (DECOUPLING red,
+LOCAL_SIGNAL blue, INTER_GROUP dark blue, PLANE near-invisible),
+Edge.Cuts keep-in instead of sheet bbox, green sum-force arrows
+showing what the next physics step would apply, optional top-30
+OBB-repulsion overlay.
+
+Same async-window pattern: ``viz = PCBAutoplacerViz(sess, keep_in=...)``
+opens a pop-out figure once; ``viz.update()`` redraws in place
+without flicker — built for the Jupyter tune-step-redraw loop.
+Toggle the overlays via attributes (``viz.show_repulsion = True``,
+etc.) and call ``update()`` to refresh.
+
+Convenience ``show_board(pcb_path)`` wraps LoadBoard +
+load_pcb_session + viz construction for a quick one-liner inspection.
+
+Tests: ``tests/test_pcb_autoplacer_viz.py`` (5 unit tests, Agg
+backend — exercises construct/update/save/empty-session/force-snapshot).
+
 ### relax_placement v2: unified schematic+PCB autoplacer (develop, 2026-05-20)
 
 Task #186. Folds the v1 PCB autoplacer (#183) into the schematic
