@@ -4,6 +4,38 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Normalize spring force by component degree (develop, 2026-05-21)
+
+The force-step damping fix (last commit) handled the
+typical-2-spring K_eff=2 case but not dense clusters and
+multi-pin ICs.  User reported continued "bucking like a horse"
+behavior on components with many pin connections.
+
+Root cause: total spring force on a component is the SUM of its
+pin-wise contributions, so K_eff scales linearly with N pins.
+A 28-pin TSSOP has ~14× the restoring stiffness of a 2-pin
+resistor; the damping factor that's critical for the resistor
+is wildly under-damped for the IC.  Schematic didn't hit this as
+hard because most schematic symbols are 2-pin passives (multi-unit
+ICs split into per-unit nodes) and its temperature-decay schedule
+naturally clamps the step magnitude.
+
+Added Params.normalize_spring_force_by_degree (default off — no
+schematic behavior change).  When set, each component's spring
+force vector is divided by its spring count (and so is the
+lever-arm torque sum) before being merged into the iterate's
+total forces.  Result: K_eff is bounded by the strongest single
+spring class, independent of N.  PCBSchedule defaults this to
+True; new normalizeSpringForceByDegree MCP param.
+
+Tests:
+  * test_many_pin_component_no_longer_oscillates — 10-spring
+    component converges monotonically with normalization on
+    + damping=0.5.
+  * test_many_pin_component_oscillates_unnormalized — same setup
+    with normalization off oscillates/diverges (sign flips >= 3
+    in 8 iters).
+
 ### Force-step damping prevents period-2 oscillation (develop, 2026-05-21)
 
 Surfaced during R23 tuning: when components were near equilibrium

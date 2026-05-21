@@ -332,6 +332,138 @@ class TestForceStepDamping:
 
 
 @pytest.mark.unit
+class TestNormalizeSpringForceByDegree:
+    def test_many_pin_component_no_longer_oscillates(self):
+        """A 10-pin component with one spring per pin would, unnormalized,
+        feel K_eff = 10 — well past the K_eff = 2 that damping=0.5 was
+        designed for.  With normalize_spring_force_by_degree=True,
+        the per-component motion is independent of pin count."""
+        from commands.autoplacer import (
+            Component, Net, Pin, Session, iterate,
+        )
+        sess = Session(schematic_path=Path("pcb://test"))
+        # IC at x=1.0 with 10 pads, all on different nets to maximize
+        # spring count.  Each pad connects to a pinned target far off
+        # in y so the closest-pair nudge can't fire.
+        comp = Component(
+            ref="U1", unit=1, lib_id="x:y",
+            x=1.0, y=0.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=0.5, bbox_h=2.0,
+            coord_system="pcb", layer="F.Cu",
+        )
+        for n in range(1, 11):
+            comp.pins[str(n)] = Pin(
+                number=str(n), name="",
+                local_x=0.0, local_y=n * 0.1, lib_angle=0.0,
+            )
+        sess.components[comp.key] = comp
+        for n in range(1, 11):
+            ref = f"T{n}"
+            t = Component(
+                ref=ref, unit=1, lib_id="x:y",
+                x=0.0, y=50.0 + n, rotation=0.0,
+                mirror_x=False, mirror_y=False,
+                bbox_w=0.1, bbox_h=0.1, pinned=True,
+                coord_system="pcb", layer="F.Cu",
+            )
+            t.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=0.0, lib_angle=0.0)
+            sess.components[t.key] = t
+            sess.nets[f"N{n}"] = Net(
+                name=f"N{n}",
+                pins=[(comp.key, str(n)), (f"T{n}__u1", "1")],
+            )
+
+        p = sess.params
+        p.use_spring_classes = True
+        p.attraction_k = 1.0
+        p.repulsion_k = 0.0
+        p.boundary_k = 0.0
+        p.polarity_k = 0.0
+        p.rotation_k = 0.0
+        p.pinwise_torque_k = 0.0
+        p.force_step_damping = 0.5
+        p.normalize_spring_force_by_degree = True   # ← the fix
+        sess.temperature = 1000.0
+
+        x_history = []
+        for _ in range(8):
+            iterate(sess, n=1)
+            x_history.append(comp.x)
+        sign_flips = sum(
+            1 for i in range(len(x_history) - 1)
+            if x_history[i] * x_history[i+1] < 0
+        )
+        assert sign_flips == 0, (
+            f"normalized: expected monotonic convergence; "
+            f"got x={x_history}, sign_flips={sign_flips}"
+        )
+
+    def test_many_pin_component_oscillates_unnormalized(self):
+        """Same setup, normalize off → period-2 oscillation."""
+        from commands.autoplacer import (
+            Component, Net, Pin, Session, iterate,
+        )
+        sess = Session(schematic_path=Path("pcb://test"))
+        comp = Component(
+            ref="U1", unit=1, lib_id="x:y",
+            x=1.0, y=0.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=0.5, bbox_h=2.0,
+            coord_system="pcb", layer="F.Cu",
+        )
+        for n in range(1, 11):
+            comp.pins[str(n)] = Pin(
+                number=str(n), name="",
+                local_x=0.0, local_y=n * 0.1, lib_angle=0.0,
+            )
+        sess.components[comp.key] = comp
+        for n in range(1, 11):
+            ref = f"T{n}"
+            t = Component(
+                ref=ref, unit=1, lib_id="x:y",
+                x=0.0, y=50.0 + n, rotation=0.0,
+                mirror_x=False, mirror_y=False,
+                bbox_w=0.1, bbox_h=0.1, pinned=True,
+                coord_system="pcb", layer="F.Cu",
+            )
+            t.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=0.0, lib_angle=0.0)
+            sess.components[t.key] = t
+            sess.nets[f"N{n}"] = Net(
+                name=f"N{n}",
+                pins=[(comp.key, str(n)), (f"T{n}__u1", "1")],
+            )
+
+        p = sess.params
+        p.use_spring_classes = True
+        p.attraction_k = 1.0
+        p.repulsion_k = 0.0
+        p.boundary_k = 0.0
+        p.polarity_k = 0.0
+        p.rotation_k = 0.0
+        p.pinwise_torque_k = 0.0
+        p.force_step_damping = 0.5
+        p.normalize_spring_force_by_degree = False   # ← bug surface
+        sess.temperature = 1000.0
+
+        x_history = []
+        for _ in range(8):
+            iterate(sess, n=1)
+            x_history.append(comp.x)
+        # With 10 springs each k=1, K_eff = 10.  damping=0.5 gives
+        # effective step = 5x — diverges, not just oscillates.
+        # We just check there's no monotonic convergence.
+        sign_flips = sum(
+            1 for i in range(len(x_history) - 1)
+            if x_history[i] * x_history[i+1] < 0
+        )
+        assert sign_flips >= 3, (
+            f"unnormalized: expected oscillation/divergence; "
+            f"got x={x_history}, sign_flips={sign_flips}"
+        )
+
+
+@pytest.mark.unit
 class TestSchematicTorqueSkipsPCB:
     def test_torque_for_pin_orientation_returns_zero_for_pcb(self):
         """`_torque_for_pin_orientation` and `_torque_polarity_orientation`

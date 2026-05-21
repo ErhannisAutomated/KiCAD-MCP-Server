@@ -348,6 +348,13 @@ class PCBSchedule:
     # effective restoring stiffness >= 2, components oscillate.
     # 0.5 gives critical damping for the typical 2-spring case.
     force_step_damping: float = 0.5
+    # Normalize each component's spring force/torque by its degree
+    # (number of spring contributions).  Without this, K_eff scales
+    # with N pins — a 28-pin IC has 14× the restoring stiffness of
+    # a 2-pin resistor and bucks under the damping that's critical
+    # for the resistor.  On for PCB by default; schematic stays off
+    # to preserve its tuned dynamics.
+    normalize_spring_force_by_degree: bool = True
 
 
 def run_pcb_relax(
@@ -375,6 +382,7 @@ def run_pcb_relax(
     p.pinwise_torque_k = schedule.pinwise_torque_k
     p.cross_layer_springs = schedule.cross_layer_springs
     p.force_step_damping = schedule.force_step_damping
+    p.normalize_spring_force_by_degree = schedule.normalize_spring_force_by_degree
 
     # Disable schematic-only forces.
     p.polarity_k = 0.0
@@ -463,6 +471,7 @@ def relax_placement(
     relax_iters: int = 20,
     cross_layer_springs: bool = True,
     force_step_damping: float = 0.5,
+    normalize_spring_force_by_degree: bool = True,
     dry_run: bool = False,
     auto_classify_planes: bool = True,
     **legacy_kwargs: Any,
@@ -508,6 +517,7 @@ def relax_placement(
         pinwise_torque_k=pinwise_torque_k,
         cross_layer_springs=cross_layer_springs,
         force_step_damping=force_step_damping,
+        normalize_spring_force_by_degree=normalize_spring_force_by_degree,
     )
     metrics = run_pcb_relax(sess, schedule, margin_mm=margin_mm)
 

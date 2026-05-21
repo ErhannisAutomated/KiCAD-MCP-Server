@@ -1122,6 +1122,7 @@ ROUTING_TOOLS = [
                 "relaxIters": {"type": "number", "description": "Phase 4 iterations (default 20).", "default": 20},
                 "crossLayerSprings": {"type": "boolean", "description": "Apply springs between pads on different copper layers (default true). Set false when a B.Cu anchor (cell holder) shouldn't pull F.Cu parts onto its pads.", "default": True},
                 "forceStepDamping": {"type": "number", "description": "Damping factor on the force-as-displacement step (default 0.5 = critical damping for K_eff ~ 2). Set below 1.0 to prevent period-2 oscillation when components are near equilibrium and force < temperature.", "default": 0.5},
+                "normalizeSpringForceByDegree": {"type": "boolean", "description": "Divide each component's spring force/torque sum by its number of spring contributions (default true). Without this, K_eff scales with N pins — a 28-pin IC has 14x the restoring stiffness of a 2-pin resistor and bucks in dense clusters under the damping that's critical for the resistor.", "default": True},
                 "autoClassifyPlanes": {"type": "boolean", "description": "Auto-classify power/ground nets as PLANE (default true).", "default": True},
                 "dryRun": {"type": "boolean", "description": "Compute without applying.", "default": False},
                 "boardPath": {"type": "string", "description": "Path to .kicad_pcb."},

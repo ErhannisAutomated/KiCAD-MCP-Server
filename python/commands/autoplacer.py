@@ -325,6 +325,18 @@ class Params:
     # schedules with constant temperature per phase should set this
     # below 1.0; 0.5 gives critical damping for K_eff ~ 2.
     force_step_damping: float = 1.0
+    # If True, the per-component sum of spring forces (and lever-arm
+    # torques) is divided by the number of spring contributions to
+    # that component.  Without this, K_eff scales linearly with the
+    # number of pins on a component — a 28-pin IC has 14× the
+    # restoring stiffness of a 2-pin resistor, so the same damping
+    # factor that's stable for the resistor lets the IC buck like a
+    # horse in dense clusters.  Normalizing makes the per-iter motion
+    # match the spring-class-weighted average direction, with
+    # magnitude bounded by the strongest single spring.  PCB schedule
+    # turns this on by default; schematic is unaffected unless opted
+    # in (preserves the tuned defaults in feedback_autoplacer_params).
+    normalize_spring_force_by_degree: bool = False
 
     def is_bottom_polarity(self, name: str) -> bool:
         return name in self.bottom_polarity_nets
@@ -1134,6 +1146,16 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
         # large IC (where its pins are) instead of piling on top of
         # the IC's centre.  Multi-unit components show up as distinct
         # nodes via the synthetic comp_key (ref + unit).
+        #
+        # We accumulate SPRING contributions separately from the
+        # repulsion/boundary/polarity forces in `forces` so we can
+        # optionally normalize by per-component degree before merging.
+        # Without normalization, components with many pins feel
+        # K_eff proportional to N — a 28-pin IC oscillates wildly
+        # under the same damping that's critical for a 2-pin resistor.
+        spring_forces: Dict[str, Tuple[float, float]] = {c.key: (0.0, 0.0) for c in comps}
+        spring_torques: Dict[str, float] = {c.key: 0.0 for c in comps}
+        spring_degree: Dict[str, int] = {c.key: 0 for c in comps}
         for net in sess.nets.values():
             pin_list = net.pins
             if len(pin_list) < 2:
@@ -1172,8 +1194,12 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                     afx, afy = _attractive_force_pinwise(
                         a, pin_a, b, pin_b, eff_k,
                     )
-                    forces[key_a] = (forces[key_a][0] + afx, forces[key_a][1] + afy)
-                    forces[key_b] = (forces[key_b][0] - afx, forces[key_b][1] - afy)
+                    sax, say = spring_forces[key_a]
+                    spring_forces[key_a] = (sax + afx, say + afy)
+                    sbx, sby = spring_forces[key_b]
+                    spring_forces[key_b] = (sbx - afx, sby - afy)
+                    spring_degree[key_a] += 1
+                    spring_degree[key_b] += 1
                     # Lever-arm torque from off-center spring force.
                     # Screen Y-down + KiCad's CCW-visual rotation
                     # convention means the *standard* 2D cross product
@@ -1198,8 +1224,23 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                             # cross with r_b (still screen-CCW): negation
                             # of r_y * (-F_x) - r_x * (-F_y).
                             t_b = (rbx * afy - rby * afx) * p.pinwise_torque_k
-                            torques[key_a] = torques.get(key_a, 0.0) + t_a
-                            torques[key_b] = torques.get(key_b, 0.0) + t_b
+                            spring_torques[key_a] += t_a
+                            spring_torques[key_b] += t_b
+
+        # Merge spring contributions into the running force/torque
+        # totals, optionally normalizing by per-component degree.
+        for c in comps:
+            sfx, sfy = spring_forces[c.key]
+            stq = spring_torques[c.key]
+            if p.normalize_spring_force_by_degree:
+                n = spring_degree[c.key]
+                if n > 1:
+                    sfx /= n
+                    sfy /= n
+                    stq /= n
+            fx_total, fy_total = forces[c.key]
+            forces[c.key] = (fx_total + sfx, fy_total + sfy)
+            torques[c.key] = torques.get(c.key, 0.0) + stq
 
         # Apply: damp force, then cap displacement at temperature.
         for c in comps:
