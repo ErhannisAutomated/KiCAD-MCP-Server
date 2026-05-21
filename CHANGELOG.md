@@ -4,6 +4,62 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### relax_placement v2 fixes from first real-board tuning (develop, 2026-05-21)
+
+Five issues surfaced when running on the real power_module board:
+
+1. **Rotated bbox bug.** ``_footprint_bbox_mm`` returned the
+   world-axis-aligned bbox at the footprint's CURRENT rotation, then
+   the engine + viz applied ``c.rotation`` again on top — visually
+   the bbox sat perpendicular to its pins on 90°/270°-rotated parts
+   (U4 was the first visible case).  Replaced with
+   ``_footprint_local_bbox_mm`` which derotates pad world positions
+   into the footprint's unrotated frame.  Rotation-independent now.
+
+2. **Cross-layer springs always applied.** When a B-side anchor
+   (cell holder, B.Cu connector) shared a net with F.Cu parts, the
+   spring pulled F.Cu parts toward the back-side pads even though
+   the real route goes through a via.  Added
+   ``Params.cross_layer_springs`` (default True, schedule-toggleable
+   via ``PCBSchedule.cross_layer_springs`` and the
+   ``crossLayerSprings`` MCP param).
+
+3. **Nothing rotated.** Pin-wise springs gave correct linear
+   forces but no torque — the engine summed force at the component
+   CENTER without computing the lever-arm cross product.  Added
+   lever-arm torque ``T = (r × F) × pinwise_torque_k`` inside the
+   attraction loop, gated on ``use_spring_classes``.  Schedule
+   defaults to ``pinwise_torque_k = 0.05``; schematic flow keeps
+   its angle-based pin-orientation torque untouched.
+
+4. **Linear repulsion ramp slammed components apart on the first
+   increment.**  Changed Phase 2 (SPREAD) to ramp GEOMETRICALLY:
+   ``repulsion_k = start * (peak/start) ** (t/n)``.  Defaults:
+   ``repulsion_k_start = 0.05``, ``repulsion_k_peak = 30.0`` —
+   ~600× growth across the phase, with a gentle ease-in at the
+   start matching the schematic engine's ``repulsion_growth`` shape.
+   New ``repulsionKStart`` MCP param.
+
+5. **Viz spent most of its time drawing PLANE ratsnest segments.**
+   ``PCBAutoplacerViz`` gained a ``skip_classes`` parameter
+   (defaults to ``{"PLANE"}``).  Power/ground nets are no-force
+   anyway; muting them in the viz dramatically speeds up the
+   redraw loop on bigger boards.
+
+Plus a stability fix in ``obb_separation``: when two separating
+axes shared the same gap (common with parallel-edged bboxes), the
+"first encountered wins" tie-break could flip the chosen axis
+between iterations as positions drifted through the tie, snapping
+the repulsion direction.  Replaced with a stable tie-break that
+prefers the axis closer to the center-to-center direction —
+addresses the observed "components occasionally jump and snap back
+in unison" symptom.
+
+New tests in ``tests/test_pcb_autoplacer_v2_fixes.py`` (6) cover
+the tie-break stability, lever-arm torque, cross-layer flag both
+directions, and pcbnew-gated rotated-footprint local-bbox
+invariance.
+
 ### pcb_autoplacer_viz: live PCB tuning visualizer (develop, 2026-05-21)
 
 Parallel to the schematic ``autoplacer_viz.AutoplacerViz`` but

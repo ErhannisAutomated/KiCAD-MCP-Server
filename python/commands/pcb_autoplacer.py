@@ -66,15 +66,48 @@ def _pad_local_xy(pad: Any, fp_world_xy: Tuple[float, float],
     return lx, ly
 
 
-def _footprint_bbox_mm(fp: Any) -> Tuple[float, float]:
-    """Footprint bounding box (without text) in mm — (width, height).
-    Note this is the AXIS-ALIGNED world bbox; for a rotated footprint
-    the engine uses bbox_w/bbox_h as if rotation==0, then rotates the
-    OBB in physics math via the Component's rotation field.  So we
-    need the bbox the footprint would have at orientation 0.
+def _footprint_local_bbox_mm(
+    fp: Any, fp_x_mm: float, fp_y_mm: float, fp_angle_deg: float,
+) -> Tuple[float, float]:
+    """Footprint bbox dimensions in the UNROTATED local frame, mm.
+
+    The engine + viz apply ``c.rotation`` to the bbox themselves
+    (rotated rectangle / OBB), so the stored ``bbox_w``/``bbox_h``
+    must be rotation-independent.  Using ``fp.GetBoundingBox(False)``
+    here was wrong — that returns the world-axis-aligned bbox at the
+    footprint's CURRENT rotation, so a 90°-rotated HTSSOP-28 ended
+    up with w/h swapped relative to its body, then the viz rotated
+    again, giving a bbox visually perpendicular to its pins.
+
+    Walks pad world positions, derotates by ``fp_angle_deg`` into the
+    local frame, and accumulates pad size as a conservative-circle
+    radius (over-approximates for narrow pads but safe for
+    body-extent purposes).  Falls back to ``(1.0, 1.0)`` if a
+    footprint somehow has no pads.
     """
-    bb = fp.GetBoundingBox(False)
-    return bb.GetWidth() / _NM_PER_MM, bb.GetHeight() / _NM_PER_MM
+    rad = math.radians(fp_angle_deg)
+    cos_a, sin_a = math.cos(rad), math.sin(rad)
+    xs: List[float] = []
+    ys: List[float] = []
+    for pad in fp.Pads():
+        pw = pad.GetPosition()
+        ox = pw.x / _NM_PER_MM - fp_x_mm
+        oy = pw.y / _NM_PER_MM - fp_y_mm
+        # Inverse of the world transform (which uses ``rad = -fp_angle``);
+        # invert by rotating by +fp_angle.
+        lx = ox * cos_a - oy * sin_a
+        ly = ox * sin_a + oy * cos_a
+        size = pad.GetSize()
+        sx = size.x / _NM_PER_MM
+        sy = size.y / _NM_PER_MM
+        # Conservative circle radius — captures the pad regardless of
+        # its own orientation relative to the footprint.
+        r = max(sx, sy) * 0.5
+        xs.extend([lx - r, lx + r])
+        ys.extend([ly - r, ly + r])
+    if not xs:
+        return 1.0, 1.0
+    return max(xs) - min(xs), max(ys) - min(ys)
 
 
 def _power_net_pattern_class(net_name: str) -> Optional[str]:
@@ -130,7 +163,7 @@ def load_pcb_session(
         fp_x = pos.x / _NM_PER_MM
         fp_y = pos.y / _NM_PER_MM
         fp_angle = fp.GetOrientation().AsDegrees()
-        bbox_w, bbox_h = _footprint_bbox_mm(fp)
+        bbox_w, bbox_h = _footprint_local_bbox_mm(fp, fp_x, fp_y, fp_angle)
         layer_name = board.GetLayerName(fp.GetLayer())
 
         # Anchor decision: explicit set wins; default heuristic falls
@@ -288,8 +321,13 @@ class PCBSchedule:
 
     # Force scales (applied as multipliers to engine defaults)
     spring_k: float = 0.1               # attraction_k during all phases
-    repulsion_k_peak: float = 30.0      # peak repulsion_k at end of spread
+    repulsion_k_start: float = 0.05     # start of spread phase
+    repulsion_k_peak: float = 30.0      # peak at end of spread phase
     rotation_snap_peak: float = 3.0     # peak snap strength
+    # Lever-arm torque coupling for the pin-wise spring forces.
+    # Falls out of off-center forces automatically — without it
+    # nothing rotates even though springs pull on pad positions.
+    pinwise_torque_k: float = 0.05
 
     # Per-iteration step caps (mm).  Lower in later phases so we don't
     # bounce components around once they're close to settled.
@@ -297,6 +335,13 @@ class PCBSchedule:
     step_spread: float = 3.0
     step_snap: float = 1.5
     step_relax: float = 0.5
+
+    # Skip springs between pads on different copper layers (F.Cu vs
+    # B.Cu).  Useful when a back-side anchor (cell holder, B-side
+    # connector) shouldn't pull front-side parts onto its pads
+    # because the actual connection routes through a via.  Default
+    # off — backward-compatible; toggle in your schedule when needed.
+    cross_layer_springs: bool = True
 
 
 def run_pcb_relax(
@@ -321,13 +366,16 @@ def run_pcb_relax(
     p.use_obb_repulsion = True
     p.use_spring_classes = True
     p.obb_repulsion_margin = margin_mm
+    p.pinwise_torque_k = schedule.pinwise_torque_k
+    p.cross_layer_springs = schedule.cross_layer_springs
 
     # Disable schematic-only forces.
     p.polarity_k = 0.0
     p.polarity_torque_k = 0.0
     p.boundary_k = 0.0   # PCB uses keep-in clamp instead; not a force.
-    p.rotation_k = 0.0   # disable pin-orientation torque for now; the
-                          # off-center pin-wise springs provide orientation.
+    p.rotation_k = 0.0   # disable angle-based pin-orientation torque;
+                          # the off-center pin-wise springs now provide
+                          # rotation via lever-arm torque (pinwise_torque_k).
 
     metrics: Dict[str, Any] = {"phases": []}
 
@@ -343,16 +391,23 @@ def run_pcb_relax(
     metrics["phases"].append({"name": "cluster", "iters": schedule.cluster_iters,
                               "max_force": sess.last_max_force})
 
-    # ---- Phase 2: SPREAD (repulsion ramps in linearly) ----
+    # ---- Phase 2: SPREAD (repulsion ramps in GEOMETRICALLY) ----
+    # Linear from 0 → peak slammed components apart on the first
+    # increment; the small-start exponential growth gives a gentle
+    # ease-in then accelerates, matching the schematic schedule's
+    # repulsion_growth pattern.
+    start = max(1e-6, schedule.repulsion_k_start)
+    peak = max(start * 1.01, schedule.repulsion_k_peak)
+    growth = (peak / start) ** (1.0 / max(1, schedule.spread_iters - 1))
     for t in range(schedule.spread_iters):
-        ramp = (t + 1) / schedule.spread_iters
-        p.repulsion_k = schedule.repulsion_k_peak * ramp
+        p.repulsion_k = start * (growth ** t)
         sess.temperature = schedule.step_spread
         iterate(sess, n=1)
         if on_step:
             on_step(sess)
     metrics["phases"].append({"name": "spread", "iters": schedule.spread_iters,
-                              "max_force": sess.last_max_force})
+                              "max_force": sess.last_max_force,
+                              "repulsion_k_final": round(p.repulsion_k, 3)})
 
     # ---- Phase 3: SNAP (rotation snap ramps in) ----
     p.repulsion_k = schedule.repulsion_k_peak
@@ -391,12 +446,15 @@ def relax_placement(
     *,
     margin_mm: float = 1.0,
     spring_k: float = 0.1,
+    repulsion_k_start: float = 0.05,
     repulsion_k_peak: float = 30.0,
     rotation_snap_peak: float = 3.0,
+    pinwise_torque_k: float = 0.05,
     cluster_iters: int = 30,
     spread_iters: int = 40,
     snap_iters: int = 30,
     relax_iters: int = 20,
+    cross_layer_springs: bool = True,
     dry_run: bool = False,
     auto_classify_planes: bool = True,
     **legacy_kwargs: Any,
@@ -436,8 +494,11 @@ def relax_placement(
         snap_iters=snap_iters,
         relax_iters=relax_iters,
         spring_k=spring_k,
+        repulsion_k_start=repulsion_k_start,
         repulsion_k_peak=repulsion_k_peak,
         rotation_snap_peak=rotation_snap_peak,
+        pinwise_torque_k=pinwise_torque_k,
+        cross_layer_springs=cross_layer_springs,
     )
     metrics = run_pcb_relax(sess, schedule, margin_mm=margin_mm)
 

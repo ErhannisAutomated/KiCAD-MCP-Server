@@ -303,6 +303,19 @@ class Params:
     # Snap potential period in degrees: 90 = 0°/90°/180°/270° minima
     # (KiCad convention); 45 for finer steps.
     rotation_snap_period: float = 90.0
+    # Lever-arm torque scale: T = (r × F) × pinwise_torque_k where
+    # r is the offset from component center to the pin a spring acts on.
+    # Falls out of pin-wise spring forces — without it, off-center
+    # forces don't rotate components.  Gated on use_spring_classes so
+    # the schematic flow keeps its angle-based pin-orientation torque
+    # without a second mechanism stacking on top.
+    pinwise_torque_k: float = 0.05
+    # If False, springs are skipped for pads on different copper layers
+    # (F.Cu vs B.Cu).  Useful when an anchored back-side footprint
+    # like a cell holder shouldn't pull front-side parts onto its pads
+    # — the actual connection routes through a via, so a strong
+    # cross-layer spring doesn't reflect real routing constraint.
+    cross_layer_springs: bool = True
 
     def is_bottom_polarity(self, name: str) -> bool:
         return name in self.bottom_polarity_nets
@@ -758,7 +771,22 @@ def obb_separation(
     corners_b = _obb_corners(cx_b, cy_b, w_b, h_b, angle_b)
     axes = _obb_axes(angle_a) + _obb_axes(angle_b)
 
+    # Center-to-center direction as a stable tie-breaker.  When two
+    # separating axes share the same gap (common when bboxes have
+    # parallel edges of equal length), pick the one most aligned with
+    # the A→B direction.  Without this, the chosen axis can flip between
+    # iterations as positions drift through the tie, snapping the
+    # repulsion direction and causing components to jump.
+    dxc = cx_b - cx_a
+    dyc = cy_b - cy_a
+    cmag = math.hypot(dxc, dyc)
+    if cmag > 1e-9:
+        ref_ax, ref_ay = dxc / cmag, dyc / cmag
+    else:
+        ref_ax, ref_ay = 1.0, 0.0
+
     best_gap = -math.inf
+    best_alignment = -math.inf
     best_axis: Tuple[float, float] = (1.0, 0.0)
 
     for ax, ay in axes:
@@ -773,9 +801,17 @@ def obb_separation(
             gap, sign = gap_pos, 1.0
         else:
             gap, sign = gap_neg, -1.0
-        if gap > best_gap:
+        cand_x = ax * sign
+        cand_y = ay * sign
+        # Alignment with center-to-center (higher = better tie-break).
+        alignment = cand_x * ref_ax + cand_y * ref_ay
+        # Strict gap improvement OR same-gap-better-alignment.
+        if gap > best_gap + 1e-9 or (
+            abs(gap - best_gap) <= 1e-9 and alignment > best_alignment
+        ):
             best_gap = gap
-            best_axis = (ax * sign, ay * sign)
+            best_alignment = alignment
+            best_axis = (cand_x, cand_y)
 
     return best_gap, best_axis
 
@@ -1087,6 +1123,14 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                     b = sess.components.get(key_b)
                     if a is None or b is None:
                         continue
+                    # Optional layer guard for spring forces (PCB only;
+                    # schematic has no layer concept).
+                    if (
+                        not p.cross_layer_springs
+                        and a.layer != b.layer
+                        and a.layer != "schematic"
+                    ):
+                        continue
                     if p.use_spring_classes:
                         cls = resolve_pair_class(
                             sess.spring_classes, sess.nets,
@@ -1102,6 +1146,24 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                     )
                     forces[key_a] = (forces[key_a][0] + afx, forces[key_a][1] + afy)
                     forces[key_b] = (forces[key_b][0] - afx, forces[key_b][1] - afy)
+                    # Lever-arm torque from off-center spring force.
+                    # T = r × F; in screen Y-down the scalar cross product
+                    # T = r_x*F_y - r_y*F_x has positive sign for
+                    # screen-CCW rotation (matches KiCad's c.rotation
+                    # convention).  Gated on use_spring_classes so the
+                    # schematic flow keeps its existing pin-orientation
+                    # torque mechanism.
+                    if p.use_spring_classes and p.pinwise_torque_k > 0.0:
+                        pa = a.world_pin_xy(pin_a)
+                        pb = b.world_pin_xy(pin_b)
+                        if pa is not None and pb is not None:
+                            rax, ray = pa[0] - a.x, pa[1] - a.y
+                            rbx, rby = pb[0] - b.x, pb[1] - b.y
+                            t_a = (rax * afy - ray * afx) * p.pinwise_torque_k
+                            # Reaction on b: force -afx,-afy applied at rb.
+                            t_b = -(rbx * afy - rby * afx) * p.pinwise_torque_k
+                            torques[key_a] = torques.get(key_a, 0.0) + t_a
+                            torques[key_b] = torques.get(key_b, 0.0) + t_b
 
         # Apply: cap displacement at temperature.
         for c in comps:

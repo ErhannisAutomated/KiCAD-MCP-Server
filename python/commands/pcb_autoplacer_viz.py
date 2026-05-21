@@ -111,6 +111,7 @@ class PCBAutoplacerViz:
         show_sum_force: bool = True,
         show_repulsion: bool = False,
         max_repulsion_lines: int = 30,
+        skip_classes: Optional[set] = None,
     ):
         self.sess = sess
         self.keep_in_bbox = keep_in_bbox
@@ -119,6 +120,13 @@ class PCBAutoplacerViz:
         self.show_sum_force = show_sum_force
         self.show_repulsion = show_repulsion
         self.max_repulsion_lines = max_repulsion_lines
+        # Spring classes to omit from the ratsnest overlay.  PLANE
+        # exerts no force but contributes many segments to large
+        # power/ground nets — skipping it speeds up redraws
+        # noticeably on bigger boards.  Defaults to {"PLANE"} so the
+        # viz stays fast out of the box; pass an empty set to draw
+        # everything, or include other classes you want to mute.
+        self.skip_classes = {"PLANE"} if skip_classes is None else set(skip_classes)
 
         plt, _, _, _ = _import_matplotlib()
         plt.ion()
@@ -250,6 +258,8 @@ class PCBAutoplacerViz:
                         self.sess.spring_classes, self.sess.nets,
                         a, pin_a, b, pin_b, net.name,
                     )
+                    if cls.name in self.skip_classes:
+                        continue
                     color = self.ATTRACTION_COLORS.get(cls.name, "#777777")
                     alpha = 0.10 if cls.name == "PLANE" else 0.50
                     lw = 0.6 + min(1.5, cls.spring_k * 0.2)
