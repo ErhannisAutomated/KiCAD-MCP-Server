@@ -102,3 +102,4 @@ resources/images/icon_b64.txt
 # regenerable, not source.
 *-erc.json
 
+.ipynb_checkpoints
