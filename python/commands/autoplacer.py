@@ -1147,21 +1147,29 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                     forces[key_a] = (forces[key_a][0] + afx, forces[key_a][1] + afy)
                     forces[key_b] = (forces[key_b][0] - afx, forces[key_b][1] - afy)
                     # Lever-arm torque from off-center spring force.
-                    # T = r × F; in screen Y-down the scalar cross product
-                    # T = r_x*F_y - r_y*F_x has positive sign for
-                    # screen-CCW rotation (matches KiCad's c.rotation
-                    # convention).  Gated on use_spring_classes so the
-                    # schematic flow keeps its existing pin-orientation
+                    # Screen Y-down + KiCad's CCW-visual rotation
+                    # convention means the *standard* 2D cross product
+                    # ``r_x*F_y - r_y*F_x`` is screen-CW positive — the
+                    # opposite of what we want.  Use the negated form
+                    # ``r_y*F_x - r_x*F_y`` so positive torque rotates
+                    # the component CCW visually (= positive c.rotation
+                    # increment, matching KiCad).
+                    #
+                    # Gated on use_spring_classes so the schematic flow
+                    # keeps its existing angle-based pin-orientation
                     # torque mechanism.
-                    if p.use_spring_classes and p.pinwise_torque_k > 0.0:
+                    if p.use_spring_classes and p.pinwise_torque_k != 0.0:
                         pa = a.world_pin_xy(pin_a)
                         pb = b.world_pin_xy(pin_b)
                         if pa is not None and pb is not None:
                             rax, ray = pa[0] - a.x, pa[1] - a.y
                             rbx, rby = pb[0] - b.x, pb[1] - b.y
-                            t_a = (rax * afy - ray * afx) * p.pinwise_torque_k
-                            # Reaction on b: force -afx,-afy applied at rb.
-                            t_b = -(rbx * afy - rby * afx) * p.pinwise_torque_k
+                            # T_a = r_a × F_a (screen-CCW convention).
+                            t_a = (ray * afx - rax * afy) * p.pinwise_torque_k
+                            # B experiences the reaction force -(afx, afy);
+                            # cross with r_b (still screen-CCW): negation
+                            # of r_y * (-F_x) - r_x * (-F_y).
+                            t_b = (rbx * afy - rby * afx) * p.pinwise_torque_k
                             torques[key_a] = torques.get(key_a, 0.0) + t_a
                             torques[key_b] = torques.get(key_b, 0.0) + t_b
 

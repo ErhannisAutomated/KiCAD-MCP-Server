@@ -59,16 +59,16 @@ class TestObbSeparationStableTieBreak:
 
 @pytest.mark.unit
 class TestLeverArmTorque:
-    def test_off_center_spring_produces_torque(self):
-        """A spring pulling at a pad offset from the component center
-        should produce torque on that component."""
+    def test_off_center_spring_rotates_pin_toward_target(self):
+        """Pin south of A center, target due east.  Body should rotate
+        CCW visually (c.rotation increases) so the south pin sweeps
+        toward east → toward its target.  Earlier code had a sign
+        error here that rotated CW instead (away from target)."""
         from commands.autoplacer import (
             Component, Net, Pin, Session, iterate,
         )
         sess = Session(schematic_path=Path("pcb://test"))
-        # Two components.  Component A has a pin offset to its east;
-        # B's pin is centered.  Spring pulls A's pin toward B; the
-        # off-center force on A should produce CCW torque.
+        # A at origin, pin 1 at south (PCB coords: +Y = south in screen).
         a = Component(
             ref="A", unit=1, lib_id="x:y",
             x=0.0, y=0.0, rotation=0.0,
@@ -80,6 +80,7 @@ class TestLeverArmTorque:
                            lib_angle=0.0)
         sess.components[a.key] = a
 
+        # B at east, pin at B's center.
         b = Component(
             ref="B", unit=1, lib_id="x:y",
             x=10.0, y=0.0, rotation=0.0,
@@ -106,13 +107,93 @@ class TestLeverArmTorque:
 
         before_rot = a.rotation
         iterate(sess, n=1)
-        # A's pin is at (0, 2) in world; B's at (10, 0).  Force on A
-        # is toward B = (+10, -2) direction.  Lever arm from A's
-        # center (0,0) to its pin (0,2) is (0, 2).  Cross product in
-        # screen Y-down: r_x*F_y - r_y*F_x = 0*(-2) - 2*10 = -20.
-        # That's NEGATIVE → A should rotate negatively (screen-CW).
-        assert a.rotation < before_rot or (
-            a.rotation > 350 and before_rot < 10
+        # Pin at world (0, 2), target (10, 0).  Force on pin = +X, -Y.
+        # To rotate pin from south toward east, body must rotate CCW
+        # visually (positive c.rotation).  Cross product in CCW-visual
+        # convention: T = r_y*F_x - r_x*F_y = 2*10 - 0*(-2) = +20.
+        # POSITIVE torque → c.rotation increases.
+        assert a.rotation > before_rot, (
+            f"expected CCW visual rotation (pin south should rotate "
+            f"toward east target), got rotation {before_rot} -> {a.rotation}"
+        )
+
+    def test_user_R23_scenario(self):
+        """The user's reported case: a 2-pin resistor with target1 NE,
+        target2 SW.  Starting body NW/SE (rotation 135°), it should
+        rotate so pin 1 ends up at NE (rotation 225°) — the correct
+        NE/SW alignment with pin 1 toward its NE target."""
+        from commands.autoplacer import (
+            Component, Net, Pin, Session, iterate,
+        )
+        sess = Session(schematic_path=Path("pcb://test"))
+        # R23-like resistor: two pins on its X axis.
+        r = Component(
+            ref="R23", unit=1, lib_id="Resistor_SMD:R_0402",
+            x=0.0, y=0.0, rotation=135.0,    # NW/SE alignment to start
+            mirror_x=False, mirror_y=False,
+            bbox_w=1.6, bbox_h=0.8,
+            coord_system="pcb", layer="F.Cu",
+        )
+        r.pins["1"] = Pin(number="1", name="", local_x=-0.8, local_y=0.0,
+                           lib_angle=0.0)
+        r.pins["2"] = Pin(number="2", name="", local_x=+0.8, local_y=0.0,
+                           lib_angle=0.0)
+        sess.components[r.key] = r
+
+        # Target 1 far NE — pin 1 should orient toward here.
+        t1 = Component(
+            ref="T1", unit=1, lib_id="x:y",
+            x=10.0, y=-10.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=1.0, bbox_h=1.0, pinned=True,
+            coord_system="pcb", layer="F.Cu",
+        )
+        t1.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=0.0,
+                            lib_angle=0.0)
+        sess.components[t1.key] = t1
+
+        # Target 2 far SW — pin 2 should orient toward here.
+        t2 = Component(
+            ref="T2", unit=1, lib_id="x:y",
+            x=-10.0, y=10.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=1.0, bbox_h=1.0, pinned=True,
+            coord_system="pcb", layer="F.Cu",
+        )
+        t2.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=0.0,
+                            lib_angle=0.0)
+        sess.components[t2.key] = t2
+
+        sess.nets["A"] = Net(name="A", pins=[(r.key, "1"), (t1.key, "1")])
+        sess.nets["B"] = Net(name="B", pins=[(r.key, "2"), (t2.key, "1")])
+
+        p = sess.params
+        p.use_spring_classes = True
+        p.pinwise_torque_k = 0.5
+        p.attraction_k = 0.1
+        p.repulsion_k = 0.0
+        p.boundary_k = 0.0
+        p.polarity_k = 0.0
+        p.polarity_torque_k = 0.0
+        p.rotation_k = 0.0
+        sess.temperature = 0.01      # very small — almost no translation
+
+        # Run enough iters for the body to converge orientation.
+        for _ in range(200):
+            iterate(sess, n=1)
+
+        # R23 should now be near rotation 225° (NE/SW with pin 1 at NE).
+        # 45° is the WRONG stable equilibrium (would mean the sign bug
+        # is still present).
+        rot = r.rotation
+        # Normalize the angle distance to 225° vs 45°
+        dist_225 = min(abs(rot - 225), abs(rot - 225 + 360),
+                        abs(rot - 225 - 360))
+        dist_45 = min(abs(rot - 45), abs(rot - 45 + 360),
+                       abs(rot - 45 - 360))
+        assert dist_225 < dist_45, (
+            f"R23 should converge to rotation 225° (NE/SW with pin 1 NE), "
+            f"got rotation={rot:.1f}° (closer to 45° = the sign-bug equilibrium)"
         )
 
     def test_no_torque_when_flag_off(self):
