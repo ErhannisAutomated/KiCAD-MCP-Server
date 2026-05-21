@@ -4,6 +4,33 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Schematic torque functions now skip PCB components (develop, 2026-05-21)
+
+Follow-up to the lever-arm torque sign fix.  ``_torque_for_pin_orientation``
+and ``_torque_polarity_orientation`` both depend on per-pin
+``lib_angle`` (the wire-stub exit direction) which only exists for
+schematic symbols.  ``load_pcb_session()`` sets ``lib_angle = 0`` on
+every pad — pads don't have a meaningful outward direction since traces
+can attach from any angle.  With that, every pad on a footprint reports
+the same ``world_pin_outward_angle = rotation + 180``, and the
+schematic torque tried to align ONE direction with the SUM of all the
+pad targets, producing noise that fought the (correct) lever-arm
+torque.
+
+Surfaced during R23 tuning: a manual script with ``rotation_k = 4.0``
+made R23 settle at a wrong orientation even after the lever-arm sign
+fix, because the broken-on-PCB schematic torque was competing.  Now
+both functions early-return ``0.0`` when ``c.coord_system == "pcb"``.
+PCB components get rotation from ``_torque_rotation_snap`` (periodic
+snap potential) plus the pin-wise spring lever-arm in ``iterate()``;
+schematic flow is unchanged.
+
+Two tests in ``test_pcb_autoplacer_v2_fixes.py``:
+  * ``_torque_for_pin_orientation`` and ``_torque_polarity_orientation``
+    return 0 for PCB components even with ``rotation_k=4`` and
+    ``polarity_torque_k=3``.
+  * Schematic-flow components still get the schematic torque.
+
 ### relax_placement v2 fixes from first real-board tuning (develop, 2026-05-21)
 
 Five issues surfaced when running on the real power_module board:

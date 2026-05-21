@@ -935,12 +935,25 @@ def _torque_for_pin_orientation(c: Component, sess: Session) -> float:
     align c's pin's outward direction with the vector toward the other
     endpoint.  Returns net torque (degrees of rotation).
 
+    Schematic-only: requires each pin to have a meaningful
+    ``lib_angle`` (the direction the wire stub exits the symbol).
+    PCB pads don't have an outward direction in the same sense — a
+    pad accepts traces from any angle — so we set ``lib_angle = 0``
+    for them in ``load_pcb_session()``.  With that, every pad on a
+    given footprint reports the same outward angle and this torque
+    tries to align ONE direction with the SUM of all the pad
+    targets, which produces garbage.  Skip PCB components outright;
+    they get rotation from ``_torque_rotation_snap`` and the
+    pin-wise spring lever-arm in ``iterate()``.
+
     Power/excluded nets (GND, VCC, +3V3, ...) are skipped: they're not
     wired by `connect_pins(auto)`, so averaging their (often-scattered)
     pin positions gives a target direction that drags rotation toward
     a meaningless centroid.  Polarity orientation for those nets is
     handled separately by ``_torque_polarity_orientation``.
     """
+    if c.coord_system == "pcb":
+        return 0.0
     p = sess.params
     total_torque = 0.0
     for net in sess.nets.values():
@@ -1017,7 +1030,13 @@ def _torque_polarity_orientation(c: Component, sess: Session) -> float:
     (``rotation_k=4.0``, ``polarity_torque_k=3.0``), a component with
     one GND pin and one signal pin will compromise between facing
     its signal partner and getting GND down.
+
+    Schematic-only: like ``_torque_for_pin_orientation``, this relies
+    on per-pin outward angles that don't exist for PCB pads.  Skip
+    PCB components.
     """
+    if c.coord_system == "pcb":
+        return 0.0
     p = sess.params
     total = 0.0
     for net in sess.nets.values():

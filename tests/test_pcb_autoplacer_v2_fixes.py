@@ -242,6 +242,92 @@ class TestLeverArmTorque:
 
 
 @pytest.mark.unit
+class TestSchematicTorqueSkipsPCB:
+    def test_torque_for_pin_orientation_returns_zero_for_pcb(self):
+        """`_torque_for_pin_orientation` and `_torque_polarity_orientation`
+        rely on per-pin outward angles that don't exist for PCB pads
+        (load_pcb_session sets lib_angle=0 on every pad).  Without
+        this guard, every pad on a PCB footprint reports the same
+        outward direction and the schematic torque tries to align ONE
+        direction with the SUM of all pad targets — produces noise
+        on PCB and fights the lever-arm torque.  Symptom in the field:
+        manual tuning script with rotation_k > 0 made PCB components
+        rotate to wrong orientations even with the lever-arm torque
+        sign correct."""
+        from commands.autoplacer import (
+            Component, Net, Pin, Session,
+            _torque_for_pin_orientation, _torque_polarity_orientation,
+        )
+        sess = Session(schematic_path=Path("pcb://test"))
+        c = Component(
+            ref="R1", unit=1, lib_id="x:y",
+            x=0.0, y=0.0, rotation=45.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=2.0, bbox_h=2.0,
+            coord_system="pcb", layer="F.Cu",
+        )
+        c.pins["1"] = Pin(number="1", name="", local_x=-1.0, local_y=0.0,
+                          lib_angle=0.0)
+        c.pins["2"] = Pin(number="2", name="", local_x=+1.0, local_y=0.0,
+                          lib_angle=0.0)
+        sess.components[c.key] = c
+        # Add some nets with off-center targets to exercise both
+        # torque functions.
+        other = Component(
+            ref="X", unit=1, lib_id="x:y",
+            x=10.0, y=-10.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=1.0, bbox_h=1.0, pinned=True,
+            coord_system="pcb", layer="F.Cu",
+        )
+        other.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=0.0,
+                              lib_angle=0.0)
+        sess.components[other.key] = other
+        sess.nets["GND"] = Net(name="GND", pins=[(c.key, "1"), (other.key, "1")])
+        sess.nets["SIG"] = Net(name="SIG", pins=[(c.key, "2"), (other.key, "1")])
+
+        sess.params.rotation_k = 4.0           # what the user had set
+        sess.params.polarity_torque_k = 3.0
+
+        # Both schematic torques should return zero for PCB components.
+        assert _torque_for_pin_orientation(c, sess) == 0.0
+        assert _torque_polarity_orientation(c, sess) == 0.0
+
+    def test_schematic_torque_still_active_for_schematic(self):
+        """Sanity: the PCB skip doesn't accidentally kill the schematic
+        torque for schematic-flow components."""
+        from commands.autoplacer import (
+            Component, Net, Pin, Session,
+            _torque_for_pin_orientation,
+        )
+        sess = Session(schematic_path=Path("/tmp/none.kicad_sch"))
+        c = Component(
+            ref="R1", unit=1, lib_id="Device:R",
+            x=0.0, y=0.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=7.62, bbox_h=7.62,
+            # coord_system defaults to "schematic"
+        )
+        c.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=3.81,
+                          lib_angle=270.0)  # outward upward in lib
+        sess.components[c.key] = c
+        other = Component(
+            ref="R2", unit=1, lib_id="Device:R",
+            x=20.0, y=0.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+        )
+        other.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=0.0,
+                              lib_angle=0.0)
+        sess.components[other.key] = other
+        sess.nets["SIG"] = Net(name="SIG", pins=[(c.key, "1"), (other.key, "1")])
+        sess.params.rotation_k = 4.0
+
+        # Schematic component → torque computed normally.
+        t = _torque_for_pin_orientation(c, sess)
+        assert t != 0.0, "schematic torque should still fire for schematic components"
+
+
+@pytest.mark.unit
 class TestCrossLayerSpringFlag:
     def test_cross_layer_skipped_when_flag_off(self):
         """Components on different layers shouldn't attract when
