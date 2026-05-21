@@ -45,10 +45,15 @@ class TestOBBSeparation:
 
     def test_orientation_invariance(self):
         """Rotating BOTH shapes by the same amount doesn't change the
-        separation gap (the world just rotates with them)."""
+        separation gap (the world just rotates with them).
+
+        Convention: ``angle_deg`` is screen-Y-down CCW (KiCad's footprint
+        orientation), so a +45° rotation of (10, 0) lands at
+        (10·cos45°, -10·sin45°) = (7.07, -7.07), not (+7.07, +7.07).
+        """
         from commands.autoplacer import obb_separation
         gap_0, _ = obb_separation(0, 0, 4, 2, 0, 10, 0, 4, 2, 0)
-        gap_45, _ = obb_separation(0, 0, 4, 2, 45, 7.07, 7.07, 4, 2, 45)
+        gap_45, _ = obb_separation(0, 0, 4, 2, 45, 7.07, -7.07, 4, 2, 45)
         assert gap_0 == pytest.approx(gap_45, abs=0.01)
 
     def test_aabb_axis_points_a_to_b(self):
@@ -61,6 +66,48 @@ class TestOBBSeparation:
         _, axis = obb_separation(0, 0, 4, 4, 0, -10, 0, 4, 4, 0)
         assert axis[0] == pytest.approx(-1.0)
         assert axis[1] == pytest.approx(0.0, abs=1e-9)
+
+
+@pytest.mark.unit
+class TestOBBRotationConvention:
+    """Regression: ``_obb_corners`` must use the same screen-Y-down CCW
+    rotation convention as ``Component.world_pin_xy`` and the
+    viz's ``angle=-c.rotation``.  Without the fix, an asymmetric
+    bbox at a non-90° rotation was MIRRORED across the X axis
+    relative to the drawn rectangle, so a partner sitting visibly
+    inside the drawn body got reported as separated.
+
+    Case: the L1 + R10 layout from power_module — L1 = 9.20×3.20 at
+    315.5°, R10 = 4.68×1.75 at 320.3°, centers 4.36mm apart and
+    R10 visibly inside L1's drawn rectangle.  Under the buggy
+    convention, gap was +1.61mm; under the correct one, gap is
+    negative (penetration).
+    """
+
+    def test_l1_r10_penetration_detected(self):
+        from commands.autoplacer import obb_separation
+        # L1: 9.20 x 3.20 at 315.5°, center (46.45, 7.66)
+        # R10: 4.68 x 1.75 at 320.3°, center (48.86, 11.29)
+        gap, _ = obb_separation(
+            46.45, 7.66, 9.20, 3.20, 315.5,
+            48.86, 11.29, 4.68, 1.75, 320.3,
+        )
+        assert gap < 0.0, (
+            f"R10 visibly inside L1's drawn rectangle, but gap reported "
+            f"as {gap:.3f} — OBB rotation convention bug regressed"
+        )
+
+    def test_corner_position_matches_viz_for_315_5_deg(self):
+        """The +hw, +hh corner of a 9.20×3.20 OBB at 315.5° centered at
+        (46.45, 7.66) — should match the matplotlib Rectangle drawn with
+        angle=-315.5°.  Hand-computed expected: (48.61, 12.03).
+        """
+        from commands.autoplacer import _obb_corners
+        corners = _obb_corners(46.45, 7.66, 9.20, 3.20, 315.5)
+        # corners[1] is (+hw, +hh) per _obb_corners' local order
+        corner_hw_hh = corners[1]
+        assert corner_hw_hh[0] == pytest.approx(48.61, abs=0.05)
+        assert corner_hw_hh[1] == pytest.approx(12.03, abs=0.05)
 
 
 @pytest.mark.unit

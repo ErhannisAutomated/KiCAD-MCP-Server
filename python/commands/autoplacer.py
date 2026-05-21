@@ -760,8 +760,18 @@ def load_session(schematic_path: Path) -> Session:
 
 def _obb_corners(cx: float, cy: float, w: float, h: float,
                  angle_deg: float) -> List[Tuple[float, float]]:
-    """Four corners of an OBB in world coords."""
-    rad = math.radians(angle_deg)
+    """Four corners of an OBB in world coords.
+
+    Rotation is screen-Y-down CCW (KiCad's footprint orientation
+    convention) — matching ``Component.world_pin_xy`` and the viz's
+    ``angle=-c.rotation`` matplotlib argument.  Internally we negate to
+    apply the standard math rotation matrix in a Y-down frame.
+    Without the negation, an asymmetric bbox at non-multiple-of-90
+    rotations would be MIRRORED across the X axis relative to the
+    actual body (and relative to the viz's drawn rectangle), so
+    repulsion forces would point against ghost bodies.
+    """
+    rad = math.radians(-angle_deg)
     cos_a, sin_a = math.cos(rad), math.sin(rad)
     hw, hh = w * 0.5, h * 0.5
     locals_ = [(hw, -hh), (hw, hh), (-hw, hh), (-hw, -hh)]
@@ -772,8 +782,9 @@ def _obb_corners(cx: float, cy: float, w: float, h: float,
 
 
 def _obb_axes(angle_deg: float) -> List[Tuple[float, float]]:
-    """Two unique edge normals of an OBB (unit vectors)."""
-    rad = math.radians(angle_deg)
+    """Two unique edge normals of an OBB (unit vectors).
+    Sign convention matches ``_obb_corners`` (screen-Y-down CCW)."""
+    rad = math.radians(-angle_deg)
     cos_a, sin_a = math.cos(rad), math.sin(rad)
     return [(cos_a, sin_a), (-sin_a, cos_a)]
 
