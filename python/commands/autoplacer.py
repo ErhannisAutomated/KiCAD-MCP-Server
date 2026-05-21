@@ -337,6 +337,18 @@ class Params:
     # turns this on by default; schematic is unaffected unless opted
     # in (preserves the tuned defaults in feedback_autoplacer_params).
     normalize_spring_force_by_degree: bool = False
+    # If True, the iterate loop computes forces and applies the step for
+    # one component at a time (Gauss-Seidel).  Subsequent components in
+    # the same iteration see the just-updated positions.  False (default)
+    # is the historical Jacobi mode: compute every force from a snapshot
+    # of positions, then apply all steps in a second pass.  Parallel is
+    # order-independent and symmetric; sequential is empirically more
+    # stable in dense clusters because pair feedbacks resolve within an
+    # iter rather than ping-ponging across iters.  Sequential pays a
+    # ~2x cost on the spring loop (each pair recomputed for both
+    # endpoints) — still O(N²) per iter overall, so order-of-magnitude
+    # this is comparable.
+    sequential_apply: bool = False
 
     def is_bottom_polarity(self, name: str) -> bool:
         return name in self.bottom_polarity_nets
@@ -1082,12 +1094,149 @@ def _torque_polarity_orientation(c: Component, sess: Session) -> float:
 # ----------------------------------------------------------------------
 
 
+def _compute_total_force_on(
+    c: "Component", comps: List["Component"], sess: "Session"
+) -> Tuple[float, float, float]:
+    """Compute (fx, fy, torque) on component ``c`` from the current
+    positions of every other component.  Used by the sequential
+    (Gauss-Seidel) branch of ``iterate`` so each component sees the
+    just-updated positions of those processed before it in the loop.
+
+    The parallel branch keeps its own optimized pair loop because it
+    can compute each spring pair only once (force on A; reaction is
+    just the negation, applied to B).  This per-component helper
+    necessarily recomputes each pair twice (once per endpoint), so
+    parallel mode is not a wrapper around this — the duplication is
+    deliberate.
+    """
+    p = sess.params
+    fx = fy = 0.0
+    # Repulsion
+    if p.use_obb_repulsion:
+        for other in comps:
+            if other is c:
+                continue
+            if c.layer != other.layer:
+                continue
+            margin = max(
+                c.margin if c.margin is not None else p.obb_repulsion_margin,
+                other.margin if other.margin is not None else p.obb_repulsion_margin,
+            )
+            rfx, rfy = obb_repulsion_force(
+                c.x, c.y, c.bbox_w, c.bbox_h, c.rotation,
+                other.x, other.y, other.bbox_w, other.bbox_h, other.rotation,
+                margin=margin, k=p.repulsion_k,
+            )
+            fx += rfx
+            fy += rfy
+    else:
+        for other in comps:
+            if other is c:
+                continue
+            rfx, rfy = _component_pair_force(c, other, p.repulsion_k)
+            fx += rfx
+            fy += rfy
+    # Boundary + polarity
+    bfx, bfy = _boundary_force(c, p)
+    fx += bfx
+    fy += bfy
+    pfx, pfy = _polarity_force(c, sess)
+    fx += pfx
+    fy += pfy
+    # Schematic-only torques + rotation snap.
+    torque = (
+        _torque_for_pin_orientation(c, sess)
+        + _torque_polarity_orientation(c, sess)
+        + _torque_rotation_snap(c, p)
+    )
+    # Spring forces from each net pair where c is one endpoint.
+    sfx = sfy = 0.0
+    stq = 0.0
+    spring_count = 0
+    for net in sess.nets.values():
+        pin_list = net.pins
+        if len(pin_list) < 2:
+            continue
+        if not p.use_spring_classes and p.is_excluded_from_attraction(net.name):
+            continue
+        for (key_a, pin_a) in pin_list:
+            if key_a != c.key:
+                continue
+            for (key_b, pin_b) in pin_list:
+                if key_b == key_a:
+                    continue
+                b = sess.components.get(key_b)
+                if b is None:
+                    continue
+                if (
+                    not p.cross_layer_springs
+                    and c.layer != b.layer
+                    and c.layer != "schematic"
+                ):
+                    continue
+                if p.use_spring_classes:
+                    cls = resolve_pair_class(
+                        sess.spring_classes, sess.nets,
+                        c, pin_a, b, pin_b, net.name,
+                    )
+                    eff_k = p.attraction_k * cls.spring_k
+                    if eff_k == 0.0:
+                        continue
+                else:
+                    eff_k = p.attraction_k
+                afx, afy = _attractive_force_pinwise(
+                    c, pin_a, b, pin_b, eff_k,
+                )
+                sfx += afx
+                sfy += afy
+                spring_count += 1
+                if p.use_spring_classes and p.pinwise_torque_k != 0.0:
+                    pa = c.world_pin_xy(pin_a)
+                    if pa is not None:
+                        rax, ray = pa[0] - c.x, pa[1] - c.y
+                        stq += (ray * afx - rax * afy) * p.pinwise_torque_k
+    if p.normalize_spring_force_by_degree and spring_count > 1:
+        sfx /= spring_count
+        sfy /= spring_count
+        stq /= spring_count
+    return fx + sfx, fy + sfy, torque + stq
+
+
+def _apply_step(c: "Component", fx: float, fy: float, tq: float, sess: "Session") -> float:
+    """Apply a single force/torque to component c with current temperature.
+    Returns the resulting force magnitude (for max_force tracking).
+    Mirrors the apply block in ``iterate``.
+    """
+    p = sess.params
+    mag = math.hypot(fx, fy)
+    if mag > 0 and not c.pinned:
+        step = min(mag * p.force_step_damping, sess.temperature)
+        c.x += fx / mag * step
+        c.y += fy / mag * step
+    if not c.pinned:
+        if abs(tq) > 5.0:
+            tq = math.copysign(5.0, tq)
+        c.rotation = (c.rotation + tq) % 360
+    return mag
+
+
 def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
     """Run n force-directed iterations on the in-memory model."""
     p = sess.params
     max_force_seen = 0.0
 
     for _ in range(n):
+        if p.sequential_apply:
+            # Gauss-Seidel: compute + apply per component, in-place.
+            comps = list(sess.components.values())
+            for c in comps:
+                fx, fy, tq = _compute_total_force_on(c, comps, sess)
+                mag = _apply_step(c, fx, fy, tq, sess)
+                if mag > max_force_seen:
+                    max_force_seen = mag
+            sess.iteration += 1
+            sess.temperature = max(p.min_temperature, sess.temperature * p.cooling)
+            continue
         # Compute force on every component.
         forces: Dict[str, Tuple[float, float]] = {}
         torques: Dict[str, float] = {}

@@ -620,6 +620,69 @@ class TestCrossLayerSpringFlag:
         assert sess.components["A__u1"].x > 0.05
 
 
+@pytest.mark.unit
+class TestSequentialApply:
+    """Sequential (Gauss-Seidel) update mode: each component sees the
+    just-updated positions of those processed earlier in the same iter.
+    """
+
+    def _make_pair(self):
+        from commands.autoplacer import Component, Net, Pin, Session
+        sess = Session(schematic_path=Path("pcb://test"))
+        for ref, x in (("A", 0.0), ("B", 10.0)):
+            c = Component(
+                ref=ref, unit=1, lib_id="x:y",
+                x=x, y=0.0, rotation=0.0,
+                mirror_x=False, mirror_y=False,
+                bbox_w=2.0, bbox_h=2.0,
+                coord_system="pcb", layer="F.Cu",
+            )
+            c.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=0.0,
+                              lib_angle=0.0)
+            sess.components[c.key] = c
+        sess.nets["X"] = Net(name="X", pins=[("A__u1", "1"), ("B__u1", "1")])
+        p = sess.params
+        p.use_spring_classes = True
+        p.attraction_k = 0.5
+        p.repulsion_k = 0.0
+        p.boundary_k = 0.0
+        p.polarity_k = 0.0
+        p.rotation_k = 0.0
+        p.pinwise_torque_k = 0.0
+        sess.temperature = 5.0
+        p.cooling = 1.0
+        p.force_step_damping = 1.0
+        return sess
+
+    def test_sequential_flag_runs_without_error(self):
+        from commands.autoplacer import iterate
+        sess = self._make_pair()
+        sess.params.sequential_apply = True
+        iterate(sess, n=5)
+        # Both should have moved toward each other.
+        ax = sess.components["A__u1"].x
+        bx = sess.components["B__u1"].x
+        assert ax > 0.05 and bx < 9.95
+
+    def test_parallel_and_sequential_both_converge(self):
+        """Two springs pulling toward each other should converge in
+        both modes (different trajectory, same general direction)."""
+        from commands.autoplacer import iterate
+        # Parallel
+        sess_p = self._make_pair()
+        sess_p.params.sequential_apply = False
+        iterate(sess_p, n=30)
+        gap_p = sess_p.components["B__u1"].x - sess_p.components["A__u1"].x
+        # Sequential
+        sess_s = self._make_pair()
+        sess_s.params.sequential_apply = True
+        iterate(sess_s, n=30)
+        gap_s = sess_s.components["B__u1"].x - sess_s.components["A__u1"].x
+        # Both should be near zero gap (pins co-located).
+        assert abs(gap_p) < 1.0
+        assert abs(gap_s) < 1.0
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(
     not _real_pcbnew_available(),
