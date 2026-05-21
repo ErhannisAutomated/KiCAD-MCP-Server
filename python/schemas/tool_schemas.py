@@ -1121,6 +1121,7 @@ ROUTING_TOOLS = [
                 "snapIters": {"type": "number", "description": "Phase 3 iterations (default 30).", "default": 30},
                 "relaxIters": {"type": "number", "description": "Phase 4 iterations (default 20).", "default": 20},
                 "crossLayerSprings": {"type": "boolean", "description": "Apply springs between pads on different copper layers (default true). Set false when a B.Cu anchor (cell holder) shouldn't pull F.Cu parts onto its pads.", "default": True},
+                "forceStepDamping": {"type": "number", "description": "Damping factor on the force-as-displacement step (default 0.5 = critical damping for K_eff ~ 2). Set below 1.0 to prevent period-2 oscillation when components are near equilibrium and force < temperature.", "default": 0.5},
                 "autoClassifyPlanes": {"type": "boolean", "description": "Auto-classify power/ground nets as PLANE (default true).", "default": True},
                 "dryRun": {"type": "boolean", "description": "Compute without applying.", "default": False},
                 "boardPath": {"type": "string", "description": "Path to .kicad_pcb."},

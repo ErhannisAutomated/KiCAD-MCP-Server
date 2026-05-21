@@ -60,6 +60,7 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
       snapIters: z.number().optional().describe("Phase 3 (rotation snap ramps in) iteration count (default 30)."),
       relaxIters: z.number().optional().describe("Phase 4 (full snap, low temp) iteration count (default 20)."),
       crossLayerSprings: z.boolean().optional().describe("Apply springs between pads on different copper layers (default true). Set false when a B.Cu anchor like a cell holder shouldn't pull F.Cu parts onto its pads."),
+      forceStepDamping: z.number().optional().describe("Damping factor on the force-as-displacement step (default 0.5 = critical damping for typical 2-spring case). Below 1.0 prevents period-2 oscillation when components are near equilibrium and force < temperature."),
       autoClassifyPlanes: z.boolean().optional().describe("Auto-classify power/ground nets (GND, VBAT, +5V, ...) as PLANE so their springs are skipped (default true)."),
       dryRun: z.boolean().optional().describe("Compute new positions without applying. Default false."),
       boardPath: z.string().optional().describe("Path to .kicad_pcb. Defaults to currently-loaded board."),

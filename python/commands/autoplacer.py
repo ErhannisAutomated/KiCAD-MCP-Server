@@ -316,6 +316,15 @@ class Params:
     # — the actual connection routes through a via, so a strong
     # cross-layer spring doesn't reflect real routing constraint.
     cross_layer_springs: bool = True
+    # Multiplier on the force-based step (applied BEFORE temperature
+    # capping).  Below 1.0 adds explicit damping — without it, near
+    # equilibrium the step equals the force, so an effective
+    # restoring stiffness >= 2 causes period-2 oscillation around
+    # equilibrium.  Default 1.0 preserves the historical schematic
+    # dynamics (which avoid the issue via temperature decay).  PCB
+    # schedules with constant temperature per phase should set this
+    # below 1.0; 0.5 gives critical damping for K_eff ~ 2.
+    force_step_damping: float = 1.0
 
     def is_bottom_polarity(self, name: str) -> bool:
         return name in self.bottom_polarity_nets
@@ -1192,7 +1201,7 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                             torques[key_a] = torques.get(key_a, 0.0) + t_a
                             torques[key_b] = torques.get(key_b, 0.0) + t_b
 
-        # Apply: cap displacement at temperature.
+        # Apply: damp force, then cap displacement at temperature.
         for c in comps:
             if c.pinned:
                 continue
@@ -1200,8 +1209,13 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
             mag = math.hypot(fx, fy)
             max_force_seen = max(max_force_seen, mag)
             if mag > 0:
-                # Cap step at temperature (mm).
-                step = min(mag, sess.temperature)
+                # Force-step damping prevents overshoot near equilibrium.
+                # Without it, when force-as-displacement < temperature
+                # cap, the step IS the force; with effective restoring
+                # stiffness >= 2, components oscillate period-2 around
+                # equilibrium.  Damp first, then cap by temperature
+                # (which is the absolute displacement ceiling per iter).
+                step = min(mag * p.force_step_damping, sess.temperature)
                 c.x += fx / mag * step
                 c.y += fy / mag * step
             # Torque (rotation update) — capped to small steps.

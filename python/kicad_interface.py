@@ -6674,6 +6674,7 @@ print("ok")
                 snap_iters=int(params.get("snapIters", 30)),
                 relax_iters=int(params.get("relaxIters", 20)),
                 cross_layer_springs=bool(params.get("crossLayerSprings", True)),
+                force_step_damping=float(params.get("forceStepDamping", 0.5)),
                 dry_run=bool(params.get("dryRun", False)),
                 auto_classify_planes=bool(params.get("autoClassifyPlanes", True)),
             )

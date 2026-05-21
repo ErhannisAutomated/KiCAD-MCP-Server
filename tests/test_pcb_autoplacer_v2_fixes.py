@@ -241,6 +241,96 @@ class TestLeverArmTorque:
         assert abs(a.rotation - before_rot) < 0.01
 
 
+def _build_overshoot_session(*, force_step_damping: float):
+    """Build a Session where component A has two springs each pulling
+    it toward x=0 with effective K=2, so without damping it
+    oscillates period-2 around x=0.  Targets placed far enough away
+    that the co-located-components 1/r² fallback nudge doesn't fire."""
+    from commands.autoplacer import (
+        Component, Net, Pin, Session,
+    )
+    sess = Session(schematic_path=Path("pcb://test"))
+    comp = Component(
+        ref="A", unit=1, lib_id="x:y",
+        x=1.0, y=0.0, rotation=0.0,
+        mirror_x=False, mirror_y=False,
+        bbox_w=0.1, bbox_h=0.1,
+        coord_system="pcb", layer="F.Cu",
+    )
+    comp.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=0.0, lib_angle=0.0)
+    comp.pins["2"] = Pin(number="2", name="", local_x=0.0, local_y=0.0, lib_angle=0.0)
+    sess.components[comp.key] = comp
+    # Targets ABOVE / BELOW A's path so the system is 1-D in x but
+    # targets aren't co-located with A's expected resting position.
+    for ref, ty in (("T1", 50.0), ("T2", -50.0)):
+        t = Component(
+            ref=ref, unit=1, lib_id="x:y",
+            x=0.0, y=ty, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=0.1, bbox_h=0.1, pinned=True,
+            coord_system="pcb", layer="F.Cu",
+        )
+        t.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=0.0, lib_angle=0.0)
+        sess.components[t.key] = t
+    sess.nets["N1"] = Net(name="N1", pins=[(comp.key, "1"), ("T1__u1", "1")])
+    sess.nets["N2"] = Net(name="N2", pins=[(comp.key, "2"), ("T2__u1", "1")])
+
+    p = sess.params
+    p.use_spring_classes = True
+    p.attraction_k = 1.0
+    p.repulsion_k = 0.0
+    p.boundary_k = 0.0
+    p.polarity_k = 0.0
+    p.rotation_k = 0.0
+    p.pinwise_torque_k = 0.0
+    p.force_step_damping = force_step_damping
+    sess.temperature = 1000.0    # huge so step cap never engages
+    return sess, comp
+
+
+@pytest.mark.unit
+class TestForceStepDamping:
+    def test_undamped_oscillates_near_equilibrium(self):
+        """Without damping, a component near equilibrium with effective
+        restoring stiffness >= 2 in the x direction oscillates with
+        period 2."""
+        from commands.autoplacer import iterate
+        sess, comp = _build_overshoot_session(force_step_damping=1.0)
+        # x=1 with K_eff=2 → after 1 iter, x = 1 - 2 = -1 (overshoot
+        # by 1).  Next iter: x = -1 + 2 = +1.  Period 2 oscillation.
+        x_history = []
+        for _ in range(6):
+            iterate(sess, n=1)
+            x_history.append(comp.x)
+        sign_flips = sum(
+            1 for i in range(len(x_history) - 1)
+            if x_history[i] * x_history[i+1] < 0
+        )
+        assert sign_flips >= 3, (
+            f"expected period-2 x-axis oscillation; got x_history={x_history}"
+        )
+
+    def test_damping_eliminates_oscillation(self):
+        """With damping=0.5, the same setup converges monotonically."""
+        from commands.autoplacer import iterate
+        sess, comp = _build_overshoot_session(force_step_damping=0.5)
+        x_history = []
+        for _ in range(6):
+            iterate(sess, n=1)
+            x_history.append(comp.x)
+        sign_flips = sum(
+            1 for i in range(len(x_history) - 1)
+            if x_history[i] * x_history[i+1] < 0
+        )
+        assert sign_flips == 0, (
+            f"with damping=0.5, x should converge monotonically; "
+            f"got x_history={x_history}"
+        )
+        assert abs(x_history[-1]) < 0.5, (
+            f"expected x to approach 0; got final x={x_history[-1]}"
+        )
+
+
 @pytest.mark.unit
 class TestSchematicTorqueSkipsPCB:
     def test_torque_for_pin_orientation_returns_zero_for_pcb(self):

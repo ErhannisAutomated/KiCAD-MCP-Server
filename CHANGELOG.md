@@ -4,6 +4,35 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Force-step damping prevents period-2 oscillation (develop, 2026-05-21)
+
+Surfaced during R23 tuning: when components were near equilibrium
+and the force magnitude was smaller than the temperature cap, the
+apply step equalled the FULL force vector.  For effective restoring
+stiffness >= 2 (two springs each at attraction_k=1.0 = the user's
+default), every iter moved by 2× the position error → overshoot
+by exactly the position error → next iter flipped sign and went
+back.  Components orbited their equilibrium at period 2.
+
+Schematic flow didn't hit this because its temperature decays
+geometrically (initial 30, cooling 0.95), so within a few dozen
+iters the temperature cap is tiny and force-as-displacement never
+applies.  PCB schedule keeps temperature constant per phase, so it
+hit the oscillation as soon as components got close.
+
+Added Params.force_step_damping (default 1.0 → schematic
+backward-compat) which multiplies the force-based step BEFORE the
+temperature cap.  PCBSchedule.force_step_damping defaults to 0.5
+(critical damping for the typical 2-spring K_eff=2 case).  New
+forceStepDamping MCP param.
+
+2 regression tests prove the behavior:
+  * test_undamped_oscillates_near_equilibrium — damping=1.0 produces
+    >= 3 sign flips in 6 iters (period-2 oscillation).
+  * test_damping_eliminates_oscillation — damping=0.5 gives 0 sign
+    flips and the component converges monotonically to within 0.5mm
+    of equilibrium.
+
 ### Schematic torque functions now skip PCB components (develop, 2026-05-21)
 
 Follow-up to the lever-arm torque sign fix.  ``_torque_for_pin_orientation``

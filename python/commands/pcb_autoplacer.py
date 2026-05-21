@@ -342,6 +342,12 @@ class PCBSchedule:
     # because the actual connection routes through a via.  Default
     # off — backward-compatible; toggle in your schedule when needed.
     cross_layer_springs: bool = True
+    # Damping factor on the force-as-displacement step.  PCB schedule
+    # keeps temperature constant per phase, so without damping the
+    # near-equilibrium step equals the full force vector — for
+    # effective restoring stiffness >= 2, components oscillate.
+    # 0.5 gives critical damping for the typical 2-spring case.
+    force_step_damping: float = 0.5
 
 
 def run_pcb_relax(
@@ -368,6 +374,7 @@ def run_pcb_relax(
     p.obb_repulsion_margin = margin_mm
     p.pinwise_torque_k = schedule.pinwise_torque_k
     p.cross_layer_springs = schedule.cross_layer_springs
+    p.force_step_damping = schedule.force_step_damping
 
     # Disable schematic-only forces.
     p.polarity_k = 0.0
@@ -455,6 +462,7 @@ def relax_placement(
     snap_iters: int = 30,
     relax_iters: int = 20,
     cross_layer_springs: bool = True,
+    force_step_damping: float = 0.5,
     dry_run: bool = False,
     auto_classify_planes: bool = True,
     **legacy_kwargs: Any,
@@ -499,6 +507,7 @@ def relax_placement(
         rotation_snap_peak=rotation_snap_peak,
         pinwise_torque_k=pinwise_torque_k,
         cross_layer_springs=cross_layer_springs,
+        force_step_damping=force_step_damping,
     )
     metrics = run_pcb_relax(sess, schedule, margin_mm=margin_mm)
 
