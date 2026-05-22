@@ -683,6 +683,80 @@ class TestSequentialApply:
         assert abs(gap_s) < 1.0
 
 
+@pytest.mark.unit
+class TestSnapRotations:
+    """`snap_rotations` rounds non-anchored rotations to multiples
+    of `period`, skipping pinned components and no-op cases."""
+
+    def _make_comp(self, ref, rotation, pinned=False):
+        from commands.autoplacer import Component
+        return Component(
+            ref=ref, unit=1, lib_id="x:y",
+            x=0.0, y=0.0, rotation=rotation,
+            mirror_x=False, mirror_y=False,
+            bbox_w=2.0, bbox_h=2.0,
+            pinned=pinned,
+            coord_system="pcb", layer="F.Cu",
+        )
+
+    def test_rounds_to_nearest_period_multiple(self):
+        from commands.autoplacer import Session
+        from commands.pcb_autoplacer import snap_rotations
+        sess = Session(schematic_path=Path("pcb://test"))
+        a = self._make_comp("A", rotation=89.5)
+        b = self._make_comp("B", rotation=137.0)
+        c = self._make_comp("C", rotation=315.5)
+        sess.components[a.key] = a
+        sess.components[b.key] = b
+        sess.components[c.key] = c
+        n = snap_rotations(sess, period=90.0)
+        assert n == 3
+        assert a.rotation == 90.0
+        assert b.rotation == 180.0
+        assert c.rotation == 0.0    # 315.5 → 360 → 0 modulo 360
+
+    def test_skips_pinned(self):
+        from commands.autoplacer import Session
+        from commands.pcb_autoplacer import snap_rotations
+        sess = Session(schematic_path=Path("pcb://test"))
+        a = self._make_comp("A", rotation=89.5, pinned=True)
+        b = self._make_comp("B", rotation=89.5, pinned=False)
+        sess.components[a.key] = a
+        sess.components[b.key] = b
+        n = snap_rotations(sess, period=90.0)
+        assert n == 1
+        assert a.rotation == 89.5  # unchanged
+        assert b.rotation == 90.0
+
+    def test_no_op_when_already_aligned(self):
+        from commands.autoplacer import Session
+        from commands.pcb_autoplacer import snap_rotations
+        sess = Session(schematic_path=Path("pcb://test"))
+        for rot in (0.0, 90.0, 180.0, 270.0):
+            c = self._make_comp(f"C{int(rot)}", rotation=rot)
+            sess.components[c.key] = c
+        n = snap_rotations(sess, period=90.0)
+        assert n == 0
+
+
+@pytest.mark.unit
+class TestPCBScheduleDefaults:
+    """Sanity check that the tuned defaults are still wired in."""
+
+    def test_defaults_reflect_tuning(self):
+        from commands.pcb_autoplacer import PCBSchedule
+        s = PCBSchedule()
+        # Repulsion regime appropriate for the 1/r³ formula
+        assert s.spring_k == 1.0
+        assert s.repulsion_k_start == pytest.approx(1e-4)
+        assert s.repulsion_k_peak == pytest.approx(0.1)
+        assert s.rotation_snap_peak == 30.0
+        assert s.pinwise_torque_k == 1.0
+        assert s.force_step_damping == 0.3
+        assert s.enforce_rotation_snap is True
+        assert s.boundary_k == 1.0
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(
     not _real_pcbnew_available(),

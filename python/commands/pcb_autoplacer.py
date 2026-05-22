@@ -366,55 +366,101 @@ class PCBSchedule:
     springs-first relaxation schedule.
 
     Phase 1 (CLUSTER) — springs only, no repulsion: components find
-    their natural connection-determined neighborhoods.
-    Phase 2 (SPREAD) — repulsion ramps in: bodies settle into
-    non-overlapping positions.
+    their natural connection-determined neighborhoods.  Default
+    skipped (cluster_iters=0); the SPREAD phase starts repulsion
+    near zero so it effectively absorbs the cluster role.
+    Phase 2 (SPREAD) — repulsion ramps in geometrically: bodies
+    settle into non-overlapping positions.
     Phase 3 (SNAP) — rotation-snap potential ramps in: orientations
     align to 90° multiples.
     Phase 4 (RELAX) — snap at full strength, low temperature: final
-    overlap cleanup with orientations fixed.
+    overlap cleanup with orientations fixed.  Default skipped
+    (relax_iters=0); ``enforce_rotation_snap`` produces a cleaner
+    final state by hard-snapping rotations rather than asking the
+    soft snap to converge.
+
+    Defaults reflect a real-board tuning pass on power_module
+    (2026-05-22) under the inverse-cube repulsion formula — the
+    cubic-ramp formula's larger force ranges aren't appropriate
+    here.  If a board misbehaves under these, "safer" historical
+    values are: spring_k=0.1, repulsion_k_peak=30, snap_peak=3,
+    pinwise_torque_k=0.05, step_spread=3.0.
     """
-    cluster_iters: int = 30
-    spread_iters: int = 40
-    snap_iters: int = 30
-    relax_iters: int = 20
+    cluster_iters: int = 0
+    spread_iters: int = 200
+    snap_iters: int = 100
+    relax_iters: int = 0
 
     # Force scales (applied as multipliers to engine defaults)
-    spring_k: float = 0.1               # attraction_k during all phases
-    repulsion_k_start: float = 0.05     # start of spread phase
-    repulsion_k_peak: float = 30.0      # peak at end of spread phase
-    rotation_snap_peak: float = 3.0     # peak snap strength
+    spring_k: float = 1.0               # attraction_k during all phases
+    repulsion_k_start: float = 1e-4     # start of spread phase (1/r³ formula)
+    repulsion_k_peak: float = 0.1       # peak at end of spread phase
+    rotation_snap_peak: float = 30.0    # peak snap strength
     # Lever-arm torque coupling for the pin-wise spring forces.
     # Falls out of off-center forces automatically — without it
     # nothing rotates even though springs pull on pad positions.
-    pinwise_torque_k: float = 0.05
+    pinwise_torque_k: float = 1.0
 
-    # Per-iteration step caps (mm).  Lower in later phases so we don't
-    # bounce components around once they're close to settled.
-    step_cluster: float = 5.0
-    step_spread: float = 3.0
-    step_snap: float = 1.5
-    step_relax: float = 0.5
+    # Per-iteration step caps (mm).  These are quite small under the
+    # current 1/r³ repulsion + degree normalization combo — large
+    # steps cause overshoot when bodies penetrate and the saturation
+    # force kicks in.
+    step_cluster: float = 1.0
+    step_spread: float = 0.2
+    step_snap: float = 0.05
+    step_relax: float = 0.05
 
     # Skip springs between pads on different copper layers (F.Cu vs
     # B.Cu).  Useful when a back-side anchor (cell holder, B-side
     # connector) shouldn't pull front-side parts onto its pads
-    # because the actual connection routes through a via.  Default
-    # off — backward-compatible; toggle in your schedule when needed.
+    # because the actual connection routes through a via.
     cross_layer_springs: bool = True
     # Damping factor on the force-as-displacement step.  PCB schedule
     # keeps temperature constant per phase, so without damping the
     # near-equilibrium step equals the full force vector — for
     # effective restoring stiffness >= 2, components oscillate.
-    # 0.5 gives critical damping for the typical 2-spring case.
-    force_step_damping: float = 0.5
+    force_step_damping: float = 0.3
     # Normalize each component's spring force/torque by its degree
     # (number of spring contributions).  Without this, K_eff scales
     # with N pins — a 28-pin IC has 14× the restoring stiffness of
     # a 2-pin resistor and bucks under the damping that's critical
-    # for the resistor.  On for PCB by default; schematic stays off
-    # to preserve its tuned dynamics.
+    # for the resistor.
     normalize_spring_force_by_degree: bool = True
+
+    # Soft boundary force during iteration (linear restoring force
+    # when a component drifts past the keep-in bbox).  Was disabled
+    # in v1 in favor of a post-clamp; the post-clamp still runs as
+    # a final guarantee, but a boundary force during iteration
+    # prevents the energetic mid-run drift that the clamp can't
+    # reverse (a component pushed off-board then having to be
+    # un-pushed by clamping leaves it piled on the edge).
+    boundary_k: float = 1.0
+
+    # After the soft snap phase, hard-round each non-anchored
+    # component's rotation to the nearest multiple of 90°.  The
+    # soft snap pulls rotations close but lever-arm torque from
+    # springs can hold them slightly off-axis; the hard snap
+    # guarantees alignment.
+    enforce_rotation_snap: bool = True
+
+
+def snap_rotations(sess: Session, period: float = 90.0) -> int:
+    """Round each unpinned component's rotation to the nearest multiple
+    of `period` degrees.  Returns the number of components whose
+    rotation was changed.  Useful as a final cleanup after the
+    soft rotation-snap phase doesn't quite converge to exact
+    alignment under residual lever-arm torque.
+    """
+    n = 0
+    for c in sess.components.values():
+        if c.pinned:
+            continue
+        snapped = (round(c.rotation / period) * period) % 360
+        # Shortest-angular-delta check so 359.99° vs 0° isn't flagged.
+        if abs(((c.rotation - snapped + 540) % 360) - 180) > 1e-6:
+            c.rotation = snapped
+            n += 1
+    return n
 
 
 def run_pcb_relax(
@@ -422,6 +468,7 @@ def run_pcb_relax(
     schedule: Optional[PCBSchedule] = None,
     *,
     margin_mm: float = 1.0,
+    keep_in: Optional[Tuple[float, float, float, float]] = None,
     on_step: Optional[Any] = None,
 ) -> Dict[str, Any]:
     """Run the 4-phase relaxation on a PCB Session.
@@ -429,6 +476,9 @@ def run_pcb_relax(
     Sets the v2 physics flags on ``sess.params`` and runs each phase
     with the appropriate force schedule.  ``on_step`` is an optional
     per-iteration callback (gets ``sess``) for live viz.
+    ``keep_in`` is the (left, top, right, bottom) Edge.Cuts bbox; if
+    provided and the schedule has ``boundary_k > 0``, a soft boundary
+    force keeps components on-board during iteration.
 
     Returns a metrics dict (phase counts + per-phase max force).
     """
@@ -447,10 +497,20 @@ def run_pcb_relax(
     # Disable schematic-only forces.
     p.polarity_k = 0.0
     p.polarity_torque_k = 0.0
-    p.boundary_k = 0.0   # PCB uses keep-in clamp instead; not a force.
     p.rotation_k = 0.0   # disable angle-based pin-orientation torque;
                           # the off-center pin-wise springs now provide
                           # rotation via lever-arm torque (pinwise_torque_k).
+
+    # Boundary force during iteration (when keep_in is supplied).
+    # The post-clamp in `relax_placement` still runs as a final
+    # safety net.
+    if keep_in is not None and schedule.boundary_k > 0:
+        kl, kt, kr, kb = keep_in
+        p.sheet_x_min, p.sheet_x_max = kl, kr
+        p.sheet_y_min, p.sheet_y_max = kt, kb
+        p.boundary_k = schedule.boundary_k
+    else:
+        p.boundary_k = 0.0
 
     metrics: Dict[str, Any] = {"phases": []}
 
@@ -496,6 +556,15 @@ def run_pcb_relax(
     metrics["phases"].append({"name": "snap", "iters": schedule.snap_iters,
                               "max_force": sess.last_max_force})
 
+    # ---- Hard rotation snap (optional) ----
+    # Soft snap pulls rotations close but residual lever-arm torque
+    # from off-center springs holds them slightly askew.  A hard
+    # round to the nearest period yields the final clean orientation.
+    if schedule.enforce_rotation_snap:
+        n_snapped = snap_rotations(sess)
+        metrics["phases"].append({"name": "hard_snap", "iters": 0,
+                                  "rotations_snapped": n_snapped})
+
     # ---- Phase 4: RELAX (full snap, low temperature) ----
     p.rotation_snap_strength = schedule.rotation_snap_peak
     for _ in range(schedule.relax_iters):
@@ -503,8 +572,9 @@ def run_pcb_relax(
         iterate(sess, n=1)
         if on_step:
             on_step(sess)
-    metrics["phases"].append({"name": "relax", "iters": schedule.relax_iters,
-                              "max_force": sess.last_max_force})
+    if schedule.relax_iters > 0:
+        metrics["phases"].append({"name": "relax", "iters": schedule.relax_iters,
+                                  "max_force": sess.last_max_force})
 
     return metrics
 
@@ -520,18 +590,20 @@ def relax_placement(
     locked_refs: Optional[List[str]] = None,
     *,
     margin_mm: float = 1.0,
-    spring_k: float = 0.1,
-    repulsion_k_start: float = 0.05,
-    repulsion_k_peak: float = 30.0,
-    rotation_snap_peak: float = 3.0,
-    pinwise_torque_k: float = 0.05,
-    cluster_iters: int = 30,
-    spread_iters: int = 40,
-    snap_iters: int = 30,
-    relax_iters: int = 20,
+    spring_k: float = 1.0,
+    repulsion_k_start: float = 1e-4,
+    repulsion_k_peak: float = 0.1,
+    rotation_snap_peak: float = 30.0,
+    pinwise_torque_k: float = 1.0,
+    cluster_iters: int = 0,
+    spread_iters: int = 200,
+    snap_iters: int = 100,
+    relax_iters: int = 0,
     cross_layer_springs: bool = True,
-    force_step_damping: float = 0.5,
+    force_step_damping: float = 0.3,
     normalize_spring_force_by_degree: bool = True,
+    boundary_k: float = 1.0,
+    enforce_rotation_snap: bool = True,
     dry_run: bool = False,
     auto_classify_planes: bool = True,
     **legacy_kwargs: Any,
@@ -578,8 +650,10 @@ def relax_placement(
         cross_layer_springs=cross_layer_springs,
         force_step_damping=force_step_damping,
         normalize_spring_force_by_degree=normalize_spring_force_by_degree,
+        boundary_k=boundary_k,
+        enforce_rotation_snap=enforce_rotation_snap,
     )
-    metrics = run_pcb_relax(sess, schedule, margin_mm=margin_mm)
+    metrics = run_pcb_relax(sess, schedule, margin_mm=margin_mm, keep_in=keep_in)
 
     # Clamp to keep-in if it's non-degenerate.
     kl, kt, kr, kb = keep_in
