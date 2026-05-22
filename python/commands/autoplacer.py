@@ -314,7 +314,7 @@ class Params:
     # ---- Unified-engine (v2) opt-in flags. Default off → no behavior
     # change for the schematic flow that's been working since 2026-05.
     # The PCB schedule turns these on.
-    use_obb_repulsion: bool = False     # body-aware cubic-ramp instead of 1/r²
+    use_obb_repulsion: bool = False     # body-aware OBB (1/r³) instead of 1/r²
     use_spring_classes: bool = False    # per-pair spring constant from class resolver
     # Cubic-ramp body repulsion margin in mm; rectangles within this
     # distance of each other feel the force.
@@ -765,7 +765,7 @@ def load_session(schematic_path: Path) -> Session:
 
 
 # ----------------------------------------------------------------------
-# OBB (oriented bounding box) geometry + cubic-ramp repulsion (v2)
+# OBB (oriented bounding box) geometry + inverse-cube repulsion (v2)
 # ----------------------------------------------------------------------
 #
 # Used by the unified relax engine for both schematic and PCB.  The
@@ -1288,8 +1288,8 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
         for c in comps:
             fx = fy = 0.0
             # Repulsion from other components.  v2 PCB path uses OBB
-            # cubic-ramp (body-aware); legacy schematic path uses
-            # 1/r² Coulomb between centres.
+            # body-aware repulsion (1/r³ with margin offset); legacy
+            # schematic path uses 1/r² Coulomb between centres.
             if p.use_obb_repulsion:
                 for other in comps:
                     if other is c:

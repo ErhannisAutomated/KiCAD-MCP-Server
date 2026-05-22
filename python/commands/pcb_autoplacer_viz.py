@@ -3,7 +3,7 @@
 Parallel to ``autoplacer_viz.AutoplacerViz`` but PCB-aware: OBB-rotated
 component rectangles, Edge.Cuts keep-in instead of the schematic sheet
 bbox, ratsnest segments colored by resolved spring class, and force
-arrows derived from the v2 physics (OBB cubic-ramp repulsion +
+arrows derived from the v2 physics (OBB inverse-cube repulsion +
 spring-class-modulated pin-wise springs).
 
 Designed for a Jupyter / iPython session next to a live PCB ``Session``.

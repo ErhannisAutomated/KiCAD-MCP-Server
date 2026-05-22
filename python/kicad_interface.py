@@ -6634,13 +6634,25 @@ print("ok")
         """v2 unified force-directed PCB placement relaxation.
 
         Pulls connected components together via pin-wise springs
-        (strength resolved per net-class) and pushes overlapping
-        bodies apart via OBB-cubic-ramp repulsion. Anchored components
-        (connectors, BAT/SW/J* refs by default; override via
+        (strength resolved per spring class — DECOUPLING strong,
+        LOCAL_SIGNAL default, INTER_GROUP weak, PLANE zero) and pushes
+        overlapping bodies apart via OBB inverse-cube repulsion.
+        Anchored components (connectors, BAT/SW/J* refs by default,
+        plus anything KiCad-locked via fp.IsLocked(); override via
         ``lockedRefs``) stay fixed.
 
-        Schedule: cluster (springs only) → spread (repulsion ramps in)
-        → snap (rotation snap ramps in) → relax (full snap, low temp).
+        Default schedule (200+100 iters): spread (repulsion ramps in
+        geometrically from ~1e-4 to 0.1) → snap (rotation snap ramps in
+        toward 90° multiples) → hard-snap (final rotation alignment).
+        The cluster and relax phases default to 0 iters; spread's
+        near-zero starting repulsion absorbs cluster's role and the
+        hard-snap replaces relax's purpose.
+
+        Spring classes + per-net assignments load from the
+        ``mcp_spring_classes`` section of the sibling .kicad_pro
+        (bootstrapped on first run); per-pad
+        ``Pin_Spring_Class:N`` footprint properties override on
+        specific connections.
 
         ``dryRun`` computes new positions without writing them.
         """

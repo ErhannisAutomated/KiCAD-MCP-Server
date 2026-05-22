@@ -9,12 +9,19 @@ Key differences from v1 (now removed):
   - Pin-wise springs instead of component-centre springs.  Off-centre
     forces produce torques that orient parts so the active pad faces
     its target — caps land EDGE-to-IC, not centre-to-IC.
-  - OBB-via-SAT cubic-ramp body repulsion replaces the AABB depth
+  - OBB-via-SAT inverse-cube body repulsion replaces the AABB depth
     heuristic.  Handles rotated parts and corner-corner cases.
+    (The repulsion formula started as cubic-ramp; switched to
+    1/r³ with margin offset 2026-05-22 after tuning.)
   - Spring classes (DECOUPLING / LOCAL_SIGNAL / INTER_GROUP / PLANE)
     set per-pair pull strength.  Power-plane nets default to PLANE
-    (k=0) since vias handle their routing.
-  - 4-phase springs-first schedule: cluster → spread → snap → settle.
+    (k=0) since vias handle their routing.  Read from
+    .kicad_pro on load (mcp_spring_classes section), with per-pad
+    Pin_Spring_Class:N footprint property overrides.
+  - Springs-first schedule: cluster (skipped by default; absorbed
+    into the near-zero-repulsion start of spread) → spread (repulsion
+    ramps in geometrically) → snap (rotation snap ramps in) →
+    hard-snap (final rotation alignment) → optional relax.
 
 This module is the PCB-side adapter; the engine + physics live in
 ``autoplacer.py``.  Anything that's adapter-agnostic (forces, torques,
