@@ -111,6 +111,92 @@ class TestOBBRotationConvention:
 
 
 @pytest.mark.unit
+class TestComponentObbCenterWorld:
+    """Component.obb_center_world() rotates the (bbox_cx, bbox_cy)
+    offset by c.rotation and adds to (c.x, c.y).  Same rotation
+    convention as world_pin_xy (screen-Y-down CCW positive)."""
+
+    def _make_comp(self, bbox_cx=0.0, bbox_cy=0.0, rotation=0.0,
+                   x=0.0, y=0.0):
+        from commands.autoplacer import Component
+        return Component(
+            ref="J1", unit=1, lib_id="x:y",
+            x=x, y=y, rotation=rotation,
+            mirror_x=False, mirror_y=False,
+            bbox_w=20.0, bbox_h=3.0,
+            bbox_cx=bbox_cx, bbox_cy=bbox_cy,
+            coord_system="pcb", layer="F.Cu",
+        )
+
+    def test_zero_offset_returns_origin(self):
+        c = self._make_comp(x=5.0, y=7.0)
+        bx, by = c.obb_center_world()
+        assert (bx, by) == (5.0, 7.0)
+
+    def test_nonzero_offset_unrotated(self):
+        # Pin header anchored at pin 1 (origin); body center 10mm east.
+        c = self._make_comp(bbox_cx=10.0, x=5.0, y=7.0)
+        bx, by = c.obb_center_world()
+        assert bx == pytest.approx(15.0)
+        assert by == pytest.approx(7.0)
+
+    def test_offset_rotated_90deg(self):
+        """At rotation=90° (screen-CCW), an east-pointing offset
+        rotates to point... north (in screen Y-down, north is -y)."""
+        c = self._make_comp(bbox_cx=10.0, rotation=90.0, x=5.0, y=7.0)
+        bx, by = c.obb_center_world()
+        assert bx == pytest.approx(5.0, abs=1e-6)
+        assert by == pytest.approx(-3.0, abs=1e-6)  # 7 - 10
+
+    def test_offset_rotated_180deg(self):
+        c = self._make_comp(bbox_cx=10.0, rotation=180.0, x=5.0, y=7.0)
+        bx, by = c.obb_center_world()
+        assert bx == pytest.approx(-5.0)
+        assert by == pytest.approx(7.0, abs=1e-6)
+
+
+@pytest.mark.unit
+class TestOffsetBboxOBBSeparation:
+    """End-to-end: a pin-header-style off-center bbox produces the
+    expected gap when its body overlaps a neighbor that the
+    footprint origin (pin 1) wouldn't.  Pre-fix: gap calc against
+    (c.x, c.y) showed huge separation while the body actually
+    overlapped the neighbor."""
+
+    def test_pin_header_body_overlap_detected(self):
+        from commands.autoplacer import Component, obb_separation
+        # J2: 20×3 pin header, anchored at pin 1 (origin at left edge).
+        # Body extends from x=0 to x=20 in local coords; center at +10.
+        j2 = Component(
+            ref="J2", unit=1, lib_id="x:y",
+            x=0.0, y=0.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=20.0, bbox_h=3.0,
+            bbox_cx=10.0, bbox_cy=0.0,
+            coord_system="pcb", layer="F.Cu",
+        )
+        # A small chip 12mm east of pin 1 — well inside J2's body.
+        r = Component(
+            ref="R", unit=1, lib_id="x:y",
+            x=12.0, y=0.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=2.0, bbox_h=1.0,
+            coord_system="pcb", layer="F.Cu",
+        )
+        # Use OBB centers, not raw (x, y).
+        jx, jy = j2.obb_center_world()
+        rx, ry = r.obb_center_world()
+        gap, _ = obb_separation(
+            jx, jy, j2.bbox_w, j2.bbox_h, j2.rotation,
+            rx, ry, r.bbox_w, r.bbox_h, r.rotation,
+        )
+        assert gap < 0.0, (
+            f"chip is inside pin header body, expected penetration; "
+            f"gap reported {gap:.3f} mm"
+        )
+
+
+@pytest.mark.unit
 class TestOBBRepulsionForce:
     def test_zero_force_when_far_apart(self):
         from commands.autoplacer import obb_repulsion_force

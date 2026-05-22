@@ -68,46 +68,103 @@ def _pad_local_xy(pad: Any, fp_world_xy: Tuple[float, float],
 
 def _footprint_local_bbox_mm(
     fp: Any, fp_x_mm: float, fp_y_mm: float, fp_angle_deg: float,
-) -> Tuple[float, float]:
-    """Footprint bbox dimensions in the UNROTATED local frame, mm.
+) -> Tuple[float, float, float, float]:
+    """Footprint bbox in the UNROTATED local frame, mm.
 
-    The engine + viz apply ``c.rotation`` to the bbox themselves
-    (rotated rectangle / OBB), so the stored ``bbox_w``/``bbox_h``
-    must be rotation-independent.  Using ``fp.GetBoundingBox(False)``
-    here was wrong — that returns the world-axis-aligned bbox at the
-    footprint's CURRENT rotation, so a 90°-rotated HTSSOP-28 ended
-    up with w/h swapped relative to its body, then the viz rotated
-    again, giving a bbox visually perpendicular to its pins.
+    Returns ``(w, h, cx_offset, cy_offset)`` where ``(cx_offset,
+    cy_offset)`` is the offset from the footprint origin (=
+    ``fp.GetPosition()``, where pin 1 typically sits for connectors)
+    to the bbox center.  Callers use ``Component.obb_center_world()``
+    to rotate the offset and add it to the world origin.
 
-    Walks pad world positions, derotates by ``fp_angle_deg`` into the
-    local frame, and accumulates pad size as a conservative-circle
-    radius (over-approximates for narrow pads but safe for
-    body-extent purposes).  Falls back to ``(1.0, 1.0)`` if a
-    footprint somehow has no pads.
+    Source preference:
+      1. Courtyard polygon (F.CrtYd / B.CrtYd) — KiCad's explicit
+         no-overlap zone, ideal for placement clearance.
+      2. Convex bounds of pads + graphics on F.Fab / B.Fab and
+         F.SilkS / B.SilkS, excluding text (reference/value labels
+         can extend far past the body).
+
+    Bbox is rotation-INVARIANT in local (derotated) coords; the
+    engine + viz apply ``c.rotation`` to the OBB themselves.  Using
+    ``fp.GetBoundingBox()`` here was wrong because it returned the
+    world AABB at the current rotation.
     """
     rad = math.radians(fp_angle_deg)
     cos_a, sin_a = math.cos(rad), math.sin(rad)
+
+    def _to_local(wx_nm: float, wy_nm: float) -> Tuple[float, float]:
+        ox = wx_nm / _NM_PER_MM - fp_x_mm
+        oy = wy_nm / _NM_PER_MM - fp_y_mm
+        return (ox * cos_a - oy * sin_a, ox * sin_a + oy * cos_a)
+
     xs: List[float] = []
     ys: List[float] = []
-    for pad in fp.Pads():
-        pw = pad.GetPosition()
-        ox = pw.x / _NM_PER_MM - fp_x_mm
-        oy = pw.y / _NM_PER_MM - fp_y_mm
-        # Inverse of the world transform (which uses ``rad = -fp_angle``);
-        # invert by rotating by +fp_angle.
-        lx = ox * cos_a - oy * sin_a
-        ly = ox * sin_a + oy * cos_a
-        size = pad.GetSize()
-        sx = size.x / _NM_PER_MM
-        sy = size.y / _NM_PER_MM
-        # Conservative circle radius — captures the pad regardless of
-        # its own orientation relative to the footprint.
-        r = max(sx, sy) * 0.5
-        xs.extend([lx - r, lx + r])
-        ys.extend([ly - r, ly + r])
+
+    # ---- 1. Courtyard (preferred) ----
+    try:
+        for layer in (pcbnew.F_CrtYd, pcbnew.B_CrtYd):
+            poly = fp.GetCourtyard(layer)
+            if poly is None or poly.OutlineCount() == 0:
+                continue
+            for oi in range(poly.OutlineCount()):
+                outline = poly.Outline(oi)
+                for pi in range(outline.PointCount()):
+                    pt = outline.CPoint(pi)
+                    lx, ly = _to_local(pt.x, pt.y)
+                    xs.append(lx)
+                    ys.append(ly)
+    except Exception:
+        # Older pcbnew versions or missing API — fall through to fab/silk.
+        pass
+
+    # ---- 2. Fall back to pads + fab + silk graphics ----
     if not xs:
-        return 1.0, 1.0
-    return max(xs) - min(xs), max(ys) - min(ys)
+        for pad in fp.Pads():
+            pw = pad.GetPosition()
+            lx, ly = _to_local(pw.x, pw.y)
+            size = pad.GetSize()
+            r = max(size.x, size.y) / (2 * _NM_PER_MM)
+            xs.extend([lx - r, lx + r])
+            ys.extend([ly - r, ly + r])
+        body_layers = {
+            pcbnew.F_Fab, pcbnew.B_Fab, pcbnew.F_SilkS, pcbnew.B_SilkS,
+        }
+        for item in fp.GraphicalItems():
+            # Skip text (reference/value labels can extend well past body).
+            try:
+                if item.Type() == pcbnew.PCB_FIELD_T or item.Type() == pcbnew.PCB_TEXT_T:
+                    continue
+            except Exception:
+                # Type discrimination not available — best-effort skip
+                # by checking for a GetText method.
+                if hasattr(item, "GetText"):
+                    continue
+            if item.GetLayer() not in body_layers:
+                continue
+            bb = item.GetBoundingBox()
+            # bb is in world coords (pcbnew BOX2I); convert all four corners
+            # to local — for non-axis-aligned items the AABB is conservative
+            # but accurate enough for body extent.
+            for (wx, wy) in (
+                (bb.GetLeft(),  bb.GetTop()),
+                (bb.GetRight(), bb.GetTop()),
+                (bb.GetRight(), bb.GetBottom()),
+                (bb.GetLeft(),  bb.GetBottom()),
+            ):
+                lx, ly = _to_local(wx, wy)
+                xs.append(lx)
+                ys.append(ly)
+
+    if not xs:
+        return 1.0, 1.0, 0.0, 0.0
+    x_min, x_max = min(xs), max(xs)
+    y_min, y_max = min(ys), max(ys)
+    return (
+        x_max - x_min,
+        y_max - y_min,
+        (x_min + x_max) / 2.0,
+        (y_min + y_max) / 2.0,
+    )
 
 
 def _power_net_pattern_class(net_name: str) -> Optional[str]:
@@ -163,7 +220,9 @@ def load_pcb_session(
         fp_x = pos.x / _NM_PER_MM
         fp_y = pos.y / _NM_PER_MM
         fp_angle = fp.GetOrientation().AsDegrees()
-        bbox_w, bbox_h = _footprint_local_bbox_mm(fp, fp_x, fp_y, fp_angle)
+        bbox_w, bbox_h, bbox_cx, bbox_cy = _footprint_local_bbox_mm(
+            fp, fp_x, fp_y, fp_angle,
+        )
         layer_name = board.GetLayerName(fp.GetLayer())
 
         # Anchor decision: explicit set wins; default heuristic falls
@@ -194,6 +253,7 @@ def load_pcb_session(
             x=fp_x, y=fp_y, rotation=fp_angle,
             mirror_x=False, mirror_y=False,
             bbox_w=bbox_w, bbox_h=bbox_h,
+            bbox_cx=bbox_cx, bbox_cy=bbox_cy,
             pinned=anchored,
             layer=layer_name,
             coord_system="pcb",
@@ -527,9 +587,17 @@ def relax_placement(
         for c in sess.components.values():
             if c.pinned:
                 continue
+            # Clamp the OBB center (= body center), not the footprint
+            # origin.  For off-center bboxes (pin headers anchored at
+            # pin 1) the two diverge; clamping the origin would let
+            # the body overhang Edge.Cuts.
+            bx, by = c.obb_center_world()
+            dx, dy = bx - c.x, by - c.y
             hw, hh = c.bbox_w * 0.5, c.bbox_h * 0.5
-            c.x = max(kl + hw, min(kr - hw, c.x))
-            c.y = max(kt + hh, min(kb - hh, c.y))
+            new_bx = max(kl + hw, min(kr - hw, bx))
+            new_by = max(kt + hh, min(kb - hh, by))
+            c.x = new_bx - dx
+            c.y = new_by - dy
 
     # Compute moves for reporting.
     moves: List[Dict[str, Any]] = []

@@ -704,13 +704,13 @@ class TestLocalBbox:
             pytest.skip("U4 not on board")
         pos = u4.GetPosition()
         ang = u4.GetOrientation().AsDegrees()
-        local_w, local_h = _footprint_local_bbox_mm(
+        local_w, local_h, local_cx, local_cy = _footprint_local_bbox_mm(
             u4, pos.x / 1e6, pos.y / 1e6, ang,
         )
         # Now rotate it programmatically to 0° and re-measure.
         # SWIG board mutation is in-memory only — fine for the test.
         u4.SetOrientation(pcbnew.EDA_ANGLE(0, pcbnew.DEGREES_T))
-        local_w0, local_h0 = _footprint_local_bbox_mm(
+        local_w0, local_h0, local_cx0, local_cy0 = _footprint_local_bbox_mm(
             u4, pos.x / 1e6, pos.y / 1e6, 0.0,
         )
         # Restore so other tests aren't affected.
@@ -723,4 +723,39 @@ class TestLocalBbox:
         )
         assert local_h == pytest.approx(local_h0, abs=0.05), (
             f"local bbox H changed with rotation: {local_h} vs {local_h0}"
+        )
+        assert local_cx == pytest.approx(local_cx0, abs=0.05)
+        assert local_cy == pytest.approx(local_cy0, abs=0.05)
+
+    def test_pin_header_bbox_has_offset_center(self):
+        """Pin headers (J*) are typically anchored at pin 1, so the
+        body center should sit offset from the footprint origin.
+        Asserts the offset is meaningfully nonzero for at least one
+        J-prefixed footprint with more than one pin."""
+        import pcbnew
+        from commands.pcb_autoplacer import _footprint_local_bbox_mm
+
+        BOARD = Path("/home/vagrant/projects/kicad_agent/projects/power_module/power_module.kicad_pcb")
+        if not BOARD.exists():
+            pytest.skip("power_module fixture not present")
+        board = pcbnew.LoadBoard(str(BOARD))
+        targets = [
+            fp for fp in board.GetFootprints()
+            if fp.GetReference().startswith("J") and len(fp.Pads()) >= 2
+        ]
+        if not targets:
+            pytest.skip("no multi-pin J-prefixed footprints on this board")
+        any_offset = False
+        for fp in targets:
+            pos = fp.GetPosition()
+            ang = fp.GetOrientation().AsDegrees()
+            w, h, cx, cy = _footprint_local_bbox_mm(
+                fp, pos.x / 1e6, pos.y / 1e6, ang,
+            )
+            if max(abs(cx), abs(cy)) > 0.5:   # >0.5mm offset is meaningful
+                any_offset = True
+                break
+        assert any_offset, (
+            "expected at least one pin-header footprint to have a body "
+            "center offset >0.5mm from its origin; all reported ~0 offset"
         )
