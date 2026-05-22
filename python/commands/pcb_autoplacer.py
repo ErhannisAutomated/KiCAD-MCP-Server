@@ -32,7 +32,7 @@ from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import pcbnew
 
 from commands.autoplacer import (
-    Component, Net, Pin, Session,
+    Component, Net, Pin, Session, SpringClass,
     DEFAULT_SPRING_CLASSES,
     iterate,
 )
@@ -61,6 +61,129 @@ def _safe_get_property(fp: Any, name: str) -> Optional[str]:
         return None
     val = val.strip()
     return val if val else None
+
+
+def _kicad_pro_path_for_board(board: Any) -> Optional[Path]:
+    """Locate the .kicad_pro sibling of the board file.  Returns None
+    for unsaved boards or when no project file exists alongside."""
+    name = board.GetFileName() if board is not None else None
+    if not name:
+        return None
+    pro = Path(name).with_suffix(".kicad_pro")
+    return pro if pro.exists() else None
+
+
+def _serialize_default_spring_classes() -> Dict[str, Dict[str, float]]:
+    """The on-disk JSON form of DEFAULT_SPRING_CLASSES — used to
+    bootstrap the section in .kicad_pro on first encounter."""
+    return {
+        name: {"spring_k": cls.spring_k, "natural_length": cls.natural_length}
+        for name, cls in DEFAULT_SPRING_CLASSES.items()
+    }
+
+
+def _load_spring_classes_from_project(
+    pro_path: Path,
+) -> Tuple[Dict[str, SpringClass], Dict[str, str]]:
+    """Read ``mcp_spring_classes`` from a ``.kicad_pro`` file.
+
+    Returns ``(classes, net_assignments)``:
+      - classes      — name → SpringClass, merged with defaults.  User
+                       overrides win; defaults fill in missing names.
+      - net_assignments — netname → class_name (caller applies after
+                          nets are loaded).
+
+    Malformed entries are logged and skipped; the loader never raises
+    on a bad project file (kicad_pro corruption shouldn't break
+    autoplacer).
+    """
+    classes: Dict[str, SpringClass] = dict(DEFAULT_SPRING_CLASSES)
+    nets: Dict[str, str] = {}
+    try:
+        with open(pro_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Could not read %s for spring classes: %s", pro_path, e)
+        return classes, nets
+
+    section = data.get("mcp_spring_classes")
+    if not isinstance(section, dict):
+        return classes, nets
+
+    raw_classes = section.get("classes")
+    if isinstance(raw_classes, dict):
+        for name, spec in raw_classes.items():
+            if not isinstance(name, str) or not isinstance(spec, dict):
+                logger.warning(
+                    "mcp_spring_classes.classes: bad entry %r=%r; skipping",
+                    name, spec,
+                )
+                continue
+            try:
+                classes[name] = SpringClass(
+                    name=name,
+                    spring_k=float(spec.get("spring_k", 1.0)),
+                    natural_length=float(spec.get("natural_length", 0.0)),
+                )
+            except (TypeError, ValueError) as e:
+                logger.warning(
+                    "mcp_spring_classes.classes[%r]: bad numeric: %s", name, e,
+                )
+
+    raw_nets = section.get("nets")
+    if isinstance(raw_nets, dict):
+        for net_name, class_name in raw_nets.items():
+            if isinstance(net_name, str) and isinstance(class_name, str):
+                nets[net_name] = class_name
+            else:
+                logger.warning(
+                    "mcp_spring_classes.nets: bad entry %r=%r; skipping",
+                    net_name, class_name,
+                )
+
+    return classes, nets
+
+
+def _bootstrap_spring_classes_in_project(pro_path: Path) -> bool:
+    """If ``.kicad_pro`` lacks an ``mcp_spring_classes`` section, write
+    the defaults (with an empty ``nets`` map for user editing).  Bumps
+    ``mcp_constraint_version`` to 2.  Returns True if the file was
+    modified.
+
+    Idempotent: if the section is already present, leaves it alone
+    (preserves user edits) but still bumps the constraint version if
+    it was 1 or missing.
+    """
+    if not pro_path.exists():
+        return False
+    try:
+        with open(pro_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except (OSError, json.JSONDecodeError) as e:
+        logger.warning("Could not read %s to bootstrap spring classes: %s",
+                       pro_path, e)
+        return False
+
+    modified = False
+    if "mcp_spring_classes" not in data:
+        data["mcp_spring_classes"] = {
+            "classes": _serialize_default_spring_classes(),
+            "nets": {},
+        }
+        modified = True
+    if data.get("mcp_constraint_version", 0) < 2:
+        data["mcp_constraint_version"] = 2
+        modified = True
+
+    if modified:
+        try:
+            with open(pro_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+                f.write("\n")
+        except OSError as e:
+            logger.warning("Could not write %s: %s", pro_path, e)
+            return False
+    return modified
 
 
 def _parse_pin_spring_class(value: str) -> Optional[Union[str, Dict[str, str]]]:
@@ -253,6 +376,7 @@ def load_pcb_session(
     *,
     locked_refs: Optional[Set[str]] = None,
     auto_classify_planes: bool = True,
+    bootstrap_kicad_pro: bool = True,
 ) -> Session:
     """Build a placement Session from a live pcbnew Board.
 
@@ -261,10 +385,27 @@ def load_pcb_session(
     anchored if their ref is in ``locked_refs`` (caller-supplied),
     or if no explicit set was passed and the footprint matches the
     default heuristic (J*/SW*/BAT* refs, or through-hole-dominant).
+
+    Spring classes are loaded from the ``mcp_spring_classes`` section
+    of the sibling ``.kicad_pro`` file if present.  When
+    ``bootstrap_kicad_pro=True`` (default) the section is created
+    with defaults on first load so users have something to edit.
     """
+    # Spring class registry from the .kicad_pro file, falling back to
+    # the engine defaults if no project file is present or the
+    # section is absent.
+    pro_path = _kicad_pro_path_for_board(board)
+    net_class_assignments: Dict[str, str] = {}
+    if pro_path is not None:
+        if bootstrap_kicad_pro:
+            _bootstrap_spring_classes_in_project(pro_path)
+        classes, net_class_assignments = _load_spring_classes_from_project(pro_path)
+    else:
+        classes = dict(DEFAULT_SPRING_CLASSES)
+
     sess = Session(
         schematic_path=Path("pcb://" + (board.GetFileName() or "<unsaved>")),
-        spring_classes=dict(DEFAULT_SPRING_CLASSES),
+        spring_classes=classes,
     )
 
     # ---- Components + pins ----
@@ -376,11 +517,30 @@ def load_pcb_session(
             net = sess.nets.setdefault(netname, Net(name=netname))
             net.pins.append((comp_key, pad_num))
 
-    # ---- Auto-classify power-plane nets ----
+    # ---- Apply per-net assignments from .kicad_pro ----
+    # Explicit user assignments win over both heuristic detection
+    # and any class already set on the Net object.
+    for net_name, class_name in net_class_assignments.items():
+        net = sess.nets.get(net_name)
+        if net is None:
+            logger.debug(
+                "mcp_spring_classes.nets references unknown net %r; "
+                "skipping", net_name,
+            )
+            continue
+        if class_name not in sess.spring_classes:
+            logger.warning(
+                "mcp_spring_classes.nets[%r] = %r: unknown class; "
+                "leaving net unassigned", net_name, class_name,
+            )
+            continue
+        net.spring_class = class_name
+
+    # ---- Auto-classify power-plane nets (skips explicitly assigned) ----
     if auto_classify_planes:
         for net in sess.nets.values():
             if net.spring_class is not None:
-                continue   # already set explicitly
+                continue   # already set explicitly (project file or heuristic)
             cls = _power_net_pattern_class(net.name)
             if cls:
                 net.spring_class = cls

@@ -34,7 +34,7 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
 
-CONSTRAINT_VERSION = 1
+CONSTRAINT_VERSION = 2   # v2 = adds mcp_spring_classes section
 ANCHOR_PROPERTY = "Placement_Anchor"
 
 # Nets we treat as ground for auto-discovery of decoupling pairs.
