@@ -880,8 +880,8 @@ def obb_repulsion_force(
     # if gap >= margin:
     #     return 0.0, 0.0
     # ratio = max(0.0, 1.0 - gap / margin)
-    gap = max(gap, 0.01)
-    ratio = max(0.0, margin / gap)
+    gap = max(gap-margin, 0.01)
+    ratio = max(0.0, 1 / gap)
     magnitude = k * (ratio ** 3)
     # axis_ab points A→B; force on A is in the −axis_ab direction.
     return -axis_ab[0] * magnitude, -axis_ab[1] * magnitude
