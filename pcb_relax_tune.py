@@ -41,7 +41,7 @@ operates on power_module_v2test.kicad_pcb (a copy).
 %matplotlib qt5
 
 import sys, math, time, importlib
-sys.path.insert(0, '/home/vagrant/projects/kicad_agent/KiCAD-MCP-Server/python')
+sys.path.insert(0, '/home/erhannis/mods/KiCAD-MCP-Server/python')
 
 import pcbnew
 import commands.autoplacer as ap
@@ -52,7 +52,9 @@ importlib.reload(pcba)
 importlib.reload(vizmod)
 from commands.pcb_autoplacer_viz import PCBAutoplacerViz
 
-PCB_PATH = '/home/vagrant/projects/kicad_agent/projects/power_module/power_module_v2test.kicad_pcb'
+PCB_PATH = '/home/erhannis/projects/s3_power_module/power_module_v2test.kicad_pcb'
+
+
 
 
 # %% [markdown]
@@ -71,11 +73,18 @@ keep_in = pcba.edge_cuts_bbox(board, inset_mm=1.0)
 p = sess.params
 p.use_obb_repulsion = True
 p.use_spring_classes = True
-p.polarity_k = 0.0; p.polarity_torque_k = 0.0
-p.boundary_k = 0.0; p.rotation_k = 0.0
+p.polarity_k = 0.0;
+p.polarity_torque_k = 0.0
+p.rotation_k = 0.0
 p.obb_repulsion_margin = 1.0
+
+kl, kt, kr, kb = keep_in   # left, top, right, bottom (Y-down)
+p.sheet_x_min, p.sheet_x_max = kl, kr
+p.sheet_y_min, p.sheet_y_max = kt, kb
+p.boundary_k = 1.0   # try 0.5–5.0; 5.0 is the schematic default
+
 # Stability knobs added 2026-05-21 — toggle to compare behavior:
-p.force_step_damping = 0.5              # <1.0 prevents period-2 overshoot
+p.force_step_damping = 0.3              # <1.0 prevents period-2 overshoot
 p.normalize_spring_force_by_degree = True  # bounds K_eff by N pins
 # Sequential (Gauss-Seidel) apply, added 2026-05-22.  Each component
 # sees the just-updated positions of those processed earlier in the
@@ -83,11 +92,17 @@ p.normalize_spring_force_by_degree = True  # bounds K_eff by N pins
 # whole iter.  Sequential resolves pair feedbacks within an iter (no
 # cross-iter ping-pong) at the cost of being order-dependent.
 p.sequential_apply = False
+# This works, but I also wonder whether there are advantages to not snapping rotations.
+do_snap_rotations = True
+
+sess.nets['USB_VBUS'].spring_class = 'PLANE'
+sess.nets['V12_OUT'].spring_class = 'INTER_GROUP'
 
 print(f"Loaded {len(sess.components)} comps, {len(sess.nets)} nets")
 print(f"Anchored: {sum(1 for c in sess.components.values() if c.pinned)}")
 print(f"Keep-in: {keep_in}")
 print(f"PLANE nets: {sum(1 for n in sess.nets.values() if n.spring_class=='PLANE')}")
+
 
 
 # %% [markdown]
@@ -110,75 +125,7 @@ viz = PCBAutoplacerViz(
 )
 
 
-# %% [markdown]
-# # Manual stepping (the main loop you'll iterate)
-#
-# Tweak params, step some iters, call viz.update().  Re-run this
-# cell freely.  The viz computes forces from the same helpers
-# `iterate()` uses, so the arrows always reflect what the NEXT
-# step would do.
 
-# %%
-# Example: cluster phase tune — springs only, no repulsion.
-# NB: PCB rotation comes from pinwise_torque_k (lever-arm torque on
-# off-center spring forces).  rotation_k is the *schematic-flavored*
-# angle-based torque and is now a no-op for PCB components — it
-# relied on pin outward angles that pads don't have.
-p.attraction_k = 0.1
-p.repulsion_k = 0.0
-p.rotation_snap_strength = 0.0
-sess.temperature = 5.0
-ap.iterate(sess, n=10)
-viz.update()
-
-
-# %% [markdown]
-# # Phase-by-phase helper
-#
-# Convenience wrapper.  Each call runs N iters with the given
-# physics params and a final viz.update().  Useful for stepping
-# through the schedule one phase at a time.
-
-# %%
-def run_phase(n_iters, *, attraction_k=None, repulsion_k=None,
-              rotation_snap=None, temperature=None,
-              ramp_repulsion_from=None, ramp_snap_from=None):
-    """Step the session N iters, optionally ramping a param across.
-
-    If ``ramp_repulsion_from`` is set, repulsion_k linearly interpolates
-    from that value to ``repulsion_k`` across the N iters; same for snap.
-    """
-    if attraction_k is not None:
-        p.attraction_k = attraction_k
-    if repulsion_k is not None and ramp_repulsion_from is None:
-        p.repulsion_k = repulsion_k
-    if rotation_snap is not None and ramp_snap_from is None:
-        p.rotation_snap_strength = rotation_snap
-
-    for t in range(n_iters):
-        if ramp_repulsion_from is not None and repulsion_k is not None:
-            ratio = (t + 1) / n_iters
-            p.repulsion_k = ramp_repulsion_from + (repulsion_k - ramp_repulsion_from) * ratio
-        if ramp_snap_from is not None and rotation_snap is not None:
-            ratio = (t + 1) / n_iters
-            p.rotation_snap_strength = ramp_snap_from + (rotation_snap - ramp_snap_from) * ratio
-        if temperature is not None:
-            sess.temperature = temperature
-        ap.iterate(sess, n=1)
-    viz.update()
-
-
-# %% Cluster: springs only, generous temperature
-run_phase(30, attraction_k=0.1, repulsion_k=0.0, rotation_snap=0.0, temperature=5.0)
-
-# %% Spread: repulsion ramps 0 → 30
-run_phase(40, repulsion_k=30.0, ramp_repulsion_from=0.0, temperature=3.0)
-
-# %% Snap: rotation snap ramps 0 → 3
-run_phase(30, rotation_snap=3.0, ramp_snap_from=0.0, temperature=1.5)
-
-# %% Relax: full snap, low temp
-run_phase(20, temperature=0.5)
 
 
 # %% [markdown]
@@ -214,74 +161,109 @@ def gaps(threshold_mm=3.0, sess=sess):
     return dict(sorted(result.items(), key=lambda kv: kv[1]))
 
 
+def snap_rotations(sess=sess, period=90.0):
+    """Round each unpinned component's rotation to nearest multiple of `period`."""
+    n = 0
+    for c in sess.components.values():
+        if c.pinned:
+            continue
+        snapped = round(c.rotation / period) * period % 360
+        if abs(((c.rotation - snapped + 540) % 360) - 180) > 1e-6:
+            c.rotation = snapped
+            n += 1
+    return n
+
+
+
+
 # %% [markdown]
-# # Quality metrics
+# # Manual stepping (the main loop you'll iterate)
 #
-# Compare MST length and crossings before/after.  Skips PLANE-class
-# nets (those route via vias-to-pour, not point-to-point).
+# Tweak params, step some iters, call viz.update().  Re-run this
+# cell freely.  The viz computes forces from the same helpers
+# `iterate()` uses, so the arrows always reflect what the NEXT
+# step would do.
 
 # %%
-def mst_length_and_crossings(sess, ignore_classes=('PLANE',)):
-    def mst(points):
-        n = len(points)
-        if n < 2:
-            return 0.0, []
-        in_tree = [False] * n; dist = [float('inf')] * n
-        parent = [-1] * n; dist[0] = 0.0; total = 0.0
-        edges = []
-        for _ in range(n):
-            u = -1
-            for i in range(n):
-                if not in_tree[i] and (u == -1 or dist[i] < dist[u]):
-                    u = i
-            if dist[u] == float('inf'):
-                break
-            in_tree[u] = True; total += dist[u]
-            if parent[u] >= 0:
-                edges.append((points[parent[u]], points[u]))
-            for v in range(n):
-                if in_tree[v]: continue
-                d = math.hypot(points[u][0]-points[v][0], points[u][1]-points[v][1])
-                if d < dist[v]: dist[v] = d; parent[v] = u
-        return total, edges
+# Example: cluster phase tune — springs only, no repulsion.
+# NB: PCB rotation comes from pinwise_torque_k (lever-arm torque on
+# off-center spring forces).  rotation_k is the *schematic-flavored*
+# angle-based torque and is now a no-op for PCB components — it
+# relied on pin outward angles that pads don't have.
+p.attraction_k = 1.0
+p.repulsion_k = 0.0
+p.rotation_snap_strength = 0.0
+p.rotation_k = 0.0
+p.pinwise_torque_k = 1.0
+sess.temperature = 10.0
+for _ in range(50):
+  ap.iterate(sess, n=1)
+  viz.update()
+  viz.update()
 
-    def segs_intersect(p1, p2, p3, p4):
-        x1,y1=p1; x2,y2=p2; x3,y3=p3; x4,y4=p4
-        denom = (x1-x2)*(y3-y4) - (y1-y2)*(x3-x4)
-        if abs(denom) < 1e-9: return False
-        t = ((x1-x3)*(y3-y4) - (y1-y3)*(x3-x4)) / denom
-        u = -((x1-x2)*(y1-y3) - (y1-y2)*(x1-x3)) / denom
-        eps = 1e-6
-        return eps < t < 1-eps and eps < u < 1-eps
 
-    total = 0.0
-    all_edges = []
-    for net in sess.nets.values():
-        if net.spring_class in ignore_classes:
-            continue
-        pts = []
-        for ck, pn in net.pins:
-            c = sess.components.get(ck)
-            if c is None: continue
-            wp = c.world_pin_xy(pn)
-            if wp is not None: pts.append(wp)
-        if len(pts) < 2: continue
-        L, edges = mst(pts)
-        total += L
-        for e in edges:
-            all_edges.append((net.name, e[0], e[1]))
 
-    n = len(all_edges); cx = 0
-    for i in range(n):
-        for j in range(i+1, n):
-            if all_edges[i][0] == all_edges[j][0]: continue
-            if segs_intersect(all_edges[i][1], all_edges[i][2],
-                              all_edges[j][1], all_edges[j][2]):
-                cx += 1
-    return total, cx
 
-L, X = mst_length_and_crossings(sess)
-print(f"MST length (non-plane nets): {L:.1f} mm   crossings: {X}")
+# %% [markdown]
+# # Phase-by-phase helper
+#
+# Convenience wrapper.  Each call runs N iters with the given
+# physics params and a final viz.update().  Useful for stepping
+# through the schedule one phase at a time.
+
+# %%
+def run_phase(n_iters, *, attraction_k=None, repulsion_k=None,
+              rotation_snap=None, temperature=None,
+              ramp_repulsion_from=None, ramp_snap_from=None):
+    """Step the session N iters, optionally ramping a param across.
+
+    If ``ramp_repulsion_from`` is set, repulsion_k linearly interpolates
+    from that value to ``repulsion_k`` across the N iters; same for snap.
+    """
+    
+    if attraction_k is not None:
+        p.attraction_k = attraction_k
+    if repulsion_k is not None and ramp_repulsion_from is None:
+        p.repulsion_k = repulsion_k
+    if rotation_snap is not None and ramp_snap_from is None:
+        p.rotation_snap_strength = rotation_snap
+
+    for t in range(n_iters):
+        if ramp_repulsion_from is not None and repulsion_k is not None:
+            a = ramp_repulsion_from
+            b = math.log(repulsion_k/ramp_repulsion_from)/(n_iters-1)
+            # ratio = (t + 1) / n_iters
+            # p.repulsion_k = ramp_repulsion_from + (repulsion_k - ramp_repulsion_from) * ratio
+            p.repulsion_k = a * math.exp(b*t)
+        if ramp_snap_from is not None and rotation_snap is not None:
+            ratio = (t + 1) / n_iters
+            p.rotation_snap_strength = ramp_snap_from + (rotation_snap - ramp_snap_from) * ratio
+        if temperature is not None:
+            sess.temperature = temperature
+        ap.iterate(sess, n=1)
+        viz.update()
+        viz.update()
+
+
+#print("Cluster: springs only, generous temperature")
+#run_phase(30, attraction_k=0.1, repulsion_k=0.0, rotation_snap=0.0, temperature=1.0)
+
+print("Spread: repulsion ramps")
+run_phase(100, repulsion_k=0.001, ramp_repulsion_from=0.0001, temperature=0.2)
+run_phase(100, repulsion_k=0.1, ramp_repulsion_from=0.001, temperature=0.05)
+
+if do_snap_rotations:
+  print("Snap: rotation snap ramps 0 → 3")
+  run_phase(100, rotation_snap=30.0, ramp_snap_from=0.0, temperature=0.05)
+  
+  # print("Relax: full snap, low temp")
+  # run_phase(20, temperature=0.05)
+  
+  print("Snap: full snap")
+  snap_rotations()
+  viz.update()
+  viz.update()
+
 
 
 # %% [markdown]
@@ -295,47 +277,3 @@ n = pcba.apply_session_to_board(sess, board)
 board.Save(PCB_PATH)
 print(f"Saved {n} component updates to {PCB_PATH}")
 
-
-# %% [markdown]
-# # Run the full canned schedule (for comparison)
-#
-# This is what the MCP `relax_placement` handler invokes — useful as
-# a baseline reference once you've tuned manually and want to fold
-# your insights into the production defaults.
-
-# %%
-# Reset from disk first
-board = pcbnew.LoadBoard(PCB_PATH)
-sess = pcba.load_pcb_session(board)
-keep_in = pcba.edge_cuts_bbox(board, inset_mm=1.0)
-
-# Rebind the viz to the new session
-viz = PCBAutoplacerViz(sess, keep_in_bbox=keep_in)
-
-# Optional on_step callback to redraw every 5 iters during the run.
-def on_step(s):
-    if s.iteration % 5 == 0:
-        viz.update()
-
-sched = pcba.PCBSchedule(
-    cluster_iters=30, spread_iters=40, snap_iters=30, relax_iters=20,
-    spring_k=0.1, repulsion_k_peak=30.0, rotation_snap_peak=3.0,
-)
-metrics = pcba.run_pcb_relax(sess, sched, margin_mm=1.0, on_step=on_step)
-viz.update()
-print(metrics)
-
-
-# %% [markdown]
-# # Reset to original layout
-#
-# If you've made a mess, copy the untouched original back over the
-# v2test board and re-run the `Load board → Session` cell.
-
-# %%
-import shutil
-shutil.copy(
-    '/home/vagrant/projects/kicad_agent/projects/power_module/power_module.kicad_pcb',
-    PCB_PATH,
-)
-print(f"Reset {PCB_PATH} to original")
