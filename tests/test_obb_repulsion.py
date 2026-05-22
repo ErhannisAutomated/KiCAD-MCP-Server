@@ -198,100 +198,109 @@ class TestOffsetBboxOBBSeparation:
 
 @pytest.mark.unit
 class TestOBBRepulsionForce:
-    def test_zero_force_when_far_apart(self):
+    """Inverse-cube force: ``F = k / max(gap - margin, 0.01)^3``.
+
+    No cutoff (force is always nonzero), but it falls off as 1/r³
+    once past the margin so far-apart pairs contribute negligible
+    push.  At gap <= margin the formula saturates at the 0.01mm floor:
+    ``F_sat = k / 0.01^3 = k * 1e6``.
+    """
+
+    def test_far_apart_force_is_small_but_nonzero(self):
+        """At gap = 16, margin = 1 → gap_adj = 15, F = k/15³ ≈ k * 0.000296."""
         from commands.autoplacer import obb_repulsion_force
         fx, fy = obb_repulsion_force(
             0, 0, 4, 4, 0, 20, 0, 4, 4, 0,
             margin=1.0, k=10.0,
         )
-        assert fx == 0.0 and fy == 0.0
+        assert fx == pytest.approx(-10.0 / (15.0 ** 3), abs=1e-9)
+        assert fy == pytest.approx(0.0, abs=1e-9)
+        assert math.hypot(fx, fy) < 0.01  # genuinely negligible at this range
 
-    def test_zero_force_at_margin_boundary(self):
+    def test_inverse_cube_falloff(self):
+        """At gap = 3·margin and margin = 1, gap_adj = 2 → F = k/8.
+        Half the gap (gap = 2): gap_adj = 1 → F = k.  So 8× ratio."""
         from commands.autoplacer import obb_repulsion_force
-        # 4x4 at (0,0), 4x4 at (4+margin, 0). Gap == margin, ratio = 0.
+        f_far, _ = obb_repulsion_force(
+            0, 0, 4, 4, 0, 7, 0, 4, 4, 0, margin=1.0, k=10.0,
+        )
+        f_near, _ = obb_repulsion_force(
+            0, 0, 4, 4, 0, 6, 0, 4, 4, 0, margin=1.0, k=10.0,
+        )
+        # gap_far=3, gap_far_adj=2, F = -10/8 = -1.25
+        # gap_near=2, gap_near_adj=1, F = -10
+        assert f_far == pytest.approx(-1.25, abs=1e-6)
+        assert f_near == pytest.approx(-10.0, abs=1e-6)
+        assert f_near / f_far == pytest.approx(8.0, abs=1e-6)  # 1/2³ vs 1/1³
+
+    def test_saturates_at_margin_boundary(self):
+        """At gap == margin, gap_adj is clamped to the 0.01 floor →
+        force saturates at k/0.01³ = k * 1e6."""
+        from commands.autoplacer import obb_repulsion_force
         fx, fy = obb_repulsion_force(
             0, 0, 4, 4, 0, 5, 0, 4, 4, 0,
             margin=1.0, k=10.0,
         )
-        assert fx == pytest.approx(0.0)
+        assert fx == pytest.approx(-10.0 / (0.01 ** 3), rel=1e-6)
         assert fy == pytest.approx(0.0, abs=1e-9)
 
-    def test_force_at_half_margin(self):
+    def test_saturates_inside_margin(self):
+        """gap < margin and gap < 0 (penetration) both clamp to the
+        same 0.01 floor → identical force.  Saturation, not amplification."""
         from commands.autoplacer import obb_repulsion_force
-        # gap = 0.5, margin = 1.0 → ratio = 0.5, F = k * 0.5^3 = k * 0.125.
-        fx, fy = obb_repulsion_force(
-            0, 0, 4, 4, 0, 4.5, 0, 4, 4, 0,
-            margin=1.0, k=10.0,
+        f_inside, _ = obb_repulsion_force(
+            0, 0, 4, 4, 0, 4.5, 0, 4, 4, 0, margin=1.0, k=10.0,
         )
-        assert fx == pytest.approx(-10.0 * 0.125, abs=1e-6)  # A pushed −x
-        assert fy == pytest.approx(0.0, abs=1e-9)
-
-    def test_force_at_contact(self):
-        """gap = 0, ratio = 1, F = k * 1.0^3 = k."""
-        from commands.autoplacer import obb_repulsion_force
-        fx, fy = obb_repulsion_force(
-            0, 0, 4, 4, 0, 4, 0, 4, 4, 0,
-            margin=1.0, k=10.0,
+        f_overlap, _ = obb_repulsion_force(
+            0, 0, 4, 4, 0, 3, 0, 4, 4, 0, margin=1.0, k=10.0,
         )
-        assert fx == pytest.approx(-10.0, abs=1e-6)
-        assert fy == pytest.approx(0.0, abs=1e-9)
-
-    def test_force_grows_cube_on_penetration(self):
-        from commands.autoplacer import obb_repulsion_force
-        # gap = -1, margin = 1 → ratio = 2, F = k * 8.
-        fx, _ = obb_repulsion_force(
-            0, 0, 4, 4, 0, 3, 0, 4, 4, 0,
-            margin=1.0, k=10.0,
-        )
-        assert fx == pytest.approx(-80.0, abs=1e-6)
+        sat = -10.0 / (0.01 ** 3)
+        assert f_inside == pytest.approx(sat, rel=1e-6)
+        assert f_overlap == pytest.approx(sat, rel=1e-6)
 
     def test_equal_and_opposite(self):
         """Force(A,B) == −Force(B,A) — Newton's third law."""
         from commands.autoplacer import obb_repulsion_force
         params = dict(margin=1.0, k=10.0)
         f_a = obb_repulsion_force(
-            0, 0, 4, 4, 0, 4.5, 0, 4, 4, 0, **params,
+            0, 0, 4, 4, 0, 7, 0, 4, 4, 0, **params,
         )
         f_b = obb_repulsion_force(
-            4.5, 0, 4, 4, 0, 0, 0, 4, 4, 0, **params,
+            7, 0, 4, 4, 0, 0, 0, 4, 4, 0, **params,
         )
         assert f_a[0] == pytest.approx(-f_b[0], abs=1e-9)
         assert f_a[1] == pytest.approx(-f_b[1], abs=1e-9)
 
     def test_corner_corner_diagonal_approach(self):
         """Two AABBs offset diagonally — SAT gives a (conservative)
-        positive gap, so force kicks in within margin.  This is the
-        case the user flagged would benefit from torque eventually;
-        for now just verify it produces a nonzero, repulsive force."""
+        positive gap.  Force is in the −SAT-axis direction (toward
+        origin quadrant) and nonzero."""
         from commands.autoplacer import obb_repulsion_force
         # 4x4 at (0,0), 4x4 at (5, 5). SAT gap along each axis = 5-4 = 1.
         fx, fy = obb_repulsion_force(
             0, 0, 4, 4, 0, 5, 5, 4, 4, 0,
-            margin=2.0, k=10.0,
+            margin=0.5, k=10.0,
         )
-        # ratio = 1 - 1/2 = 0.5; F = 10 * 0.125 = 1.25
-        # Force direction: SAT axis is along one of the two axes (whichever
-        # tied), say +x or +y, so force is in −x or −y on A.  Either way
-        # the force is nonzero and points "away from B" (toward origin
-        # quadrant).
         assert (fx <= 0 and fy <= 0)  # B is NE of A; A pushed SW
+        # gap=1, margin=0.5, gap_adj=0.5, F = 10/0.125 = 80
         mag = math.hypot(fx, fy)
-        assert mag == pytest.approx(1.25, abs=1e-6)
+        assert mag == pytest.approx(80.0, abs=1e-6)
 
     def test_rotated_pair_force_magnitude_same_as_axis_aligned(self):
         """Rotating both shapes 45° together should produce the same
         force magnitude — only direction changes with the world frame."""
         from commands.autoplacer import obb_repulsion_force
-        # AABB case: gap = 0.5, F magnitude = k * 0.5^3 * k.
+        # AABB case: gap = 3, gap_adj = 2 (margin=1), F mag = k/8.
         f_aa = obb_repulsion_force(
-            0, 0, 4, 4, 0, 4.5, 0, 4, 4, 0,
+            0, 0, 4, 4, 0, 7, 0, 4, 4, 0,
             margin=1.0, k=10.0,
         )
         mag_aa = math.hypot(*f_aa)
-        # Same case, both rotated 45°.  Center of B is at distance 4.5
-        # along the rotated x-axis: (4.5*cos45, 4.5*sin45).
-        cx_b = 4.5 * math.cos(math.radians(45))
-        cy_b = 4.5 * math.sin(math.radians(45))
+        # Same case, both rotated 45°.  Center of B is at distance 7
+        # along the rotated x-axis: (7·cos45°, -7·sin45°) under
+        # screen-Y-down CCW (matches the obb convention).
+        cx_b = 7.0 * math.cos(math.radians(45))
+        cy_b = -7.0 * math.sin(math.radians(45))
         f_rot = obb_repulsion_force(
             0, 0, 4, 4, 45, cx_b, cy_b, 4, 4, 45,
             margin=1.0, k=10.0,

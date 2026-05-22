@@ -888,24 +888,29 @@ def obb_repulsion_force(
     cx_b: float, cy_b: float, w_b: float, h_b: float, angle_b: float,
     *, margin: float, k: float,
 ) -> Tuple[float, float]:
-    """Cubic-ramp repulsive force on A pushing it away from B.
+    """Inverse-cube repulsive force on A pushing it away from B.
 
-    Magnitude: ``F = k * (1 - d/margin)^3`` for ``d < margin``;
-    zero otherwise.  ``d`` is the SAT signed gap, so penetration
-    (``d < 0``) yields ``ratio > 1`` — the cube amplifies, giving
-    overlap a strong restoring shove.  Margin is the "approach buffer"
-    distance at which the force first kicks in.
+    Magnitude: ``F = k / max(gap - margin, 0.01)^3``.  ``gap`` is
+    the SAT signed separation (negative = penetration).  ``margin``
+    offsets the gap before the inverse, so the saturation point
+    sits at ``gap == margin`` rather than at touching contact; the
+    0.01mm floor prevents division blowup when components actually
+    overlap.  Force falls off as 1/r³ once past the margin, never
+    reaching zero — so every pair contributes a (small) push every
+    iteration.  Tradeoff: no early-exit optimization vs. smoother
+    long-range repulsion gradient.
+
+    Replaces the earlier ``k * (1 - gap/margin)^3 for gap < margin,
+    zero otherwise`` cubic-ramp formula, which had a hard cutoff
+    that caused components to rebound chaotically when crossing the
+    margin boundary in dense clusters.
     """
     gap, axis_ab = obb_separation(
         cx_a, cy_a, w_a, h_a, angle_a,
         cx_b, cy_b, w_b, h_b, angle_b,
     )
-    # if gap >= margin:
-    #     return 0.0, 0.0
-    # ratio = max(0.0, 1.0 - gap / margin)
-    gap = max(gap-margin, 0.01)
-    ratio = max(0.0, 1 / gap)
-    magnitude = k * (ratio ** 3)
+    gap_adj = max(gap - margin, 0.01)
+    magnitude = k / (gap_adj ** 3)
     # axis_ab points A→B; force on A is in the −axis_ab direction.
     return -axis_ab[0] * magnitude, -axis_ab[1] * magnitude
 
