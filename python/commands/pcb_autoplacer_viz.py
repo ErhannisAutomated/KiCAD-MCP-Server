@@ -214,17 +214,21 @@ class PCBAutoplacerViz:
         _, Rectangle, _, _ = _import_matplotlib()
         edge = self.ANCHOR_BBOX_COLOR if c.pinned else self.BBOX_COLOR
         lw = 1.6 if c.pinned else 0.8
+        # Draw bbox at the OBB center, which equals (c.x, c.y) for
+        # symmetric footprints and is offset for ones whose origin
+        # isn't the body center (pin headers anchored at pin 1).
+        bx, by = c.obb_center_world()
         # matplotlib's Rectangle angle is CCW in DATA coords; after
         # invert_yaxis(), that's the OPPOSITE of KiCad's screen-CCW.
         rect = Rectangle(
-            (c.x - c.bbox_w / 2, c.y - c.bbox_h / 2),
+            (bx - c.bbox_w / 2, by - c.bbox_h / 2),
             c.bbox_w, c.bbox_h,
             angle=-c.rotation, rotation_point="center",
             fill=False, edgecolor=edge, linewidth=lw,
         )
         self.ax.add_patch(rect)
         self.ax.text(
-            c.x, c.y, c.ref,
+            bx, by, c.ref,
             color=self.ANCHOR_LABEL_COLOR if c.pinned else self.LABEL_COLOR,
             ha="center", va="center", fontsize=7,
             fontweight="bold" if c.pinned else "normal",
@@ -281,24 +285,26 @@ class PCBAutoplacerViz:
                     a.margin if a.margin is not None else p.obb_repulsion_margin,
                     b.margin if b.margin is not None else p.obb_repulsion_margin,
                 )
+                ax, ay = a.obb_center_world()
+                bx, by = b.obb_center_world()
                 fx, fy = obb_repulsion_force(
-                    a.x, a.y, a.bbox_w, a.bbox_h, a.rotation,
-                    b.x, b.y, b.bbox_w, b.bbox_h, b.rotation,
+                    ax, ay, a.bbox_w, a.bbox_h, a.rotation,
+                    bx, by, b.bbox_w, b.bbox_h, b.rotation,
                     margin=margin, k=p.repulsion_k,
                 )
                 mag = math.hypot(fx, fy)
                 if mag > 1e-6:
-                    pairs.append((a, b, mag))
+                    pairs.append((a, b, ax, ay, bx, by, mag))
         if not pairs:
             return
-        pairs.sort(key=lambda x: -x[2])
+        pairs.sort(key=lambda x: -x[6])
         topk = pairs[: self.max_repulsion_lines]
-        max_mag = topk[0][2] or 1.0
-        for a, b, mag in topk:
+        max_mag = topk[0][6] or 1.0
+        for a, b, ax, ay, bx, by, mag in topk:
             t = mag / max_mag
             color = (0.0, 0.0, 0.35 + 0.65 * t)
             self.ax.plot(
-                [a.x, b.x], [a.y, b.y],
+                [ax, bx], [ay, by],
                 color=color, alpha=0.45, linewidth=0.5 + 0.8 * t,
             )
 
@@ -320,9 +326,11 @@ class PCBAutoplacerViz:
                     a.margin if a.margin is not None else p.obb_repulsion_margin,
                     b.margin if b.margin is not None else p.obb_repulsion_margin,
                 )
+                ax, ay = a.obb_center_world()
+                bx, by = b.obb_center_world()
                 fx, fy = obb_repulsion_force(
-                    a.x, a.y, a.bbox_w, a.bbox_h, a.rotation,
-                    b.x, b.y, b.bbox_w, b.bbox_h, b.rotation,
+                    ax, ay, a.bbox_w, a.bbox_h, a.rotation,
+                    bx, by, b.bbox_w, b.bbox_h, b.rotation,
                     margin=margin, k=p.repulsion_k,
                 )
                 ax_, ay_ = forces[a.key]
@@ -374,10 +382,14 @@ class PCBAutoplacerViz:
             mag = math.hypot(fx, fy)
             if mag < 1e-3:
                 continue
-            ex = c.x + fx * scale
-            ey = c.y + fy * scale
+            # Anchor the arrow at the body center (= OBB center) so it
+            # reads naturally for off-center bboxes like pin headers,
+            # even though the force is applied to the footprint origin.
+            bx, by = c.obb_center_world()
+            ex = bx + fx * scale
+            ey = by + fy * scale
             self.ax.plot(
-                [c.x, ex], [c.y, ey],
+                [bx, ex], [by, ey],
                 color=self.SUM_FORCE_COLOR, alpha=0.75, linewidth=1.0,
             )
             self.ax.plot([ex], [ey], "o",

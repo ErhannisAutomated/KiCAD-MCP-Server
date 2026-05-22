@@ -62,6 +62,14 @@ class Component:
     pins: Dict[str, Pin] = field(default_factory=dict)
     bbox_w: float = 7.62     # default ~3 grid units; refined from lib at load
     bbox_h: float = 7.62
+    # Offset from the footprint origin (=c.x,c.y) to the OBB center, in the
+    # UNROTATED local frame.  For symmetric symbols (most schematic
+    # symbols, chip resistors, etc.) this is 0; for footprints whose
+    # origin sits at pin 1 (pin headers, connectors) the bbox center is
+    # offset.  Applied via `obb_center_world()` and rotated alongside
+    # `world_pin_xy`'s convention (screen-Y-down CCW positive).
+    bbox_cx: float = 0.0
+    bbox_cy: float = 0.0
     pinned: bool = False     # if True, position locked
     # ---- spring-class v2 fields (introduced 2026-05-20). Optional;
     # absence means "use defaults" so existing schematics keep working.
@@ -111,6 +119,21 @@ class Component:
         rx = lx * math.cos(rad) - ly * math.sin(rad)
         ry = lx * math.sin(rad) + ly * math.cos(rad)
         return self.x + rx, self.y + ry
+
+    def obb_center_world(self) -> Tuple[float, float]:
+        """World-coord of the OBB center.  Equals (self.x, self.y) when
+        bbox is centered on the footprint origin; for off-center
+        bboxes (e.g. pin headers anchored at pin 1) it rotates the
+        local offset by the component's rotation and adds it to the
+        origin.  Same rotation convention as `world_pin_xy`."""
+        if self.bbox_cx == 0.0 and self.bbox_cy == 0.0:
+            return self.x, self.y
+        rad = math.radians(-self.rotation)
+        cos_a, sin_a = math.cos(rad), math.sin(rad)
+        return (
+            self.x + self.bbox_cx * cos_a - self.bbox_cy * sin_a,
+            self.y + self.bbox_cx * sin_a + self.bbox_cy * cos_a,
+        )
 
     def world_pin_outward_angle(self, pn: str) -> Optional[float]:
         """The outward-pointing direction of pin pn in world coords (degrees)."""
@@ -1133,9 +1156,11 @@ def _compute_total_force_on(
                 c.margin if c.margin is not None else p.obb_repulsion_margin,
                 other.margin if other.margin is not None else p.obb_repulsion_margin,
             )
+            cx, cy = c.obb_center_world()
+            ox, oy = other.obb_center_world()
             rfx, rfy = obb_repulsion_force(
-                c.x, c.y, c.bbox_w, c.bbox_h, c.rotation,
-                other.x, other.y, other.bbox_w, other.bbox_h, other.rotation,
+                cx, cy, c.bbox_w, c.bbox_h, c.rotation,
+                ox, oy, other.bbox_w, other.bbox_h, other.rotation,
                 margin=margin, k=p.repulsion_k,
             )
             fx += rfx
@@ -1270,9 +1295,11 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                         c.margin if c.margin is not None else p.obb_repulsion_margin,
                         other.margin if other.margin is not None else p.obb_repulsion_margin,
                     )
+                    cx, cy = c.obb_center_world()
+                    ox, oy = other.obb_center_world()
                     rfx, rfy = obb_repulsion_force(
-                        c.x, c.y, c.bbox_w, c.bbox_h, c.rotation,
-                        other.x, other.y, other.bbox_w, other.bbox_h, other.rotation,
+                        cx, cy, c.bbox_w, c.bbox_h, c.rotation,
+                        ox, oy, other.bbox_w, other.bbox_h, other.rotation,
                         margin=margin, k=p.repulsion_k,
                     )
                     fx += rfx
