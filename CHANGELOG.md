@@ -4,6 +4,185 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### .kicad_pro spring class IO (develop, 2026-05-22)
+
+Spring class definitions and per-net assignments now persist in the
+project file across runs.  `load_pcb_session` reads the
+`mcp_spring_classes` section from the sibling `.kicad_pro`,
+bootstrapping defaults on first encounter (idempotent; preserves
+user edits).
+
+Format:
+
+```json
+"mcp_constraint_version": 2,
+"mcp_spring_classes": {
+  "classes": {
+    "DECOUPLING":   {"spring_k": 5.0, "natural_length": 0.0},
+    "LOCAL_SIGNAL": {"spring_k": 1.0, "natural_length": 0.0},
+    "INTER_GROUP":  {"spring_k": 0.3, "natural_length": 0.0},
+    "PLANE":        {"spring_k": 0.0, "natural_length": 0.0}
+  },
+  "nets": {
+    "USB_VBUS": "PLANE",
+    "V12_OUT":  "INTER_GROUP"
+  }
+}
+```
+
+Eliminates the need to redo `sess.nets['USB_VBUS'].spring_class =
+'PLANE'` from Jupyter each session.
+`placement_constraints.CONSTRAINT_VERSION` bumped 1 → 2.  Five new
+unit tests cover bootstrap idempotence, default merging, and
+malformed-entry tolerance.
+
+### Pin_Spring_Class:N + Spring_Class + Body_Margin properties (develop, 2026-05-22)
+
+`load_pcb_session` now reads three per-footprint KiCad properties:
+
+- `Spring_Class` → `comp.spring_class` (component-wide default)
+- `Body_Margin` → `comp.margin` (per-comp obb margin, mm)
+- `Pin_Spring_Class:N` → `comp.pin_classes[N]` (per-pad assignment)
+
+`Pin_Spring_Class:N` accepts two formats per the spring-class
+storage design: bare string `"DECOUPLING"` for pad-general, or
+JSON object `{"*":"SIGNAL","U1.4":"DECOUPLING"}` for per-target
+overrides.  `resolve_pair_class` already supported both formats —
+only the load-time wiring was missing.
+
+User workflow this enables (per their preference NOT to auto-detect
+decoupling caps): manually set `Pin_Spring_Class:1 = {"U4.14":
+"DECOUPLING"}` on a cap when placing it.  Engine then pulls the
+cap's pin 1 tightly to U4.14 specifically.
+
+Seven new unit tests for the parser + three pcbnew-gated
+integration tests.
+
+### load_pcb_session honors fp.IsLocked() (develop, 2026-05-22)
+
+Adds an explicit anchor-decision tier between the caller's
+`lockedRefs` override and the ref-prefix / THT-dominant heuristic:
+if the footprint is locked in KiCad (right-click → Lock), it's
+anchored.  Lets users mark fixed components like a buck-boost IC
+over thermal vias without remembering the ref every time they
+invoke `relax_placement`.  Explicit `lockedRefs` still overrides
+the lock state.
+
+### PCBSchedule defaults reflect tuned values + enforce_rotation_snap (develop, 2026-05-22)
+
+Defaults across `PCBSchedule`, `relax_placement`, the MCP schemas
+/ handler, and the TS surface now match the values found during
+real-board tuning under the inverse-cube repulsion formula:
+
+- spring_k 0.1 → 1.0
+- repulsion_k_start 0.05 → 1e-4
+- repulsion_k_peak 30.0 → 0.1
+- rotation_snap_peak 3.0 → 30.0
+- pinwise_torque_k 0.05 → 1.0
+- force_step_damping 0.5 → 0.3
+- spread_iters 40 → 200, snap_iters 30 → 100
+- cluster_iters 30 → 0, relax_iters 20 → 0 (skipped; spread starts
+  near-zero so it absorbs cluster's role, hard-snap replaces relax)
+
+New plumbing:
+- `snap_rotations(sess, period)` — hard-round non-anchored
+  rotations to the nearest period multiple.  Called as a final
+  pass when `enforce_rotation_snap=True` (default).
+- `boundary_k` schedule field (default 1.0) + sheet bounds wired
+  through to Params when `keep_in` is supplied to
+  `run_pcb_relax`.  Components feel a soft restoring force when
+  they drift past Edge.Cuts during iteration, complementary to
+  the existing post-clamp.
+
+Historical "safer" values for boards that misbehave under the
+new defaults: spring_k=0.1, repulsion_k_peak=30, snap_peak=3,
+pinwise_torque_k=0.05, step_spread=3.0.
+
+### 1/gap^3 repulsion formula replaces cubic-ramp (develop, 2026-05-22)
+
+The OBB repulsion formula was changed during real-board tuning
+from the cubic-ramp `k * (1 - gap/margin)^3 for gap<margin, zero
+otherwise` to an inverse-cube `k / max(gap-margin, 0.01)^3` with
+no cutoff.
+
+New semantics:
+- No cutoff — force is always nonzero, falls off as 1/r^3.
+- Margin offsets the gap before the inverse, so the saturation
+  point sits at gap == margin rather than at contact.
+- 0.01mm floor prevents division blowup on overlap.
+- Saturation at gap <= margin is k/0.01^3 = k * 1e6.
+
+Tradeoff: no early-exit for far-apart pairs (every iter does
+O(N^2) work), but the smooth long-range gradient prevents the
+chaotic rebound behavior the hard cutoff produced in dense
+clusters.  `test_obb_repulsion` rewritten for the new physics.
+
+### bbox uses courtyard / fab + offset center (develop, 2026-05-22)
+
+Two compounding fixes to the engine's notion of footprint extent:
+
+1. `_footprint_local_bbox_mm` now prefers the courtyard polygon
+   (F.CrtYd / B.CrtYd), falling back to convex bounds of pads +
+   F.Fab + F.SilkS graphics (excluding reference / value text).
+   Pure pad-only bbox missed the body of footprints where the
+   body extends past the pads (power inductors, etc.) — they
+   reported as half their actual size and let neighbors clip the
+   body without triggering repulsion.
+
+2. `Component` now carries `bbox_cx, bbox_cy` — the unrotated-
+   local offset from the footprint origin (typically pin 1 for
+   connectors) to the OBB center.  A new
+   `Component.obb_center_world()` rotates the offset and adds the
+   world origin.  Every OBB call site uses it instead of
+   `(c.x, c.y)`: `_compute_total_force_on`, iterate's force loop,
+   `_draw_component`, `_draw_repulsion`, `_compute_forces` (viz),
+   the keep-in clamp, and the Jupyter `gaps()` helper.
+
+Pre-fix: pin headers anchored at pin 1 drew their bbox centered
+on pin 1 and the body extended into neighbors un-modeled.
+
+### OBB rotation convention now screen-Y-down CCW (develop, 2026-05-22)
+
+`_obb_corners` and `_obb_axes` were applying raw math-Y-up CCW
+rotations to `angle_deg`.  Everywhere else in the engine —
+`Component.world_pin_xy`, the viz's `angle=-c.rotation`, and
+KiCad's footprint orientation field itself — uses screen-Y-down
+CCW.  Result: for an asymmetric bbox at a non-multiple-of-90°
+rotation, the OBB used by SAT separation / repulsion was
+MIRRORED across the X axis relative to the rectangle the viz
+drew.
+
+User caught it on the power_module board: R10 (4.68×1.75 at
+320.3°) was visibly inside L1's drawn rectangle (9.20×3.20 at
+315.5°, center 4.36mm away), but `gaps()` reported +1.61mm of
+separation because the OBB used by the calc had L1 mirrored to
+the opposite half-plane.  Repulsion was also pushing against the
+ghost OBB, contributing to runaway-cluster behavior under
+sequential apply.
+
+One-character fix (negate rad before applying the rotation
+matrix).  Internal SAT math unchanged — same convention on both
+OBBs, so existing tests on squares and at 0°/90° rotations pass.
+Two new regression tests in `TestOBBRotationConvention`.
+
+### Sequential (Gauss-Seidel) apply mode (develop, 2026-05-22)
+
+Adds `Params.sequential_apply` flag (default False).  When True,
+`iterate()` computes force and applies the step for one component
+at a time, so later components in the same iter see the just-
+updated positions of earlier ones.
+
+Motivation: oscillation in dense clusters appears partly driven
+by pair feedbacks that ping-pong across iters under default
+Jacobi mode.  Sequential resolves those feedbacks within an iter
+at the cost of order-dependence.  Factored a
+`_compute_total_force_on()` helper; the parallel branch is
+unchanged.
+
+In practice the user ended up tuning under default Jacobi mode
+after the OBB rotation fix landed; sequential is kept as a
+debugging tool for future investigations.
+
 ### Normalize spring force by component degree (develop, 2026-05-21)
 
 The force-step damping fix (last commit) handled the
