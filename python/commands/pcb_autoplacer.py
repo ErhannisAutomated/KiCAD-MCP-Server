@@ -225,10 +225,16 @@ def load_pcb_session(
         )
         layer_name = board.GetLayerName(fp.GetLayer())
 
-        # Anchor decision: explicit set wins; default heuristic falls
-        # back to ref-prefix or through-hole-dominant.
+        # Anchor decision: explicit set wins; otherwise honor KiCad's
+        # own lock state on the footprint, then fall back to the
+        # ref-prefix / through-hole-dominant heuristic.  This lets a
+        # user right-click → Lock a footprint in KiCad (e.g. an IC
+        # over thermal vias) and have the placer respect it without
+        # passing lockedRefs explicitly.
         if locked_refs is not None:
             anchored = ref in locked_refs
+        elif fp.IsLocked():
+            anchored = True
         else:
             nb_smd = sum(
                 1 for p in fp.Pads() if p.GetAttribute() == pcbnew.PAD_ATTRIB_SMD
