@@ -757,6 +757,132 @@ class TestPCBScheduleDefaults:
         assert s.boundary_k == 1.0
 
 
+@pytest.mark.unit
+class TestParsePinSpringClass:
+    """The _parse_pin_spring_class helper accepts two formats:
+    bare-string (pad-general) and JSON dict (with per-target overrides).
+    Malformed input drops to None (logged) so a typo can't crash a run.
+    """
+
+    def test_bare_string(self):
+        from commands.pcb_autoplacer import _parse_pin_spring_class
+        assert _parse_pin_spring_class("DECOUPLING") == "DECOUPLING"
+
+    def test_whitespace_stripped(self):
+        from commands.pcb_autoplacer import _parse_pin_spring_class
+        assert _parse_pin_spring_class("  SIGNAL  ") == "SIGNAL"
+
+    def test_empty_returns_none(self):
+        from commands.pcb_autoplacer import _parse_pin_spring_class
+        assert _parse_pin_spring_class("") is None
+        assert _parse_pin_spring_class("   ") is None
+
+    def test_json_dict(self):
+        from commands.pcb_autoplacer import _parse_pin_spring_class
+        result = _parse_pin_spring_class('{"*":"SIGNAL","U1.4":"DECOUPLING"}')
+        assert result == {"*": "SIGNAL", "U1.4": "DECOUPLING"}
+
+    def test_malformed_json_returns_none(self):
+        from commands.pcb_autoplacer import _parse_pin_spring_class
+        assert _parse_pin_spring_class('{bad json}') is None
+
+    def test_json_with_non_string_values_returns_none(self):
+        from commands.pcb_autoplacer import _parse_pin_spring_class
+        assert _parse_pin_spring_class('{"*": 5}') is None
+
+    def test_json_list_not_dict_returns_none(self):
+        from commands.pcb_autoplacer import _parse_pin_spring_class
+        assert _parse_pin_spring_class('["DECOUPLING"]') is None
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    not _real_pcbnew_available(),
+    reason="needs real pcbnew swig module",
+)
+class TestFootprintPropertyRead:
+    """Pin_Spring_Class:N, Spring_Class, and Body_Margin footprint
+    properties are read into Component fields at load time.  Writes
+    transient SWIG-side state on one footprint, loads the session,
+    asserts the value made it through, and unsets the property.
+    """
+
+    def test_pin_spring_class_bare_string(self):
+        import pcbnew
+        from commands.pcb_autoplacer import load_pcb_session
+
+        BOARD = Path("/home/vagrant/projects/kicad_agent/projects/power_module/power_module.kicad_pcb")
+        if not BOARD.exists():
+            pytest.skip("power_module fixture not present")
+        board = pcbnew.LoadBoard(str(BOARD))
+        # Pick a 2-pin cap to annotate.
+        target = next(
+            (fp for fp in board.GetFootprints()
+             if fp.GetReference().startswith("C") and len(fp.Pads()) == 2),
+            None,
+        )
+        if target is None:
+            pytest.skip("no 2-pin cap on board")
+        ref = target.GetReference()
+        try:
+            target.SetProperty("Pin_Spring_Class:1", "DECOUPLING")
+            sess = load_pcb_session(board)
+            comp = sess.components[f"{ref}__u1"]
+            assert comp.pin_classes.get("1") == "DECOUPLING"
+        finally:
+            # Best-effort cleanup; pcbnew property removal differs by version.
+            try:
+                target.SetProperty("Pin_Spring_Class:1", "")
+            except Exception:
+                pass
+
+    def test_spring_class_component_level(self):
+        import pcbnew
+        from commands.pcb_autoplacer import load_pcb_session
+
+        BOARD = Path("/home/vagrant/projects/kicad_agent/projects/power_module/power_module.kicad_pcb")
+        if not BOARD.exists():
+            pytest.skip("power_module fixture not present")
+        board = pcbnew.LoadBoard(str(BOARD))
+        target = next(iter(board.GetFootprints()), None)
+        if target is None:
+            pytest.skip("no footprints on board")
+        ref = target.GetReference()
+        try:
+            target.SetProperty("Spring_Class", "INTER_GROUP")
+            sess = load_pcb_session(board)
+            comp = sess.components[f"{ref}__u1"]
+            assert comp.spring_class == "INTER_GROUP"
+        finally:
+            try:
+                target.SetProperty("Spring_Class", "")
+            except Exception:
+                pass
+
+    def test_body_margin_property(self):
+        import pcbnew
+        from commands.pcb_autoplacer import load_pcb_session
+
+        BOARD = Path("/home/vagrant/projects/kicad_agent/projects/power_module/power_module.kicad_pcb")
+        if not BOARD.exists():
+            pytest.skip("power_module fixture not present")
+        board = pcbnew.LoadBoard(str(BOARD))
+        target = next(iter(board.GetFootprints()), None)
+        if target is None:
+            pytest.skip("no footprints on board")
+        ref = target.GetReference()
+        try:
+            target.SetProperty("Body_Margin", "2.5")
+            sess = load_pcb_session(board)
+            comp = sess.components[f"{ref}__u1"]
+            assert comp.margin == pytest.approx(2.5)
+        finally:
+            try:
+                target.SetProperty("Body_Margin", "")
+            except Exception:
+                pass
+
+
 @pytest.mark.integration
 @pytest.mark.skipif(
     not _real_pcbnew_available(),

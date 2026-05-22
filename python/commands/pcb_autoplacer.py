@@ -22,11 +22,12 @@ spring resolution, OBB math) belongs there.
 """
 from __future__ import annotations
 
+import json
 import logging
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import pcbnew
 
@@ -46,6 +47,59 @@ logger = logging.getLogger("kicad_interface")
 
 _NM_PER_MM = 1_000_000.0
 _DEFAULT_ANCHOR_PREFIXES = ("J", "SW", "BAT")
+
+
+def _safe_get_property(fp: Any, name: str) -> Optional[str]:
+    """Read a footprint property defensively.  pcbnew may return "" or
+    raise depending on version / property absence; normalize both to
+    None.  Stripped of leading/trailing whitespace."""
+    try:
+        val = fp.GetProperty(name)
+    except Exception:
+        return None
+    if not isinstance(val, str):
+        return None
+    val = val.strip()
+    return val if val else None
+
+
+def _parse_pin_spring_class(value: str) -> Optional[Union[str, Dict[str, str]]]:
+    """Parse a ``Pin_Spring_Class:N`` property value into the format
+    expected by ``Component.pin_classes`` and ``resolve_pair_class``.
+
+    Two accepted forms (per the spring-class storage design):
+      - Bare string ``"DECOUPLING"`` → pad-general assignment that
+        applies to every connection from this pad.
+      - JSON object ``{"*": "SIGNAL", "U1.4": "DECOUPLING"}`` → per-
+        target overrides; ``"*"`` is the pad-general fallback,
+        ``"REF.PIN"`` keys apply only to that specific neighbor pin.
+
+    Malformed JSON or non-string contents → logged and dropped (the
+    property is just ignored, the run continues with defaults).
+    """
+    value = value.strip()
+    if not value:
+        return None
+    # JSON-like leading char → parse as JSON; anything else is bare string.
+    if value[0] in "{[":
+        try:
+            parsed = json.loads(value)
+        except (json.JSONDecodeError, ValueError) as e:
+            logger.warning(
+                "Pin_Spring_Class: invalid JSON value %r (%s); ignoring", value, e,
+            )
+            return None
+        if not isinstance(parsed, dict):
+            logger.warning("Pin_Spring_Class: JSON value isn't an object: %r", value)
+            return None
+        if not all(isinstance(v, str) for v in parsed.values()):
+            logger.warning(
+                "Pin_Spring_Class: JSON values must all be strings: %r", value,
+            )
+            return None
+        return parsed
+    # Bare string — let resolve_pair_class log if the name's unknown.
+    return value
 
 
 def _pad_local_xy(pad: Any, fp_world_xy: Tuple[float, float],
@@ -265,19 +319,43 @@ def load_pcb_session(
             coord_system="pcb",
         )
 
+        # Component-level Spring_Class property (component-wide default).
+        sc_val = _safe_get_property(fp, "Spring_Class")
+        if sc_val:
+            comp.spring_class = sc_val
+
+        # Per-component Body_Margin property (mm) — overrides
+        # Params.obb_repulsion_margin for this component's repulsion pairs.
+        bm_val = _safe_get_property(fp, "Body_Margin")
+        if bm_val:
+            try:
+                comp.margin = float(bm_val)
+            except (ValueError, TypeError):
+                logger.warning(
+                    "Body_Margin on %s: not a number: %r", ref, bm_val,
+                )
+
         # Pad → Pin records.  Use the pcbnew pad name for the pin number.
+        # Also read per-pad Pin_Spring_Class:N properties (bare-string =
+        # pad-general; JSON dict = per-target overrides).
         for pad in fp.Pads():
             pad_num = pad.GetPadName() or pad.GetNumber()
             if not pad_num:
                 continue
+            pad_num = str(pad_num)
             lx, ly = _pad_local_xy(pad, (fp_x, fp_y), fp_angle)
-            comp.pins[str(pad_num)] = Pin(
-                number=str(pad_num),
+            comp.pins[pad_num] = Pin(
+                number=pad_num,
                 name=pad.GetPinFunction() or "",
                 local_x=lx,
                 local_y=ly,
                 lib_angle=0.0,   # PCB pads don't have a meaningful outward angle
             )
+            pin_cls_val = _safe_get_property(fp, f"Pin_Spring_Class:{pad_num}")
+            if pin_cls_val:
+                parsed = _parse_pin_spring_class(pin_cls_val)
+                if parsed is not None:
+                    comp.pin_classes[pad_num] = parsed
         sess.components[comp.key] = comp
 
     # ---- Nets ----
