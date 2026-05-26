@@ -134,7 +134,11 @@ class TestPropagateRename:
 
 class TestConstraintVersionEnsure:
     def test_can_be_written_alongside_existing_keys(self, tmp_path: Path):
-        from commands.placement_constraints import ensure_constraint_version, get_constraint_version
+        from commands.placement_constraints import (
+            CONSTRAINT_VERSION,
+            ensure_constraint_version,
+            get_constraint_version,
+        )
         import json
 
         proj = tmp_path / "test.kicad_pro"
@@ -142,8 +146,8 @@ class TestConstraintVersionEnsure:
 
         assert get_constraint_version(proj) is None
         assert ensure_constraint_version(proj) is True
-        assert get_constraint_version(proj) == 1
+        assert get_constraint_version(proj) == CONSTRAINT_VERSION
 
         data = json.loads(proj.read_text())
         assert data["board"]["design_settings"] == {}
-        assert data["mcp_constraint_version"] == 1
+        assert data["mcp_constraint_version"] == CONSTRAINT_VERSION

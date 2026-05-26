@@ -122,7 +122,7 @@ class TestConstraintVersion:
         # Other keys preserved.
         data = json.loads(proj.read_text())
         assert data["foo"] == "bar"
-        assert data["mcp_constraint_version"] == 1
+        assert data["mcp_constraint_version"] == CONSTRAINT_VERSION
 
     def test_missing_file(self, tmp_path: Path):
         assert get_constraint_version(tmp_path / "missing.kicad_pro") is None
@@ -158,4 +158,5 @@ def test_anchor_property_name_constant():
     # Locked-in v1 contract — changing this requires a constraint
     # version bump.
     assert ANCHOR_PROPERTY == "Placement_Anchor"
-    assert CONSTRAINT_VERSION == 1
+    # v2 added the mcp_spring_classes section (load + bootstrap I/O).
+    assert CONSTRAINT_VERSION == 2
