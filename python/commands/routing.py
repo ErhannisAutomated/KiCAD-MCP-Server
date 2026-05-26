@@ -87,6 +87,16 @@ class RoutingCommands:
         Looks up pad positions automatically, then creates a trace.
         Convenience wrapper around route_trace that eliminates the need
         for separate get_pad_position calls.
+
+        Optional pin-escape support (#178): pass
+        `escapeFromWidth`/`escapeFromLength` (and/or the symmetric
+        `escapeToWidth`/`escapeToLength`) to break the route into a
+        narrow stub exiting the pad followed by a wider trunk segment.
+        Use this when a fat trunk trace can't physically fit out of a
+        tight IC pin pitch. The stub direction is perpendicular to the
+        pad's pin row (computed from footprint center → pad center).
+        Currently same-layer only — cross-layer routes ignore escape
+        params.
         """
         try:
             if not self.board:
@@ -105,12 +115,37 @@ class RoutingCommands:
             net = params.get("net")  # optional override
             check_obstacles = params.get("checkObstacles", True)
             clearance = params.get("clearance")  # mm; default = netclass
+            escape_from_w = params.get("escapeFromWidth")
+            escape_from_l = params.get("escapeFromLength")
+            escape_to_w = params.get("escapeToWidth")
+            escape_to_l = params.get("escapeToLength")
 
             if not from_ref or not from_pad or not to_ref or not to_pad:
                 return {
                     "success": False,
                     "message": "Missing parameters",
                     "errorDetails": "fromRef, fromPad, toRef, toPad are all required",
+                }
+
+            # Pin-escape params must come as width+length pairs — silently
+            # ignoring one would mask typos.
+            if bool(escape_from_w) != bool(escape_from_l):
+                return {
+                    "success": False,
+                    "message": "Incomplete escape params",
+                    "errorDetails": (
+                        "escapeFromWidth and escapeFromLength must both "
+                        "be set (or both omitted)"
+                    ),
+                }
+            if bool(escape_to_w) != bool(escape_to_l):
+                return {
+                    "success": False,
+                    "message": "Incomplete escape params",
+                    "errorDetails": (
+                        "escapeToWidth and escapeToLength must both be "
+                        "set (or both omitted)"
+                    ),
                 }
 
             scale = 1000000  # nm to mm
@@ -179,16 +214,32 @@ class RoutingCommands:
                     "success": False,
                     "message": f"Route blocked by {len(obs)} obstacle(s)",
                     "errorDetails": (
-                        "The straight path would cross foreign-net copper: "
+                        "The path would cross foreign-net copper: "
                         + shown
-                        + ". route_pad_to_pad only draws straight segments — use "
-                        "route_trace with intermediate waypoints to route around "
-                        "these, or pass checkObstacles=false to override."
+                        + ". route_pad_to_pad only draws straight segments "
+                        "(+ optional pin-escape stubs) — try escapeFromWidth/"
+                        "escapeFromLength to narrow the trace at an IC pad, "
+                        "or use route_trace with intermediate waypoints to "
+                        "route around the obstacle, or pass "
+                        "checkObstacles=false to override."
                     ),
                     "obstacles": obs,
                 }
 
             if needs_via:
+                if escape_from_w or escape_to_w:
+                    return {
+                        "success": False,
+                        "message": "Pin escape not supported on cross-layer routes",
+                        "errorDetails": (
+                            "v1 pin-escape only handles same-layer "
+                            "pad-to-pad routes. For a cross-layer "
+                            "fan-out, route the narrow stub to a via "
+                            "point with route_trace, then continue with "
+                            "find_via_lane or route_pad_to_pad on the "
+                            "destination layer."
+                        ),
+                    }
                 # Place via directly below the start pad (same X).
                 # Using the geometric midpoint X causes all vias to stack at
                 # the same X when pads are back-to-back mirrored (e.g. J1/J2
@@ -251,28 +302,109 @@ class RoutingCommands:
                     "via_position": {"x": via_x, "y": via_y},
                 }
             else:
-                # Same layer — direct trace
+                # Same layer — direct trace (with optional pin-escape stubs)
                 seg_layer = layer if layer else start_layer
+                layer_id = self.board.GetLayerID(seg_layer)
+
+                from_has_escape = bool(escape_from_w and escape_from_l)
+                to_has_escape = bool(escape_to_w and escape_to_l)
+
+                # Build a list of (start, end, width_mm) segments. Default
+                # is a single direct trace; pin-escape inserts a narrow
+                # stub at each escaping end and a wider trunk in between.
+                segments = []  # list of (pcbnew.VECTOR2I, pcbnew.VECTOR2I, float)
+                trunk_start = start_pos
+                trunk_end = end_pos
+
+                if from_has_escape:
+                    dx, dy = self._pad_outward_unit_vec(start_pad, fp_start)
+                    escape_iu = int(float(escape_from_l) * scale)
+                    wp_from = pcbnew.VECTOR2I(
+                        int(start_pos.x + dx * escape_iu),
+                        int(start_pos.y + dy * escape_iu),
+                    )
+                    segments.append((start_pos, wp_from, float(escape_from_w)))
+                    trunk_start = wp_from
+
+                if to_has_escape:
+                    dx, dy = self._pad_outward_unit_vec(end_pad, fp_end)
+                    escape_iu = int(float(escape_to_l) * scale)
+                    wp_to = pcbnew.VECTOR2I(
+                        int(end_pos.x + dx * escape_iu),
+                        int(end_pos.y + dy * escape_iu),
+                    )
+                    trunk_end = wp_to
+
+                # Trunk segment between (possibly) escape endpoints.
+                segments.append((trunk_start, trunk_end, float(width) if width else None))
+
+                if to_has_escape:
+                    segments.append((trunk_end, end_pos, float(escape_to_w)))
+
+                # Obstacle check each segment individually with its own
+                # per-segment width — so the narrow stub doesn't get
+                # rejected against pin pitch that a fat trace couldn't
+                # clear.
                 if check_obstacles:
-                    trace_width_iu, min_clearance_iu = self._resolve_route_clearance(
-                        width, clearance, net
+                    for seg_start, seg_end, seg_w in segments:
+                        tw_iu, mc_iu = self._resolve_route_clearance(
+                            seg_w, clearance, net
+                        )
+                        obs = self._find_route_obstacles(
+                            seg_start, seg_end, layer_id, net,
+                            tw_iu, mc_iu,
+                        )
+                        if obs:
+                            return _obstacle_error(obs)
+
+                # Commit each segment.  route_trace is called with
+                # checkObstacles=False since the full path was verified
+                # above.
+                sub_results = []
+                for seg_start, seg_end, seg_w in segments:
+                    sub = self.route_trace(
+                        {
+                            "start": {
+                                "x": seg_start.x / scale,
+                                "y": seg_start.y / scale,
+                                "unit": "mm",
+                            },
+                            "end": {
+                                "x": seg_end.x / scale,
+                                "y": seg_end.y / scale,
+                                "unit": "mm",
+                            },
+                            "layer": seg_layer,
+                            "width": seg_w,
+                            "net": net,
+                            "checkObstacles": False,
+                        }
                     )
-                    obs = self._find_route_obstacles(
-                        start_pos, end_pos, self.board.GetLayerID(seg_layer), net,
-                        trace_width_iu, min_clearance_iu,
-                    )
-                    if obs:
-                        return _obstacle_error(obs)
-                result = self.route_trace(
-                    {
-                        "start": {"x": start_pos.x / scale, "y": start_pos.y / scale, "unit": "mm"},
-                        "end": {"x": end_pos.x / scale, "y": end_pos.y / scale, "unit": "mm"},
-                        "layer": seg_layer,
-                        "width": width,
-                        "net": net,
-                        "checkObstacles": False,
+                    sub_results.append(sub)
+
+                # Surface the last segment as `result` (its keys mirror
+                # the existing single-segment shape used downstream).
+                result = sub_results[-1]
+                if not all(r.get("success") for r in sub_results):
+                    result = {
+                        "success": False,
+                        "message": (
+                            "Failed to commit one or more pin-escape "
+                            "segments"
+                        ),
+                        "subResults": sub_results,
                     }
-                )
+                elif from_has_escape or to_has_escape:
+                    result = {
+                        "success": True,
+                        "message": (
+                            f"Routed {from_ref}.{from_pad} → "
+                            f"{to_ref}.{to_pad} via "
+                            f"{len(segments)} segment(s) "
+                            f"(pin-escape applied)"
+                        ),
+                        "segmentCount": len(segments),
+                    }
 
             if result.get("success"):
                 result["fromPad"] = {
@@ -2503,6 +2635,21 @@ class RoutingCommands:
                 "message": "Failed to check route segment",
                 "errorDetails": str(e),
             }
+
+    def _pad_outward_unit_vec(self, pad, footprint) -> Tuple[float, float]:
+        """Unit vector pointing from the footprint body center to the pad.
+        Used to pick a pin-escape direction perpendicular to the pin row
+        (works for QFN/TSSOP/QFP/LGA where pads sit on the perimeter).
+        Falls back to +x if the pad coincides with the footprint center
+        (e.g. thermal pads or BGA balls)."""
+        pp = pad.GetPosition()
+        fp = footprint.GetPosition()
+        dx = float(pp.x - fp.x)
+        dy = float(pp.y - fp.y)
+        mag = (dx * dx + dy * dy) ** 0.5
+        if mag < 1.0:  # < 1 nm — effectively coincident
+            return (1.0, 0.0)
+        return (dx / mag, dy / mag)
 
     def _resolve_route_clearance(
         self,

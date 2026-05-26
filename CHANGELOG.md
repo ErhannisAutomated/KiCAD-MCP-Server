@@ -4,6 +4,40 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### route_pad_to_pad pin-escape (develop, 2026-05-26)
+
+`route_pad_to_pad` accepts four new optional parameters —
+`escapeFromWidth`/`escapeFromLength` and the symmetric
+`escapeToWidth`/`escapeToLength` — that emit a narrow pin-escape stub
+at the corresponding pad before widening into the trunk segment.
+
+Use case: a 1.5 mm POWER_4A trunk can't physically exit a 0.65 mm-pitch
+HTSSOP-28 pin row without shorting to neighbouring pads. Calling
+`route_pad_to_pad(..., width=1.5, escapeFromWidth=0.3,
+escapeFromLength=2.0)` first emits a 0.3 mm stub from the source pad,
+then the 1.5 mm trunk from the stub-end to the destination.
+
+* Stub direction is perpendicular to the pin row, computed as the unit
+  vector from the footprint center to the pad. Robust for QFN/TSSOP/
+  QFP/LGA where pads sit on the perimeter. Coincident pad/footprint
+  centers fall back to +x.
+* Each stub is obstacle-checked independently with its own width
+  (#177 swept-trace logic), so the narrow stub is allowed to fit
+  through pin pitch the trunk can't.
+* Both ends can escape simultaneously (3-segment output: stub + trunk
+  + stub) for IC-to-IC routes where both pads need taper.
+* Width/length are paired params; supplying only one of a pair fails
+  fast rather than silently ignoring the typo.
+* Cross-layer routes explicitly reject escape params in v1 — the
+  caller is pointed at `route_trace` + `find_via_lane` for a
+  via-jumper with escape. (Cross-layer escape is a future follow-up.)
+* MCP tool description + zod schema updated to document the four new
+  optional params.
+* 4 unit tests cover the param-pairing validation and the
+  `_pad_outward_unit_vec` helper math; 4 real-pcbnew integration
+  tests assert single/from-only/both-side segment emission and
+  cross-layer rejection.
+
 ### Width- and clearance-aware route obstacle detection (develop, 2026-05-26)
 
 `route_trace`, `route_pad_to_pad`, and `check_route_segment` now treat

@@ -514,7 +514,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Route pad to pad tool
   server.tool(
     "route_pad_to_pad",
-    "PREFERRED tool for pad-to-pad routing. Looks up pad positions automatically, detects the net from the pad, and — critically — if the two pads are on different copper layers (e.g. J1 on F.Cu and J2 on B.Cu) automatically inserts a via at the midpoint so the connection is complete. Always use this instead of route_trace when routing between named component pads. NOTE: it only draws STRAIGHT segments — by default it refuses (checkObstacles) if the swept trace (width + netclass clearance) would touch foreign-net copper; route around obstacles with route_trace waypoints in that case.",
+    "PREFERRED tool for pad-to-pad routing. Looks up pad positions automatically, detects the net from the pad, and — critically — if the two pads are on different copper layers (e.g. J1 on F.Cu and J2 on B.Cu) automatically inserts a via at the midpoint so the connection is complete. Always use this instead of route_trace when routing between named component pads. By default refuses (checkObstacles) if the swept trace (width + netclass clearance) would touch foreign-net copper; route around obstacles with route_trace waypoints in that case. Optional pin-escape (#178): supply escapeFromWidth/escapeFromLength (and/or the symmetric escapeTo* pair) to emit a narrow stub from the pad before widening into the trunk — needed when the trunk width can't physically fit through a tight IC pin pitch. Currently same-layer routes only.",
     {
       fromRef: z.string().describe("Reference of the source component (e.g. 'U2')"),
       fromPad: z
@@ -538,6 +538,30 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         .optional()
         .describe(
           "Minimum gap in mm between the trace edge and any foreign-net copper (used only when checkObstacles is true). Defaults to the net's netclass clearance, falling back to the board default.",
+        ),
+      escapeFromWidth: z
+        .number()
+        .optional()
+        .describe(
+          "Width in mm for a narrow pin-escape stub at the source pad. Use this when the trunk `width` is too wide to fit out of the pad's pin pitch (e.g. 0.3 mm escape from a 0.65 mm-pitch HTSSOP, widening to a 1.5 mm POWER_4A trunk). Must be paired with escapeFromLength.",
+        ),
+      escapeFromLength: z
+        .number()
+        .optional()
+        .describe(
+          "Length in mm of the source-side pin-escape stub. The stub points perpendicular to the pad's pin row (computed from footprint center → pad center). Must be paired with escapeFromWidth.",
+        ),
+      escapeToWidth: z
+        .number()
+        .optional()
+        .describe(
+          "Width in mm for a symmetric pin-escape stub at the destination pad. Same semantics as escapeFromWidth. Must be paired with escapeToLength.",
+        ),
+      escapeToLength: z
+        .number()
+        .optional()
+        .describe(
+          "Length in mm of the destination-side pin-escape stub. Must be paired with escapeToWidth.",
         ),
     },
     async (args: any) => {
