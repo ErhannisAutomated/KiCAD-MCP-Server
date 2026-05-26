@@ -4,6 +4,39 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### stitch_pour_vias MCP tool (develop, 2026-05-26)
+
+New MCP tool `stitch_pour_vias(net, gridPitch, ...)` proposes (and
+optionally applies) a grid of stitching vias on a copper pour net —
+typical use is tying F.Cu GND to B.Cu GND, or tightening return-current
+paths around high-speed signals.
+
+Each candidate must:
+* sit inside at least one zone outline on the net (any layer)
+* clear `minClearance` (default 0.2 mm) from any foreign-net copper on
+  any layer — uses the same `_via_clearance_violations` helper that
+  validates find_via_lane's via placements
+* not duplicate an existing same-net via (within `gridPitch * 0.7`)
+
+Through-via, F.Cu ↔ B.Cu. Default 0.6 mm diameter / 0.3 mm drill, all
+overridable. Default is preview (positions only); pass `apply=true` to
+commit. `maxVias` safety cap defaults to 200.
+
+Implementation deliberately uses `Zone.HitTest` (outline) rather than
+`HitTestFilledArea` because (a) the latter requires a fresh
+`ZONE_FILLER.Fill()` which has known SWIG segfault risk, and (b) the
+explicit clearance check below catches the same foreign-copper
+exclusions that the filled polygon would.
+
+`stitch_pour_vias` registered in `KiCADInterface._BOARD_MUTATING_COMMANDS`
+so `apply=true` runs go through the existing auto-save path.
+
+5 unit tests cover the param validation, no-zones error path, and
+auto-save membership; 4 real-pcbnew integration tests assert
+proposals land inside the outline, `apply` mutates the board,
+re-running dedupes against existing vias, and `maxVias` caps the
+output.
+
 ### route_pad_to_pad pin-escape (develop, 2026-05-26)
 
 `route_pad_to_pad` accepts four new optional parameters —

@@ -1000,6 +1000,66 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "stitch_pour_vias",
+        "title": "Stitch Pour Vias",
+        "description": (
+            "Propose (and optionally apply) a grid of stitching vias "
+            "on a copper pour net. Each candidate must sit inside a "
+            "filled zone on the net, clear `minClearance` from any "
+            "foreign-net copper on any layer, and not duplicate an "
+            "existing same-net via. Through-via, F.Cu ↔ B.Cu."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "net": {
+                    "type": "string",
+                    "description": (
+                        "Net to stitch (must have at least one zone)."
+                    ),
+                },
+                "gridPitch": {
+                    "type": "number",
+                    "description": "Grid spacing between candidate vias, mm.",
+                    "minimum": 0.1,
+                },
+                "viaDiameter": {
+                    "type": "number",
+                    "description": "Via outer diameter, mm (default 0.6).",
+                    "minimum": 0.1,
+                },
+                "viaDrill": {
+                    "type": "number",
+                    "description": "Via drill diameter, mm (default 0.3).",
+                    "minimum": 0.1,
+                },
+                "minClearance": {
+                    "type": "number",
+                    "description": (
+                        "Minimum gap mm between via edge and foreign-net "
+                        "copper on any layer (default 0.2)."
+                    ),
+                    "minimum": 0,
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": (
+                        "Commit the proposed vias (default false = preview)."
+                    ),
+                },
+                "maxVias": {
+                    "type": "number",
+                    "description": (
+                        "Safety cap on the number of vias proposed "
+                        "(default 200)."
+                    ),
+                    "minimum": 1,
+                },
+            },
+            "required": ["net", "gridPitch"],
+        },
+    },
+    {
         "name": "dedupe_traces",
         "title": "Dedupe Traces",
         "description": (

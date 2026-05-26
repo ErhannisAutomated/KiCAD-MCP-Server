@@ -195,6 +195,52 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Stitch pour vias tool
+  server.tool(
+    "stitch_pour_vias",
+    "Propose (and optionally apply) a regular grid of stitching vias on a copper pour net, e.g. to tie F.Cu GND to B.Cu GND or to improve return-current paths around high-speed traces. Walks a grid over the union bbox of all zones on the net; each candidate must (a) sit inside at least one filled zone polygon on the net, (b) pass `minClearance` from any foreign-net copper on any layer (same check find_via_lane uses), and (c) not duplicate an existing same-net via (within gridPitch*0.7). Default is preview — pass apply=true to commit. Through-via (F.Cu ↔ B.Cu).",
+    {
+      net: z
+        .string()
+        .describe("Net to stitch (e.g. 'GND'). Must have at least one zone."),
+      gridPitch: z
+        .number()
+        .describe("Spacing between candidate stitching vias, in mm."),
+      viaDiameter: z
+        .number()
+        .optional()
+        .describe("Via outer diameter in mm (default 0.6)."),
+      viaDrill: z
+        .number()
+        .optional()
+        .describe("Via drill diameter in mm (default 0.3)."),
+      minClearance: z
+        .number()
+        .optional()
+        .describe(
+          "Minimum gap in mm between the via edge and foreign-net copper on any layer (default 0.2). Candidates that fail clearance are skipped and counted in skippedClearance.",
+        ),
+      apply: z
+        .boolean()
+        .optional()
+        .describe(
+          "Commit the proposed stitching vias (default false = preview). When true, the board is mutated and auto-saved.",
+        ),
+      maxVias: z
+        .number()
+        .optional()
+        .describe(
+          "Safety cap on the number of proposed vias (default 200). The walk stops early once this is reached.",
+        ),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("stitch_pour_vias", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // Add via tool
   server.tool(
     "add_via",

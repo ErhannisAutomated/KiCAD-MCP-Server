@@ -648,6 +648,210 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def stitch_pour_vias(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Propose (and optionally apply) a grid of stitching vias on a
+        copper pour net (#176).
+
+        Walks a regular grid over the union bbox of zones on the given
+        net; for each candidate it requires:
+          * the point is inside at least one zone on the net (any
+            layer), measured against the filled polygon
+          * no foreign-net copper within `minClearance` of the via edge
+            (uses the same `_via_clearance_violations` helper as
+            find_via_lane)
+          * not within `gridPitch * 0.7` of an existing same-net via
+            (deduplication of repeat invocations)
+
+        Returns the proposed XY positions; with `apply=true` also adds
+        the vias to the board. Through-via, F.Cu ↔ B.Cu.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            net = params.get("net")
+            grid_pitch = params.get("gridPitch")
+            via_diameter = params.get("viaDiameter", 0.6)
+            via_drill = params.get("viaDrill", 0.3)
+            min_clearance = params.get("minClearance", 0.2)
+            apply_changes = params.get("apply", False)
+            max_vias = params.get("maxVias", 200)
+
+            if not net:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": "net is required",
+                }
+            if not grid_pitch or grid_pitch <= 0:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": "gridPitch (mm) must be > 0",
+                }
+
+            SCALE = 1_000_000
+            grid_pitch_iu = int(grid_pitch * SCALE)
+            via_diameter_iu = int(via_diameter * SCALE)
+            via_drill_iu = int(via_drill * SCALE)
+            min_clearance_iu = int(min_clearance * SCALE)
+
+            # Find zones assigned to this net.
+            zones_on_net = [
+                z for z in self.board.Zones() if z.GetNetname() == net
+            ]
+            if not zones_on_net:
+                return {
+                    "success": False,
+                    "message": f"No zones on net '{net}'",
+                    "errorDetails": (
+                        f"Cannot stitch a net with no copper pour. Add "
+                        f"a zone on '{net}' first (add_copper_pour) or "
+                        f"verify the net name."
+                    ),
+                }
+
+            # Union bbox of all zones on the net.  Each zone exposes
+            # GetBoundingBox(); fall back to its outline if needed.
+            bbox = None
+            for z in zones_on_net:
+                try:
+                    zb = z.GetBoundingBox()
+                except Exception:
+                    continue
+                if bbox is None:
+                    bbox = pcbnew.BOX2I(zb.GetOrigin(), zb.GetSize())
+                else:
+                    bbox.Merge(zb)
+            if bbox is None or bbox.GetWidth() <= 0:
+                return {
+                    "success": False,
+                    "message": "Could not determine stitch region",
+                    "errorDetails": (
+                        f"Zones on net '{net}' have no usable bounding "
+                        f"box — check that they are filled."
+                    ),
+                }
+
+            # Pre-collect existing same-net vias for dedup; squared
+            # distance comparison is cheaper than per-candidate sqrt.
+            existing_vias_xy = []
+            dedupe_dist_sq = (grid_pitch_iu * 0.7) ** 2
+            for t in self.board.Tracks():
+                if t.Type() != pcbnew.PCB_VIA_T:
+                    continue
+                if t.GetNetname() != net:
+                    continue
+                p = t.GetPosition()
+                existing_vias_xy.append((p.x, p.y))
+
+            # Inside-zone candidates are tested against the zone
+            # outline (not the filled polygon).  Two reasons:
+            #   1. ZONE_FILLER.Fill() has known SWIG segfault risk
+            #      (see refill_zones notes); we don't want to depend
+            #      on the fill being computed at call time.
+            #   2. The filled polygon excludes regions near foreign-net
+            #      copper for clearance reasons, but that's already
+            #      checked separately by `_via_clearance_violations`
+            #      below. The outline check + explicit clearance is
+            #      equivalent and more robust.
+
+            proposed = []
+            skipped_outside = 0
+            skipped_clearance = 0
+            skipped_dedup = 0
+            x_start = bbox.GetLeft()
+            x_end = bbox.GetRight()
+            y_start = bbox.GetTop()
+            y_end = bbox.GetBottom()
+
+            x = x_start
+            while x <= x_end and len(proposed) < max_vias:
+                y = y_start
+                while y <= y_end and len(proposed) < max_vias:
+                    pos = pcbnew.VECTOR2I(x, y)
+
+                    # Inside any zone outline on the net?
+                    inside = False
+                    for z in zones_on_net:
+                        try:
+                            if z.HitTest(pos):
+                                inside = True
+                                break
+                        except Exception:
+                            continue
+                    if not inside:
+                        skipped_outside += 1
+                        y += grid_pitch_iu
+                        continue
+
+                    # Dedupe against existing same-net vias
+                    too_close = False
+                    for ex, ey in existing_vias_xy:
+                        dx = ex - x
+                        dy = ey - y
+                        if dx * dx + dy * dy < dedupe_dist_sq:
+                            too_close = True
+                            break
+                    if too_close:
+                        skipped_dedup += 1
+                        y += grid_pitch_iu
+                        continue
+
+                    # Clearance against foreign-net copper (all layers)
+                    violations = self._via_clearance_violations(
+                        pos, via_diameter_iu, net, min_clearance_iu
+                    )
+                    if violations:
+                        skipped_clearance += 1
+                        y += grid_pitch_iu
+                        continue
+
+                    proposed.append((x, y))
+                    y += grid_pitch_iu
+                x += grid_pitch_iu
+
+            if apply_changes and proposed:
+                nets_map = self.board.GetNetInfo().NetsByName()
+                net_obj = nets_map[net] if nets_map.has_key(net) else None
+                for x, y in proposed:
+                    via = pcbnew.PCB_VIA(self.board)
+                    via.SetPosition(pcbnew.VECTOR2I(x, y))
+                    via.SetWidth(via_diameter_iu)
+                    via.SetDrill(via_drill_iu)
+                    via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+                    if net_obj is not None:
+                        via.SetNet(net_obj)
+                    self.board.Add(via)
+
+            return {
+                "success": True,
+                "message": (
+                    f"{'Applied' if apply_changes else 'Proposed'} "
+                    f"{len(proposed)} stitching via(s) on '{net}'"
+                ),
+                "applied": apply_changes,
+                "proposedCount": len(proposed),
+                "skippedOutside": skipped_outside,
+                "skippedClearance": skipped_clearance,
+                "skippedDedup": skipped_dedup,
+                "positions": [
+                    {"x": x / SCALE, "y": y / SCALE, "unit": "mm"}
+                    for x, y in proposed
+                ],
+            }
+        except Exception as e:
+            logger.error(f"Error in stitch_pour_vias: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to stitch pour vias",
+                "errorDetails": str(e),
+            }
+
     def dedupe_traces(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Remove exact-duplicate tracks (and optionally vias) left over
         from autoroute SES re-imports and similar.

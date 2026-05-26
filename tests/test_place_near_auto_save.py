@@ -44,6 +44,7 @@ PCB_MUTATORS_REQUIRING_AUTO_SAVE = {
     "route_pad_to_pad",
     "route_differential_pair",
     "add_via",
+    "stitch_pour_vias",
     "delete_trace",
     "dedupe_traces",
     "modify_trace",
