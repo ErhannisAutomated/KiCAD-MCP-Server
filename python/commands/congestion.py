@@ -141,18 +141,49 @@ def _load_ratsnest_from_drc(drc_path: Path) -> List[Dict[str, Any]]:
     return out
 
 
+def _pad_layer_names(pad: Any, board: Any) -> List[str]:
+    """Return the copper layer names the pad sits on (e.g. ['F.Cu'] for
+    a top SMD pad, ['F.Cu', 'In1.Cu', 'In2.Cu', 'B.Cu'] for a PTH)."""
+    out: List[str] = []
+    try:
+        layer_set = pad.GetLayerSet()
+    except Exception:
+        return out
+    for lid in range(64):  # PCB_LAYER_ID enum range, copper IDs are small
+        try:
+            if not layer_set.Contains(lid):
+                continue
+            name = board.GetLayerName(lid)
+            if name.endswith(".Cu"):
+                out.append(name)
+        except Exception:
+            continue
+    return out
+
+
 def analyze_congestion(
     board: Any,
     cell_size_mm: float = 5.0,
     top_n: int = 15,
     drc_violations_path: Optional[str] = None,
     net_difficulty_top_n: int = 20,
+    layer: Optional[str] = None,
 ) -> Dict[str, Any]:
     """Compute pad-density × ratsnest-density congestion grid.
 
     Returns top-N congested cells (with member components) plus per-net
     difficulty (max congestion score along each unrouted net's
     ratsnest). Read-only.
+
+    Layer filtering (#181): when `layer` is provided (e.g. ``"F.Cu"``),
+    the pad-density component counts only pads present on that layer.
+    PTH pads count toward every copper layer. Hotspots and net
+    difficulty are scored against the filtered density, so the result
+    reflects routing pressure on that specific layer rather than the
+    summed board-wide pressure. When ``layer`` is omitted, behaviour is
+    unchanged from v1 (any-layer pad density).  Every hotspot
+    additionally carries ``pad_count_by_layer`` so the caller can see
+    the per-layer breakdown in a single call.
     """
     cell_size_nm = int(cell_size_mm * 1_000_000)
     bbox = _board_bbox_nm(board)
@@ -168,10 +199,12 @@ def analyze_congestion(
     n_cols = (bright - bleft) // cell_size_nm + 1
     n_rows = (bbot - btop) // cell_size_nm + 1
 
-    # grid[(col, row)] -> {pads, rats, components, pad_refs}
+    # grid[(col, row)] -> {pads, pads_by_layer, rats, components}
     grid: Dict[Tuple[int, int], Dict[str, Any]] = {}
 
     # Pad density: count each pad once per cell its bbox overlaps.
+    # Track per-layer counts so the caller can inspect layer-specific
+    # pressure (and we can derive the filtered score for `layer`).
     for fp in board.GetFootprints():
         ref = fp.GetReference()
         for pad in fp.Pads():
@@ -180,13 +213,23 @@ def analyze_congestion(
                 pb.GetLeft(), pb.GetTop(), pb.GetRight(), pb.GetBottom(),
                 bleft, btop, cell_size_nm,
             )
+            pad_layers = _pad_layer_names(pad, board)
             for col, row in cells:
                 cell = grid.setdefault(
                     (col, row),
-                    {"pads": 0, "rats": 0, "components": set()},
+                    {
+                        "pads": 0,
+                        "pads_by_layer": {},
+                        "rats": 0,
+                        "components": set(),
+                    },
                 )
                 cell["pads"] += 1
                 cell["components"].add(ref)
+                for lname in pad_layers:
+                    cell["pads_by_layer"][lname] = (
+                        cell["pads_by_layer"].get(lname, 0) + 1
+                    )
 
     # Ratsnest density: count each unrouted segment once per cell it crosses.
     rats: List[Dict[str, Any]] = []
@@ -204,14 +247,28 @@ def analyze_congestion(
         for col, row in cells:
             cell = grid.setdefault(
                 (col, row),
-                {"pads": 0, "rats": 0, "components": set()},
+                {
+                    "pads": 0,
+                    "pads_by_layer": {},
+                    "rats": 0,
+                    "components": set(),
+                },
             )
             cell["rats"] += 1
         # Note: net_max_score is computed AFTER all rats are counted, below.
 
-    # Now compute per-cell score, then per-net difficulty using final scores.
+    # Compute per-cell score using either total pad density (when no
+    # `layer` filter is set) or the per-layer pad count for the
+    # requested layer.  Layer-filtered scores reflect the routing
+    # pressure on that specific copper layer, which is what matters
+    # when picking which side to route a particular net on.
     for cell in grid.values():
-        cell["score"] = cell["pads"] * cell["rats"]
+        if layer:
+            pads_eff = cell["pads_by_layer"].get(layer, 0)
+        else:
+            pads_eff = cell["pads"]
+        cell["score"] = pads_eff * cell["rats"]
+        cell["pads_for_score"] = pads_eff
 
     for r in rats:
         cells = _cells_along_segment(
@@ -243,6 +300,7 @@ def analyze_congestion(
                 "size_mm": cell_size_mm,
             },
             "pad_count": cell["pads"],
+            "pad_count_by_layer": dict(cell["pads_by_layer"]),
             "ratsnest_count": cell["rats"],
             "score": cell["score"],
             "components": sorted(cell["components"]),
@@ -258,6 +316,7 @@ def analyze_congestion(
     return {
         "success": True,
         "cell_size_mm": cell_size_mm,
+        "layer": layer,
         "board_bbox_mm": {
             "left": bleft / 1_000_000.0,
             "top": btop / 1_000_000.0,
@@ -273,5 +332,6 @@ def analyze_congestion(
             f"analyze_congestion: {len(rats)} ratsnest segments, "
             f"{sum(1 for c in grid.values() if c['score'] > 0)} active cells, "
             f"top score {hotspots[0]['score'] if hotspots else 0}"
+            + (f" (filtered to layer {layer})" if layer else "")
         ),
     }

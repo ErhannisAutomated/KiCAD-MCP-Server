@@ -4,6 +4,33 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### analyze_congestion layer filter (develop, 2026-05-26)
+
+`analyze_congestion` gains an optional `layer` parameter — when set to
+e.g. `"F.Cu"`, the pad-density component of the score is filtered to
+that layer only. PTH pads still count toward every copper layer.
+
+Why: a hotspot reported "12 pads here" used to be ambiguous — six F.Cu
+SMD + six B.Cu SMD is genuinely two separate, single-layer-routable
+clusters; twelve F.Cu pads is one really hard cluster. The layer
+filter makes that distinction explicit. Pairs naturally with the
+`route_trace`/`route_pad_to_pad` clearance-aware obstacle check
+(#177) which is also per-layer.
+
+Each hotspot additionally carries `pad_count_by_layer` so the
+per-layer breakdown is visible in one call without re-running the
+analyzer per layer.
+
+* New helper `_pad_layer_names(pad, board)` enumerates the copper
+  layers a pad sits on (filters out `.Mask` / `.Paste` etc.).
+* 3 unit tests on the helper (SMD single-layer, PTH all-layers,
+  non-copper exclusion); 2 real-pcbnew integration tests build a
+  board with F.Cu/B.Cu/PTH pads at the same XY and assert the
+  layer-filtered and unfiltered scores differ as expected.
+* Docs swept: `ROUTING_TOOLS_REFERENCE.md`, `PCB_DESIGN_WORKFLOW.md`,
+  `TOOL_INVENTORY.md` now reflect the routing-tool updates from
+  #177/#178/#176/#181.
+
 ### stitch_pour_vias MCP tool (develop, 2026-05-26)
 
 New MCP tool `stitch_pour_vias(net, gridPitch, ...)` proposes (and

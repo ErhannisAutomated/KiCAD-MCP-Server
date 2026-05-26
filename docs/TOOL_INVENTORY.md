@@ -93,7 +93,11 @@ _Source: `src/tools/routing.ts`_
 | `create_netclass`         | Create net class with design rules                   | Additional       |
 | `route_differential_pair` | Route differential pair traces                       | Additional       |
 | `refill_zones`            | Refill all copper zones                              | Additional       |
-| `route_pad_to_pad`        | Route trace between two pads with auto-via insertion | Additional       |
+| `route_pad_to_pad`        | Route trace between two pads with auto-via insertion (+ optional pin-escape stubs) | Additional       |
+| `find_via_lane`           | Propose via-jumper route around foreign-net blockers | Additional       |
+| `check_route_segment`     | Pre-flight obstacle check for a candidate segment    | Additional       |
+| `stitch_pour_vias`        | Propose grid of stitching vias on a pour net         | Additional       |
+| `dedupe_traces`           | Remove duplicate tracks / vias (e.g. autoroute reimports) | Additional   |
 | `copy_routing_pattern`    | Copy routing from source to target component groups  | Additional       |
 
 ---

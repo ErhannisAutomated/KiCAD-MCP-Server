@@ -6539,6 +6539,11 @@ print("ok")
           - ``topN``: hotspot count to return (default 15).
           - ``drcViolationsPath``: explicit path to a DRC JSON.
           - ``netDifficultyTopN``: per-net difficulty list cap (default 20).
+          - ``layer``: copper layer name (e.g. ``"F.Cu"``).  When set,
+            the pad-density component is filtered to that layer so the
+            score reflects pressure on that side of the board rather
+            than summed both-side density. PTH pads count toward every
+            copper layer.
         """
         logger.info("Running analyze_congestion")
         try:
@@ -6570,6 +6575,7 @@ print("ok")
                 top_n=int(params.get("topN", 15)),
                 drc_violations_path=drc_path,
                 net_difficulty_top_n=int(params.get("netDifficultyTopN", 20)),
+                layer=params.get("layer"),
             )
         except Exception as e:
             logger.error(f"Error in analyze_congestion: {e}", exc_info=True)

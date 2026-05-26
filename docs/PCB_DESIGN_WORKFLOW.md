@@ -164,15 +164,29 @@ Route R1 pad 2 to LED1 pad 1 with 0.3mm trace width.
 **Tool:** `route_pad_to_pad` -- auto-detects pad positions, nets, and inserts vias when pads are on different layers
 
 > **Note (2026-05-15):** `route_pad_to_pad` only draws *straight*
-> segments. By default it refuses to route if the straight path would
-> cross foreign-net tracks, vias, or pads — and returns the obstacle
-> list so you can route around them. In dense IC areas (e.g.
-> escaping a QFN pad on the "wrong" side) you'll need `route_trace`
-> with intermediate waypoints, often hopping to B.Cu via `add_via` to
-> get around the obstacles. The `checkObstacles=false` override is
-> available but should be a last resort — silent straight-lining
-> through pin fields previously caused 25+ DRC violations in a single
-> call.
+> segments (+ optional pin-escape stubs). By default it refuses to
+> route if the swept trace (width + clearance) would touch foreign-net
+> tracks, vias, or pads — and returns the obstacle list so you can
+> route around them. In dense IC areas (e.g. escaping a QFN pad on the
+> "wrong" side) you'll need `route_trace` with intermediate waypoints,
+> often hopping to B.Cu via `add_via` to get around the obstacles. The
+> `checkObstacles=false` override is available but should be a last
+> resort — silent straight-lining through pin fields previously caused
+> 25+ DRC violations in a single call.
+>
+> **Update (2026-05-26):** The obstacle check is now **width- and
+> clearance-aware** (#177): the trace is treated as a stadium of
+> half-width `width/2 + clearance` so an edge-clipping case where a
+> fat trace exits an IC pin and grazes the neighbouring pad is
+> caught — not just the centerline.
+>
+> **Update (2026-05-26):** When a fat trunk trace can't physically
+> fit out of a tight IC pin pitch, pass `escapeFromWidth` +
+> `escapeFromLength` (and/or the symmetric `escapeTo*`) to emit a
+> narrow stub from the pad before widening into the trunk (#178).
+> Stub direction is perpendicular to the pin row. Cross-layer
+> escape rejects cleanly — pair `route_trace` + `find_via_lane` for
+> via-jumpered fan-outs from a fine-pitch IC.
 
 **Manual approach (multi-segment / around obstacles):**
 

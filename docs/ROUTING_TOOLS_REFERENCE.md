@@ -40,16 +40,19 @@ Route a trace segment between two XY points on a fixed layer.
 
 **Parameters:**
 
-| Parameter | Type   | Required | Description                                 |
-| --------- | ------ | -------- | ------------------------------------------- |
-| start     | object | Yes      | Start position with x, y, and optional unit |
-| end       | object | Yes      | End position with x, y, and optional unit   |
-| layer     | string | Yes      | PCB layer                                   |
-| width     | number | Yes      | Trace width in mm                           |
-| net       | string | Yes      | Net name                                    |
+| Parameter      | Type    | Required | Description                                 |
+| -------------- | ------- | -------- | ------------------------------------------- |
+| start          | object  | Yes      | Start position with x, y, and optional unit |
+| end            | object  | Yes      | End position with x, y, and optional unit   |
+| layer          | string  | Yes      | PCB layer                                   |
+| width          | number  | Yes      | Trace width in mm                           |
+| net            | string  | Yes      | Net name                                    |
+| checkObstacles | boolean | No       | Refuse the route when the swept trace (width + clearance) would touch foreign-net copper. Default `true`. |
+| clearance      | number  | No       | Minimum gap (mm) between trace edge and foreign-net copper. Defaults to the net's netclass clearance, falling back to the board default. |
 
 **Usage Notes:**
 
+- The obstacle check is **width- and clearance-aware** (#177): the trace is treated as a stadium of half-width `width/2 + clearance`, so an edge-clipping case where a fat trace exits an IC pin and grazes the neighbouring pad is caught even though the centerline misses it. Pre-#177 the check only looked at the centerline.
 - WARNING: Does NOT handle layer changes
 - If start and end are on different copper layers, use `route_pad_to_pad` instead, which automatically inserts a via
 - Coordinates use mm by default unless unit is specified
@@ -75,15 +78,21 @@ PREFERRED tool for pad-to-pad routing. Looks up pad positions automatically, det
 
 **Parameters:**
 
-| Parameter | Type          | Required | Description                                          |
-| --------- | ------------- | -------- | ---------------------------------------------------- |
-| fromRef   | string        | Yes      | Reference of the source component (e.g. 'U2')        |
-| fromPad   | string/number | Yes      | Pad number on the source component (e.g. '6' or 6)   |
-| toRef     | string        | Yes      | Reference of the target component (e.g. 'U1')        |
-| toPad     | string/number | Yes      | Pad number on the target component (e.g. '15' or 15) |
-| layer     | string        | No       | PCB layer (default: F.Cu)                            |
-| width     | number        | No       | Trace width in mm (default: board default)           |
-| net       | string        | No       | Net name override (default: auto-detected from pad)  |
+| Parameter         | Type          | Required | Description                                          |
+| ----------------- | ------------- | -------- | ---------------------------------------------------- |
+| fromRef           | string        | Yes      | Reference of the source component (e.g. 'U2')        |
+| fromPad           | string/number | Yes      | Pad number on the source component (e.g. '6' or 6)   |
+| toRef             | string        | Yes      | Reference of the target component (e.g. 'U1')        |
+| toPad             | string/number | Yes      | Pad number on the target component (e.g. '15' or 15) |
+| layer             | string        | No       | PCB layer (default: F.Cu)                            |
+| width             | number        | No       | Trunk trace width in mm (default: board default)     |
+| net               | string        | No       | Net name override (default: auto-detected from pad)  |
+| checkObstacles    | boolean       | No       | Refuse the route when the swept trace would touch foreign-net copper. Default `true`. |
+| clearance         | number        | No       | Minimum gap (mm) between trace edge and foreign-net copper. Defaults to netclass. |
+| escapeFromWidth   | number        | No       | Width (mm) of a narrow pin-escape stub at the source pad. Pair with escapeFromLength. |
+| escapeFromLength  | number        | No       | Length (mm) of the source-side pin-escape stub. Direction is perpendicular to the pin row. |
+| escapeToWidth     | number        | No       | Symmetric width (mm) for a pin-escape stub at the destination pad. |
+| escapeToLength    | number        | No       | Symmetric length (mm) for the destination-side stub. |
 
 **Usage Notes:**
 
@@ -93,6 +102,7 @@ PREFERRED tool for pad-to-pad routing. Looks up pad positions automatically, det
 - Critically: if pads are on different copper layers (e.g., one on F.Cu and one on B.Cu), automatically inserts a via at an appropriate position to complete the connection
 - Always use this instead of `route_trace` when routing between named component pads
 - Via is placed at the start pad's X coordinate to avoid stacking issues with back-to-back mirrored connectors
+- **Pin-escape (#178)**: when a fat trunk trace can't physically fit out of a tight IC pin pitch (e.g. a 1.5 mm POWER_4A trunk exiting a 0.65 mm-pitch HTSSOP-28), pass `escapeFromWidth` + `escapeFromLength` to emit a narrow stub from the pad before widening into the trunk. Stub direction is computed perpendicular to the pin row (vector from footprint center to pad center). Same-layer routes only — cross-layer pin-escape rejects cleanly and points the caller at `route_trace` + `find_via_lane`.
 
 **Example:**
 
@@ -109,6 +119,42 @@ PREFERRED tool for pad-to-pad routing. Looks up pad positions automatically, det
 ---
 
 ## Vias (1 tool)
+
+### stitch_pour_vias
+
+Propose (and optionally apply) a grid of stitching vias on a copper pour net. Each candidate must sit inside a zone outline on the net, clear `minClearance` from any foreign-net copper on any layer, and not duplicate an existing same-net via. Through-via, F.Cu ↔ B.Cu.
+
+**Parameters:**
+
+| Parameter     | Type    | Required | Description                                          |
+| ------------- | ------- | -------- | ---------------------------------------------------- |
+| net           | string  | Yes      | Net to stitch (must have at least one zone)          |
+| gridPitch     | number  | Yes      | Spacing between candidate vias, mm                   |
+| viaDiameter   | number  | No       | Via outer diameter, mm (default 0.6)                 |
+| viaDrill      | number  | No       | Via drill diameter, mm (default 0.3)                 |
+| minClearance  | number  | No       | Minimum gap (mm) between via edge and foreign-net copper (default 0.2) |
+| apply         | boolean | No       | Commit the proposed vias (default `false` = preview) |
+| maxVias       | number  | No       | Safety cap on the number of vias proposed (default 200) |
+
+**Usage Notes:**
+
+- Default is preview — review the proposed positions before committing with `apply=true`.
+- Implementation uses `Zone.HitTest` (outline) rather than `HitTestFilledArea`; the latter requires `ZONE_FILLER.Fill()` which has a known SWIG segfault risk. The explicit `minClearance` check catches the foreign-copper exclusions that the filled polygon would.
+- Dedup distance is `gridPitch × 0.7`; re-running on the same net at the same pitch proposes 0 new vias.
+- Returns `skippedOutside`, `skippedClearance`, `skippedDedup` so you can tune `gridPitch` / `minClearance` empirically.
+
+**Example:**
+
+```json
+{
+  "net": "GND",
+  "gridPitch": 3.0,
+  "minClearance": 0.2,
+  "apply": false
+}
+```
+
+---
 
 ### add_via
 

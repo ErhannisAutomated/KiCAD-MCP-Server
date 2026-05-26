@@ -1277,7 +1277,7 @@ ROUTING_TOOLS = [
     {
         "name": "analyze_congestion",
         "title": "Analyze Routing Congestion",
-        "description": "Grid-based routing-congestion analyzer. Divides the board into cells (default 5 mm) and computes per-cell pad density × ratsnest density. Returns top-N hotspots (each with member components — those are the candidates to move) plus per-net difficulty (max cell score along the ratsnest, so you can prioritise nets most likely to need re-placement). Read-only. Ratsnest data comes from the DRC unconnected_items cache — run get_drc_violations or run_drc first; the tool auto-finds the default cache JSON.",
+        "description": "Grid-based routing-congestion analyzer. Divides the board into cells (default 5 mm) and computes per-cell pad density × ratsnest density. Returns top-N hotspots (each with member components — those are the candidates to move) plus per-net difficulty (max cell score along the ratsnest, so you can prioritise nets most likely to need re-placement). Each hotspot also carries `pad_count_by_layer` so the per-side breakdown is visible without a second call. Pass `layer` (e.g. \"F.Cu\") to filter pad density to that layer so the score reflects pressure on the side you intend to route on. Read-only. Ratsnest data comes from the DRC unconnected_items cache — run get_drc_violations or run_drc first; the tool auto-finds the default cache JSON.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -1295,6 +1295,10 @@ ROUTING_TOOLS = [
                     "type": "number",
                     "description": "Cap on the per-net difficulty list. Default 20.",
                     "default": 20,
+                },
+                "layer": {
+                    "type": "string",
+                    "description": "Copper layer name (e.g. \"F.Cu\", \"B.Cu\", \"In1.Cu\"). When set, pad-density is filtered to that layer so the score reflects routing pressure on that side. PTH pads count toward every copper layer. Omit for the legacy any-layer score.",
                 },
                 "drcViolationsPath": {
                     "type": "string",
