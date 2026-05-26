@@ -648,6 +648,180 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def bridge_same_net_pins(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Create a small filled zone covering two same-net pads,
+        replacing a thin sub-min-width trace that would violate the
+        POWER netclass min-track-width DRC rule.
+
+        Motivation: a 1.5 mm POWER_4A trunk can't fit between adjacent
+        IC pins at 0.65 mm pitch, so we drop a narrow trace and the
+        DRC complains. A small zone covering both pads (plus a small
+        margin) bonds them with the right net, looks like the
+        intentional copper-fill datasheets call for on parallel
+        power pins, and satisfies trunk-width rules automatically
+        because zones aren't subject to track_width DRC.
+
+        Required: `padA`/`padB` as ``{"ref":"U4","pad":"2"}`` dicts.
+        Optional: `layer` (default "F.Cu"), `marginMm` (default 0.1 —
+        the zone outline expanded around the pad-union bbox), `apply`
+        (default false = preview the outline only). The zone uses
+        thermal-relief connection mode by default; passing
+        ``connection="solid"`` switches to a direct bond (recommended
+        for current-carrying bridges where the thermal relief would
+        bottleneck current).
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            pad_a = params.get("padA")
+            pad_b = params.get("padB")
+            layer = params.get("layer", "F.Cu")
+            margin_mm = float(params.get("marginMm", 0.1))
+            apply_changes = params.get("apply", False)
+            connection = params.get("connection", "solid")  # "solid"|"thermal"
+
+            if not (pad_a and pad_b):
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": (
+                        "padA and padB are required, each as "
+                        "{ref: 'U4', pad: '2'}"
+                    ),
+                }
+            for label, p in (("padA", pad_a), ("padB", pad_b)):
+                if not (p.get("ref") and p.get("pad") is not None):
+                    return {
+                        "success": False,
+                        "message": "Missing parameters",
+                        "errorDetails": (
+                            f"{label} must include both ref and pad "
+                            f"(got {p!r})"
+                        ),
+                    }
+
+            layer_id = self.board.GetLayerID(layer)
+            if layer_id < 0:
+                return {
+                    "success": False,
+                    "message": "Invalid layer",
+                    "errorDetails": f"Layer '{layer}' does not exist",
+                }
+
+            SCALE = 1_000_000
+            margin_iu = int(margin_mm * SCALE)
+
+            footprints = {fp.GetReference(): fp for fp in self.board.GetFootprints()}
+
+            def _find_pad(ref: str, pad_num: str):
+                fp = footprints.get(ref)
+                if fp is None:
+                    return None, f"Footprint {ref!r} not found"
+                for pad in fp.Pads():
+                    if pad.GetNumber() == str(pad_num):
+                        return pad, None
+                return None, f"Pad {ref}.{pad_num} not found"
+
+            obj_a, err_a = _find_pad(pad_a["ref"], pad_a["pad"])
+            if err_a:
+                return {"success": False, "message": err_a}
+            obj_b, err_b = _find_pad(pad_b["ref"], pad_b["pad"])
+            if err_b:
+                return {"success": False, "message": err_b}
+
+            net_a = obj_a.GetNetname()
+            net_b = obj_b.GetNetname()
+            if net_a != net_b:
+                return {
+                    "success": False,
+                    "message": "Pads are on different nets",
+                    "errorDetails": (
+                        f"{pad_a['ref']}.{pad_a['pad']} is on "
+                        f"'{net_a}'; {pad_b['ref']}.{pad_b['pad']} is "
+                        f"on '{net_b}'. bridge_same_net_pins only "
+                        f"bonds pads that are already on the same net."
+                    ),
+                }
+            if not net_a:
+                return {
+                    "success": False,
+                    "message": "Pads have no net assignment",
+                }
+
+            # Compute union bbox of the two pads, expanded by margin.
+            bb_a = obj_a.GetBoundingBox()
+            bb_b = obj_b.GetBoundingBox()
+            left = min(bb_a.GetLeft(), bb_b.GetLeft()) - margin_iu
+            right = max(bb_a.GetRight(), bb_b.GetRight()) + margin_iu
+            top = min(bb_a.GetTop(), bb_b.GetTop()) - margin_iu
+            bottom = max(bb_a.GetBottom(), bb_b.GetBottom()) + margin_iu
+
+            outline_mm = [
+                {"x": left / SCALE, "y": top / SCALE},
+                {"x": right / SCALE, "y": top / SCALE},
+                {"x": right / SCALE, "y": bottom / SCALE},
+                {"x": left / SCALE, "y": bottom / SCALE},
+            ]
+            area_mm2 = ((right - left) / SCALE) * ((bottom - top) / SCALE)
+
+            if apply_changes:
+                zone = pcbnew.ZONE(self.board)
+                zone.SetLayer(layer_id)
+
+                nets_map = self.board.GetNetInfo().NetsByName()
+                if nets_map.has_key(net_a):
+                    zone.SetNet(nets_map[net_a])
+
+                # Solid bond for current-carrying bridges; thermal
+                # relief would defeat the whole point on a 4 A trunk.
+                if connection == "thermal":
+                    zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
+                else:
+                    zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
+
+                zone.SetFillMode(pcbnew.ZONE_FILL_MODE_POLYGONS)
+                # Higher priority than the board's main pour so this
+                # zone takes precedence over GND in any overlap area.
+                zone.SetAssignedPriority(100)
+
+                outline = zone.Outline()
+                outline.NewOutline()
+                outline.Append(pcbnew.VECTOR2I(left, top))
+                outline.Append(pcbnew.VECTOR2I(right, top))
+                outline.Append(pcbnew.VECTOR2I(right, bottom))
+                outline.Append(pcbnew.VECTOR2I(left, bottom))
+
+                self.board.Add(zone)
+
+            return {
+                "success": True,
+                "message": (
+                    f"{'Applied' if apply_changes else 'Proposed'} "
+                    f"same-net bridge zone on '{net_a}' covering "
+                    f"{pad_a['ref']}.{pad_a['pad']} ↔ "
+                    f"{pad_b['ref']}.{pad_b['pad']} "
+                    f"({area_mm2:.2f} mm² on {layer})"
+                ),
+                "applied": apply_changes,
+                "net": net_a,
+                "layer": layer,
+                "connection": connection,
+                "outline": outline_mm,
+                "areaMm2": round(area_mm2, 3),
+            }
+        except Exception as e:
+            logger.error(f"Error in bridge_same_net_pins: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to bridge same-net pins",
+                "errorDetails": str(e),
+            }
+
     def pair_via(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Propose (and optionally apply) a parallel partner via next to
         every existing via on the given net(s).

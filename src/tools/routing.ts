@@ -195,6 +195,32 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Bridge same-net pins tool
+  server.tool(
+    "bridge_same_net_pins",
+    "Create a small filled zone covering two same-net pads, replacing a thin sub-min-width trace that would violate the POWER netclass track-width rule. Standard practice for parallel power pins on IC datasheets (BAT+ pad doublings on TSSOP/QFN devices). Both pads must already be on the same net. The zone uses solid (full bond, no thermal-relief spokes) connection by default — appropriate for current-carrying bridges. Default preview; pass apply=true to commit.",
+    {
+      padA: z.object({
+        ref: z.string(),
+        pad: z.union([z.string(), z.number()]),
+      }).describe("First pad: {ref, pad}, e.g. {ref:\"U4\", pad:\"2\"}."),
+      padB: z.object({
+        ref: z.string(),
+        pad: z.union([z.string(), z.number()]),
+      }).describe("Second pad: {ref, pad}."),
+      layer: z.string().optional().describe("Copper layer (default 'F.Cu')."),
+      marginMm: z.number().optional().describe("Margin (mm) around the pad-union bbox (default 0.1)."),
+      connection: z.enum(["solid", "thermal"]).optional().describe("Pad connection mode (default 'solid')."),
+      apply: z.boolean().optional().describe("Commit the zone (default false = preview outline only)."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("bridge_same_net_pins", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // Pair via tool (high-current via doubling)
   server.tool(
     "pair_via",

@@ -46,6 +46,7 @@ PCB_MUTATORS_REQUIRING_AUTO_SAVE = {
     "add_via",
     "stitch_pour_vias",
     "pair_via",
+    "bridge_same_net_pins",
     "delete_trace",
     "dedupe_traces",
     "modify_trace",

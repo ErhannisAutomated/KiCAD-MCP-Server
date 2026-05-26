@@ -1000,6 +1000,70 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "bridge_same_net_pins",
+        "title": "Bridge Same-Net Pins With Zone",
+        "description": (
+            "Create a small filled zone covering two same-net pads, "
+            "replacing a thin sub-min-width trace that would violate "
+            "the POWER netclass track-width rule. The zone uses solid "
+            "(direct) connection by default — appropriate for "
+            "current-carrying bridges where thermal-relief spokes "
+            "would bottleneck. Both pads must already be on the same "
+            "net. Default preview; pass apply=true to commit."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "padA": {
+                    "type": "object",
+                    "description": "First pad: {ref, pad}.",
+                    "properties": {
+                        "ref": {"type": "string"},
+                        "pad": {"type": ["string", "number"]},
+                    },
+                    "required": ["ref", "pad"],
+                },
+                "padB": {
+                    "type": "object",
+                    "description": "Second pad: {ref, pad}.",
+                    "properties": {
+                        "ref": {"type": "string"},
+                        "pad": {"type": ["string", "number"]},
+                    },
+                    "required": ["ref", "pad"],
+                },
+                "layer": {
+                    "type": "string",
+                    "description": "Copper layer (default 'F.Cu').",
+                },
+                "marginMm": {
+                    "type": "number",
+                    "description": (
+                        "Margin in mm around the pad-union bbox "
+                        "(default 0.1)."
+                    ),
+                    "minimum": 0,
+                },
+                "connection": {
+                    "type": "string",
+                    "enum": ["solid", "thermal"],
+                    "description": (
+                        "Pad connection mode (default 'solid' — full "
+                        "bond, no thermal-relief spokes)."
+                    ),
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": (
+                        "Commit the zone (default false = preview "
+                        "outline only)."
+                    ),
+                },
+            },
+            "required": ["padA", "padB"],
+        },
+    },
+    {
         "name": "pair_via",
         "title": "Pair Via for High-Current Doubling",
         "description": (
