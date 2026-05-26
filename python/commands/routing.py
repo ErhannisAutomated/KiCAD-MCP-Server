@@ -1080,6 +1080,7 @@ class RoutingCommands:
             margin_mm = float(params.get("marginMm", 0.1))
             adjacency_factor = float(params.get("adjacencyFactor", 1.25))
             min_pin_dist_mm = float(params.get("minPinDistMm", 0.001))
+            absolute_max_dist_mm = float(params.get("absoluteMaxDistMm", 5.0))
             apply_changes = bool(params.get("apply", False))
             connection = params.get("connection", "solid")
 
@@ -1092,6 +1093,8 @@ class RoutingCommands:
             SCALE = 1_000_000
             margin_iu = int(margin_mm * SCALE)
             min_pin_dist_iu = int(min_pin_dist_mm * SCALE)
+            absolute_max_dist_iu = int(absolute_max_dist_mm * SCALE)
+            absolute_max_dist_sq = absolute_max_dist_iu * absolute_max_dist_iu
 
             net_filter_set = set(net_filter) if net_filter else None
             component_filter_set = (
@@ -1181,6 +1184,14 @@ class RoutingCommands:
                                 # Co-located pads: union them (a single
                                 # physical pad with multiple logical pads).
                                 union(i, j)
+                                continue
+                            # Absolute distance cap. Prevents the
+                            # "2-pads-on-opposite-corners" pathology:
+                            # with only 2 same-net pads, each is the
+                            # other's NN, so NN-based threshold always
+                            # accepts them. Cap rejects far-apart pairs
+                            # regardless of NN ratio.
+                            if d2 > absolute_max_dist_sq:
                                 continue
                             threshold = factor_sq * max(
                                 nn_dist_sq[i], nn_dist_sq[j]

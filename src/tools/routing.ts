@@ -231,6 +231,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
       marginMm: z.number().optional().describe("Margin (mm) around the pad-union bbox (default 0.1)."),
       adjacencyFactor: z.number().optional().describe("Adjacency threshold multiplier on nearest-neighbor distance (default 1.25)."),
       minPinDistMm: z.number().optional().describe("Minimum distance below which two pads are considered co-located, not adjacent (default 0.001)."),
+      absoluteMaxDistMm: z.number().optional().describe("Absolute distance cap (mm) for adjacency. Two pads farther than this are NOT adjacent regardless of NN-ratio. Prevents the 2-pads-on-opposite-corners pathology (e.g. cell holder pads on the same net). Default 5.0."),
       connection: z.enum(["solid", "thermal"]).optional().describe("Zone pad connection mode (default 'solid' for current-carrying)."),
       apply: z.boolean().optional().describe("Commit the zones (default false = preview)."),
     },
