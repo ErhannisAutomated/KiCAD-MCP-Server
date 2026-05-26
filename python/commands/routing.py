@@ -889,16 +889,21 @@ class RoutingCommands:
                 # class (default if no pattern matched).
                 target_net_names = set()
                 # NETINFO_LIST has no NetnamesList() in KiCAD 9 SWIG;
-                # iterate the NetsByName() map directly. Was previously
-                # wrapped in a try/except that silently swallowed the
-                # AttributeError, giving empty net sets every call.
+                # iterate NetsByName() directly. NETINFO_ITEM.GetNetClass()
+                # returns a bare SwigPyObject without type info — use
+                # GetNetClassName() for the name string. (Previously the
+                # whole block was in a silent try/except that swallowed
+                # both errors, giving empty net sets every call.)
                 try:
                     netinfo = self.board.GetNetInfo()
                     nbn = netinfo.NetsByName()
                     for key_wx in list(nbn.keys()):
                         n = nbn[key_wx]
-                        nc = n.GetNetClass()
-                        if nc is not None and nc.GetName() == net_class:
+                        try:
+                            nc_name = str(n.GetNetClassName())
+                        except Exception:
+                            continue
+                        if nc_name == net_class:
                             target_net_names.add(str(key_wx))
                 except Exception:
                     pass
@@ -1380,26 +1385,31 @@ class RoutingCommands:
             SCALE = 1_000_000
             min_clearance_iu = int(min_clearance * SCALE)
 
-            # 1. Identify nets in the high-current class. NETINFO_LIST
-            # has no NetnamesList() method in KiCAD 9; iterate the
-            # NetsByName() map directly.
+            # 1. Identify nets in the high-current class.
+            # NETINFO_ITEM.GetNetClass() returns a bare SwigPyObject in
+            # KiCAD 9 SWIG (no type info), so use GetNetClassName() for
+            # the name. For the netclass's width, ask NET_SETTINGS
+            # directly — that returns a properly typed NETCLASS.
             netinfo = self.board.GetNetInfo()
             nbn = netinfo.NetsByName()
+            net_settings = self.board.GetDesignSettings().m_NetSettings
             high_current_nets: set = set()
             target_width_iu = 0
             for key_wx in list(nbn.keys()):
                 net_name_str = str(key_wx)
                 n = nbn[key_wx]
-                nc = n.GetNetClass()
-                if nc is None:
+                try:
+                    nc_name = n.GetNetClassName()
+                except Exception:
                     continue
-                if nc.GetName() == high_current_class:
+                if str(nc_name) == high_current_class:
                     high_current_nets.add(net_name_str)
-                    if target_width_iu == 0:
-                        try:
-                            target_width_iu = int(nc.GetTrackWidth())
-                        except Exception:
-                            pass
+            if high_current_nets and net_settings.HasNetclass(high_current_class):
+                try:
+                    nc = net_settings.GetNetClassByName(high_current_class)
+                    target_width_iu = int(nc.GetTrackWidth())
+                except Exception:
+                    pass
 
             if explicit_width_mm:
                 target_width_iu = int(float(explicit_width_mm) * SCALE)
