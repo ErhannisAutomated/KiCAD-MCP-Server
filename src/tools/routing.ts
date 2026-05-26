@@ -221,6 +221,27 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Pin-zone same-net (proactive zone for contiguous same-net IC pins)
+  server.tool(
+    "pin_zone_same_net",
+    "Drop a single zone covering runs of contiguous same-net pins on an IC, **before** autoroute. Prevents the autorouter from bridging adjacent power pins with thin sub-min-width traces (which then violate POWER_4A's track_width DRC). Adjacency heuristic: for each pad, compute distance to all other same-net pads on the same footprint+layer; take the nearest-neighbor distance above `minPinDistMm` (avoids stacked-pad cases). Two pads are adjacent iff distance ≤ `adjacencyFactor` × max(NN-dist of A, NN-dist of B). At default factor 1.25, this naturally rejects pins on opposite sides of an IC body (distance >> pitch) while accepting corner-adjacent pins on a QFN (still ≈ pitch). Union-find clusters mutually-adjacent pads; each cluster of ≥2 gets a zone covering its pads + marginMm. Default preview; pass apply=true to commit.",
+    {
+      nets: z.array(z.string()).optional().describe("Optional net filter (default: all nets)."),
+      components: z.array(z.string()).optional().describe("Optional component-ref filter (default: all)."),
+      marginMm: z.number().optional().describe("Margin (mm) around the pad-union bbox (default 0.1)."),
+      adjacencyFactor: z.number().optional().describe("Adjacency threshold multiplier on nearest-neighbor distance (default 1.25)."),
+      minPinDistMm: z.number().optional().describe("Minimum distance below which two pads are considered co-located, not adjacent (default 0.001)."),
+      connection: z.enum(["solid", "thermal"]).optional().describe("Zone pad connection mode (default 'solid' for current-carrying)."),
+      apply: z.boolean().optional().describe("Commit the zones (default false = preview)."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("pin_zone_same_net", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // Widen return paths (thermal/IR-drop correctness for power-component GND stubs)
   server.tool(
     "widen_return_paths",

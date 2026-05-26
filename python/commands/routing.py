@@ -1037,6 +1037,236 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def pin_zone_same_net(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Proactively drop a zone covering runs of contiguous same-net
+        pins on an IC, **before** autorouting (#216).
+
+        Motivation: when a power IC has 2+ adjacent pins tied to the
+        same net (paired BAT+ on a buck-boost, multiple GND on a QFN
+        side), the autorouter's only option is a thin trace bridging
+        them — which then violates the POWER_4A track_width DRC rule
+        and has to be retroactively zone-bridged. Dropping the zone
+        before autoroute pins the bond into the design.
+
+        Adjacency heuristic (user-specified):
+          1. For each footprint, group pads by net.
+          2. Within each net group, compute pairwise distances. The
+             nearest-neighbor distance (NN-dist) of pin A is the
+             smallest distance to any same-net pin **above** a
+             min-threshold of ``minPinDistMm`` (default 0.001 mm).
+             The threshold rejects stacked-pad cases (multiple
+             logical pads at one physical pad location).
+          3. Two pins are adjacent iff their distance is
+             ≤ ``adjacencyFactor`` × max(NN-dist(A), NN-dist(B)).
+             At adjacencyFactor=1.25, this naturally rejects pins on
+             opposite sides of an IC body (distance >> pitch) while
+             accepting corner-adjacent pins on a QFN (still ≈ pitch).
+          4. Union-find to cluster mutually-adjacent pins; each
+             cluster of ≥2 pins gets one zone covering all its pads.
+
+        Output zone uses solid connection by default (current carrying
+        — thermal relief would defeat the bond's purpose).
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            net_filter = params.get("nets")
+            component_filter = params.get("components")
+            margin_mm = float(params.get("marginMm", 0.1))
+            adjacency_factor = float(params.get("adjacencyFactor", 1.25))
+            min_pin_dist_mm = float(params.get("minPinDistMm", 0.001))
+            apply_changes = bool(params.get("apply", False))
+            connection = params.get("connection", "solid")
+
+            if adjacency_factor <= 1.0:
+                return {
+                    "success": False,
+                    "message": "adjacencyFactor must be > 1.0",
+                }
+
+            SCALE = 1_000_000
+            margin_iu = int(margin_mm * SCALE)
+            min_pin_dist_iu = int(min_pin_dist_mm * SCALE)
+
+            net_filter_set = set(net_filter) if net_filter else None
+            component_filter_set = (
+                set(component_filter) if component_filter else None
+            )
+
+            proposed: List[Dict[str, Any]] = []
+            skipped_no_cluster: List[str] = []
+
+            nets_map = self.board.GetNetInfo().NetsByName()
+
+            for fp in self.board.GetFootprints():
+                fp_ref = fp.GetReference()
+                if component_filter_set and fp_ref not in component_filter_set:
+                    continue
+
+                # Group same-net pad clusters by (net, layer) — pads on
+                # different copper layers shouldn't be bonded by an
+                # F.Cu zone.
+                by_key: Dict[Tuple[str, int], List[Any]] = {}
+                for pad in fp.Pads():
+                    net_name = pad.GetNetname()
+                    if not net_name:
+                        continue
+                    if net_filter_set and net_name not in net_filter_set:
+                        continue
+                    # Skip pads that don't have copper on a routable
+                    # layer (NPTH with no copper, etc.).
+                    layerset = pad.GetLayerSet().Seq()
+                    for lid in (pcbnew.F_Cu, pcbnew.B_Cu):
+                        if lid in layerset:
+                            by_key.setdefault((net_name, lid), []).append(pad)
+
+                for (net_name, layer_id), pads in by_key.items():
+                    if len(pads) < 2:
+                        continue
+                    # Per-pad XY (IU) for distance math.
+                    xy = [(p.GetPosition().x, p.GetPosition().y) for p in pads]
+                    n = len(pads)
+
+                    # Pairwise distance squared.
+                    dist2 = [[0] * n for _ in range(n)]
+                    for i in range(n):
+                        xi, yi = xy[i]
+                        for j in range(i + 1, n):
+                            dx = xy[j][0] - xi
+                            dy = xy[j][1] - yi
+                            d2 = dx * dx + dy * dy
+                            dist2[i][j] = d2
+                            dist2[j][i] = d2
+
+                    # NN-dist per pad: smallest d above the threshold.
+                    min_pin_dist_sq = min_pin_dist_iu * min_pin_dist_iu
+                    nn_dist_sq = [0] * n
+                    for i in range(n):
+                        best = None
+                        for j in range(n):
+                            if i == j:
+                                continue
+                            d2 = dist2[i][j]
+                            if d2 <= min_pin_dist_sq:
+                                continue
+                            if best is None or d2 < best:
+                                best = d2
+                        nn_dist_sq[i] = best if best is not None else 0
+
+                    # Adjacency: distance(A,B)^2 <= (factor^2) * max(NN^2(A), NN^2(B))
+                    factor_sq = adjacency_factor * adjacency_factor
+                    # Union-find clusters of mutually-adjacent pins.
+                    parent = list(range(n))
+
+                    def find(x):
+                        while parent[x] != x:
+                            parent[x] = parent[parent[x]]
+                            x = parent[x]
+                        return x
+
+                    def union(a, b):
+                        ra, rb = find(a), find(b)
+                        if ra != rb:
+                            parent[ra] = rb
+
+                    for i in range(n):
+                        for j in range(i + 1, n):
+                            d2 = dist2[i][j]
+                            if d2 <= min_pin_dist_sq:
+                                # Co-located pads: union them (a single
+                                # physical pad with multiple logical pads).
+                                union(i, j)
+                                continue
+                            threshold = factor_sq * max(
+                                nn_dist_sq[i], nn_dist_sq[j]
+                            )
+                            if d2 <= threshold:
+                                union(i, j)
+
+                    # Group by cluster root.
+                    clusters: Dict[int, List[int]] = {}
+                    for i in range(n):
+                        clusters.setdefault(find(i), []).append(i)
+
+                    for cluster_pads in clusters.values():
+                        if len(cluster_pads) < 2:
+                            continue
+                        # Union bbox of all pads in cluster.
+                        bbs = [pads[i].GetBoundingBox() for i in cluster_pads]
+                        left = min(bb.GetLeft() for bb in bbs) - margin_iu
+                        right = max(bb.GetRight() for bb in bbs) + margin_iu
+                        top = min(bb.GetTop() for bb in bbs) - margin_iu
+                        bottom = max(bb.GetBottom() for bb in bbs) + margin_iu
+                        area_mm2 = (
+                            ((right - left) / SCALE)
+                            * ((bottom - top) / SCALE)
+                        )
+                        outline_mm = [
+                            {"x": left / SCALE, "y": top / SCALE},
+                            {"x": right / SCALE, "y": top / SCALE},
+                            {"x": right / SCALE, "y": bottom / SCALE},
+                            {"x": left / SCALE, "y": bottom / SCALE},
+                        ]
+                        proposed.append({
+                            "ref": fp_ref,
+                            "net": net_name,
+                            "layer": self.board.GetLayerName(layer_id),
+                            "pads": [pads[i].GetNumber() for i in cluster_pads],
+                            "areaMm2": round(area_mm2, 3),
+                            "outline": outline_mm,
+                            # Bounds (IU) — consumed at apply time.
+                            "_bounds": (left, right, top, bottom, layer_id, net_name),
+                        })
+
+            if apply_changes and proposed:
+                for entry in proposed:
+                    left, right, top, bottom, layer_id, net_name = entry["_bounds"]
+                    zone = pcbnew.ZONE(self.board)
+                    zone.SetLayer(layer_id)
+                    if nets_map.has_key(net_name):
+                        zone.SetNet(nets_map[net_name])
+                    if connection == "thermal":
+                        zone.SetPadConnection(pcbnew.ZONE_CONNECTION_THERMAL)
+                    else:
+                        zone.SetPadConnection(pcbnew.ZONE_CONNECTION_FULL)
+                    zone.SetFillMode(pcbnew.ZONE_FILL_MODE_POLYGONS)
+                    zone.SetAssignedPriority(100)
+                    outline = zone.Outline()
+                    outline.NewOutline()
+                    outline.Append(pcbnew.VECTOR2I(left, top))
+                    outline.Append(pcbnew.VECTOR2I(right, top))
+                    outline.Append(pcbnew.VECTOR2I(right, bottom))
+                    outline.Append(pcbnew.VECTOR2I(left, bottom))
+                    self.board.Add(zone)
+
+            # Strip internal _bounds before returning.
+            for entry in proposed:
+                entry.pop("_bounds", None)
+
+            return {
+                "success": True,
+                "message": (
+                    f"{'Applied' if apply_changes else 'Proposed'} "
+                    f"{len(proposed)} pin-zone(s) "
+                    f"(adjacencyFactor={adjacency_factor})"
+                ),
+                "applied": apply_changes,
+                "proposedCount": len(proposed),
+                "zones": proposed,
+            }
+        except Exception as e:
+            logger.error(f"Error in pin_zone_same_net: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to make pin-zone(s)",
+                "errorDetails": str(e),
+            }
+
     def via_orphan_pads(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Drop a via adjacent to every plane-net SMD pad (F.Cu/B.Cu)
         that isn't already connected to the plane (#213).
