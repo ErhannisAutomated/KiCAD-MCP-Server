@@ -221,6 +221,49 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Widen return paths (thermal/IR-drop correctness for power-component GND stubs)
+  server.tool(
+    "widen_return_paths",
+    "Widen the GND/return-net stubs on components that have at least one pad on a high-current netclass (default POWER_4A). The power-rail trace into the component is netclass-sized (1.5 mm), but the GND return is in Default (0.2 mm) — carrying the same current until it reaches the GND plane. This tool walks each return-net pad of every high-current component along same-net tracks, stopping at the first same-net via, and widens the stub to the netclass width. Clearance is checked per-segment via the swept-trace test (#177); segments that would short are skipped and reported. Optional pairedVias=true places an in-line partner via past the end-of-stub via for inductance symmetry. Default preview; pass apply=true to commit.",
+    {
+      netClass: z.string().optional().describe("Netclass identifying high-current components (default 'POWER_4A')."),
+      returnNets: z.array(z.string()).optional().describe("Nets to treat as return paths (default ['GND'])."),
+      width: z.number().optional().describe("Explicit target width mm (default: lookup the netClass track width)."),
+      minClearance: z.number().optional().describe("Minimum clearance vs foreign-net copper when widening (default 0.15)."),
+      pairedVias: z.boolean().optional().describe("Place an in-line partner via for each stub end-via (default false)."),
+      apply: z.boolean().optional().describe("Commit the widened widths (default false = preview)."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("widen_return_paths", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  // Via orphan pads (plane-net via-near-pad)
+  server.tool(
+    "via_orphan_pads",
+    "Drop a via adjacent to every F.Cu/B.Cu pad on a plane net (GND, BAT+, etc.) that isn't already connected to a same-net via or track. Necessary post-autoroute step because freerouting respects (type power) plane layers by NOT placing landing vias on them — orphan SMD pads stay floating relative to the inner-layer pour. Via-near-pad with a short stub trace; no via-in-pad, so no special manufacturing required. Tries the pad's outward direction first (perpendicular to the pin row on QFN/TSSOP perimeter pads), then the three other cardinals. First clearance-passing position wins; failing pads counted in skippedNoClearance. Default preview; pass apply=true to commit.",
+    {
+      net: z.string().describe("Plane net to via (e.g. 'GND', 'BAT+', 'V12_OUT')."),
+      layer: z.string().optional().describe("Which pad side to target: 'F.Cu', 'B.Cu', or 'both' (default 'F.Cu')."),
+      viaDiameter: z.number().optional().describe("Via outer diameter in mm (default 0.6)."),
+      viaDrill: z.number().optional().describe("Via drill diameter in mm (default 0.3)."),
+      viaOffset: z.number().optional().describe("Gap between pad edge and via edge in mm (default 0.6). Via center sits at pad_half + viaOffset + via_radius from the pad center."),
+      stubWidth: z.number().optional().describe("Width of the stub trace from pad center to via center in mm (default 0.25)."),
+      minClearance: z.number().optional().describe("Minimum gap in mm between the via edge and foreign-net copper on any layer (default 0.15)."),
+      apply: z.boolean().optional().describe("Commit the proposed vias and stubs (default false = preview)."),
+      maxVias: z.number().optional().describe("Safety cap on the number of proposed vias (default 200)."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("via_orphan_pads", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // Pair via tool (high-current via doubling)
   server.tool(
     "pair_via",

@@ -1028,6 +1028,618 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def via_orphan_pads(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Drop a via adjacent to every plane-net pad (F.Cu/B.Cu) that
+        isn't already connected to a same-net via or track (#213).
+
+        Why this exists: pcbnew exports the DSN with `(type power)` for
+        layers that host a plane pour (commit 3579223). Freerouting
+        respects that — it doesn't route signals through the plane —
+        but it also stops placing landing vias at SMD pads on the plane
+        net, so F.Cu GND pads stay floating relative to the In1.Cu GND
+        pour. The textbook fix is a via adjacent to each orphan pad
+        with a short stub trace; once placed, the pour absorbs the via
+        on its layer and the pad lands on the via via the stub.
+
+        Via-NEAR-pad, not via-IN-pad: the via center sits at `viaOffset`
+        mm beyond the pad's farthest edge in the chosen direction. No
+        special manufacturing required.
+
+        Algorithm:
+          1. Enumerate every pad on `net` that has copper on the target
+             layer (default F.Cu — pass `layer=B.Cu` or `layer=both`).
+          2. Skip pads with a same-net via within
+             `padBox + viaOffset + via_diameter` of the pad center —
+             those are already plane-connected. Track endpoints on the
+             same net inside the pad's bounding box also count.
+          3. For each orphan pad, try 4 cardinal directions (±x, ±y)
+             starting from the pad's outward direction (perimeter pads
+             of QFN/TSSOP know which way "outward" is). Pick the first
+             position that clears `minClearance` against foreign-net
+             copper on all layers.
+          4. Add the via + a short stub trace from pad center to the
+             via center on the pad's layer at `stubWidth` mm.
+
+        Default behaviour: preview (no mutations). Pass `apply=true` to
+        commit.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            net_name = params.get("net")
+            if not net_name:
+                return {
+                    "success": False,
+                    "message": "net is required",
+                }
+
+            layer_param = params.get("layer", "F.Cu")
+            via_diameter = float(params.get("viaDiameter", 0.6))
+            via_drill = float(params.get("viaDrill", 0.3))
+            via_offset = float(params.get("viaOffset", 0.6))
+            stub_width = float(params.get("stubWidth", 0.25))
+            min_clearance = float(params.get("minClearance", 0.15))
+            apply_changes = bool(params.get("apply", False))
+            max_vias = int(params.get("maxVias", 200))
+
+            SCALE = 1_000_000
+            via_diameter_iu = int(via_diameter * SCALE)
+            via_drill_iu = int(via_drill * SCALE)
+            via_offset_iu = int(via_offset * SCALE)
+            stub_width_iu = int(stub_width * SCALE)
+            min_clearance_iu = int(min_clearance * SCALE)
+
+            target_layers: List[int] = []
+            if layer_param == "F.Cu":
+                target_layers = [pcbnew.F_Cu]
+            elif layer_param == "B.Cu":
+                target_layers = [pcbnew.B_Cu]
+            elif layer_param == "both":
+                target_layers = [pcbnew.F_Cu, pcbnew.B_Cu]
+            else:
+                return {
+                    "success": False,
+                    "message": (
+                        f"layer must be 'F.Cu', 'B.Cu', or 'both' "
+                        f"(got '{layer_param}')"
+                    ),
+                }
+
+            # Pre-collect same-net vias and same-net tracks by endpoint.
+            # We use these for the "is this pad already covered" check.
+            same_net_via_xy: List[Tuple[int, int]] = []
+            same_net_track_xy: List[Tuple[int, int]] = []
+            for t in self.board.Tracks():
+                if t.GetNetname() != net_name:
+                    continue
+                if t.Type() == pcbnew.PCB_VIA_T:
+                    p = t.GetPosition()
+                    same_net_via_xy.append((p.x, p.y))
+                else:
+                    s, e = t.GetStart(), t.GetEnd()
+                    same_net_track_xy.append((s.x, s.y))
+                    same_net_track_xy.append((e.x, e.y))
+
+            # Collect candidate pads: on the right net, on F.Cu/B.Cu.
+            pad_records: List[Tuple[Any, Any, int]] = []  # (footprint, pad, layer)
+            for fp in self.board.GetFootprints():
+                for pad in fp.Pads():
+                    if pad.GetNetname() != net_name:
+                        continue
+                    pad_layerset = pad.GetLayerSet().Seq()
+                    for lid in target_layers:
+                        if lid in pad_layerset:
+                            pad_records.append((fp, pad, lid))
+                            break  # one record per pad even if both layers
+
+            proposed: List[Dict[str, Any]] = []
+            skipped_already_connected = 0
+            skipped_no_clearance = 0
+
+            for fp, pad, layer_id in pad_records:
+                if len(proposed) >= max_vias:
+                    break
+
+                pad_pos = pad.GetPosition()
+                pad_size = pad.GetSize()
+                # Pickup radius: longer of pad half-extent + offset + via radius
+                pickup = (
+                    max(pad_size.x, pad_size.y) // 2
+                    + via_offset_iu
+                    + via_diameter_iu // 2
+                )
+                pickup_sq = pickup * pickup
+
+                # Already connected? Same-net via within pickup OR
+                # same-net track endpoint within the pad's bbox.
+                already = False
+                for vx, vy in same_net_via_xy:
+                    ddx = vx - pad_pos.x
+                    ddy = vy - pad_pos.y
+                    if ddx * ddx + ddy * ddy <= pickup_sq:
+                        already = True
+                        break
+                if not already:
+                    half_x = pad_size.x // 2
+                    half_y = pad_size.y // 2
+                    pad_left = pad_pos.x - half_x
+                    pad_right = pad_pos.x + half_x
+                    pad_top = pad_pos.y - half_y
+                    pad_bottom = pad_pos.y + half_y
+                    for tx, ty in same_net_track_xy:
+                        if pad_left <= tx <= pad_right and pad_top <= ty <= pad_bottom:
+                            already = True
+                            break
+                if already:
+                    skipped_already_connected += 1
+                    continue
+
+                # Outward direction from footprint center → pad.
+                ox, oy = self._pad_outward_unit_vec(pad, fp)
+                # Distance from pad center to chosen via center along axis:
+                #   half-pad in that axis + via_offset + via_radius
+                # We try the outward direction first; if blocked, the 3
+                # other cardinals.
+                pad_half_x = pad_size.x // 2
+                pad_half_y = pad_size.y // 2
+                via_radius_iu = via_diameter_iu // 2
+
+                # Quantise outward to the dominant axis for stub geometry,
+                # but still try all four cardinals in priority order.
+                if abs(ox) >= abs(oy):
+                    primary = (1 if ox >= 0 else -1, 0)
+                    secondary = (0, 1 if oy >= 0 else -1)
+                    cardinals = [
+                        primary,
+                        secondary,
+                        (-primary[0], 0),
+                        (0, -secondary[1]),
+                    ]
+                else:
+                    primary = (0, 1 if oy >= 0 else -1)
+                    secondary = (1 if ox >= 0 else -1, 0)
+                    cardinals = [
+                        primary,
+                        secondary,
+                        (0, -primary[1]),
+                        (-secondary[0], 0),
+                    ]
+
+                chosen: Optional[Tuple[int, int]] = None
+                for dx, dy in cardinals:
+                    # Offset from pad center along this axis: half-pad
+                    # in the direction + via_offset + via_radius.
+                    if dx != 0:
+                        cx = pad_pos.x + dx * (
+                            pad_half_x + via_offset_iu + via_radius_iu
+                        )
+                        cy = pad_pos.y
+                    else:
+                        cx = pad_pos.x
+                        cy = pad_pos.y + dy * (
+                            pad_half_y + via_offset_iu + via_radius_iu
+                        )
+                    cand = pcbnew.VECTOR2I(cx, cy)
+                    violations = self._via_clearance_violations(
+                        cand, via_diameter_iu, net_name, min_clearance_iu
+                    )
+                    if violations:
+                        continue
+                    chosen = (cx, cy)
+                    break
+
+                if chosen is None:
+                    skipped_no_clearance += 1
+                    continue
+
+                proposed.append({
+                    "x": chosen[0] / SCALE,
+                    "y": chosen[1] / SCALE,
+                    "unit": "mm",
+                    "padRef": fp.GetReference(),
+                    "padNum": pad.GetNumber(),
+                    "padLayer": self.board.GetLayerName(layer_id),
+                    "stubStart": {
+                        "x": pad_pos.x / SCALE,
+                        "y": pad_pos.y / SCALE,
+                    },
+                    "stubEnd": {
+                        "x": chosen[0] / SCALE,
+                        "y": chosen[1] / SCALE,
+                    },
+                })
+                # Track the placed via so subsequent pads see it.
+                same_net_via_xy.append(chosen)
+
+            if apply_changes and proposed:
+                nets_map = self.board.GetNetInfo().NetsByName()
+                net_obj = (
+                    nets_map[net_name] if nets_map.has_key(net_name) else None
+                )
+                for entry in proposed:
+                    via = pcbnew.PCB_VIA(self.board)
+                    via.SetPosition(
+                        pcbnew.VECTOR2I(
+                            int(entry["x"] * SCALE),
+                            int(entry["y"] * SCALE),
+                        )
+                    )
+                    via.SetWidth(via_diameter_iu)
+                    via.SetDrill(via_drill_iu)
+                    via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+                    if net_obj is not None:
+                        via.SetNet(net_obj)
+                    self.board.Add(via)
+
+                    # Stub trace on the pad's layer.
+                    layer_id = self.board.GetLayerID(entry["padLayer"])
+                    track = pcbnew.PCB_TRACK(self.board)
+                    track.SetStart(
+                        pcbnew.VECTOR2I(
+                            int(entry["stubStart"]["x"] * SCALE),
+                            int(entry["stubStart"]["y"] * SCALE),
+                        )
+                    )
+                    track.SetEnd(
+                        pcbnew.VECTOR2I(
+                            int(entry["stubEnd"]["x"] * SCALE),
+                            int(entry["stubEnd"]["y"] * SCALE),
+                        )
+                    )
+                    track.SetWidth(stub_width_iu)
+                    track.SetLayer(layer_id)
+                    if net_obj is not None:
+                        track.SetNet(net_obj)
+                    self.board.Add(track)
+
+            return {
+                "success": True,
+                "message": (
+                    f"{'Applied' if apply_changes else 'Proposed'} "
+                    f"{len(proposed)} via(s) for '{net_name}' "
+                    f"(skipped {skipped_already_connected} already "
+                    f"connected, {skipped_no_clearance} no clearance)"
+                ),
+                "applied": apply_changes,
+                "candidateCount": len(pad_records),
+                "proposedCount": len(proposed),
+                "skippedAlreadyConnected": skipped_already_connected,
+                "skippedNoClearance": skipped_no_clearance,
+                "positions": proposed,
+            }
+        except Exception as e:
+            logger.error(f"Error in via_orphan_pads: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to via orphan pads",
+                "errorDetails": str(e),
+            }
+
+    def widen_return_paths(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Beef up GND/return-net stubs near high-current components (#214).
+
+        On a board where power-rail nets are wide (POWER_4A trace
+        1.5 mm) but the return current shares the same component pads,
+        the GND/return stubs from those component pads default to the
+        narrow Default-netclass width (0.2 mm). Until the return
+        current reaches the GND plane via, that 0.2 mm trace is
+        carrying the same current as the 1.5 mm power-rail trace on
+        the other side — a thermal and IR-drop liability.
+
+        Algorithm:
+          1. Find all nets belonging to `netClass` (default POWER_4A).
+          2. Find all footprints with at least one pad on those nets —
+             these are "high-current components."
+          3. For each such footprint, walk each of its return-net pads
+             (default GND) along same-net tracks until hitting a
+             same-net via (BFS, stops at vias). The visited tracks are
+             the "return stub."
+          4. For each stub segment, would widening to the target width
+             violate `minClearance` against foreign-net copper on the
+             same layer? `_iter_route_obstacles` does this swept-trace
+             check (#177). Skip segments that fail.
+          5. With `apply=true`, set the widened width on each cleared
+             segment.
+
+        Optional `pairedVias=true`: for each stub that reaches a via,
+        propose a partner via in-line (along the stub direction) with
+        a half-stub-length offset. Reuses the cardinal-offset logic
+        from `pair_via` but constrains the direction to along the
+        stub for inductance-symmetry.
+
+        Default behaviour: preview (no mutations). Pass apply=true to
+        commit.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            high_current_class = params.get("netClass", "POWER_4A")
+            return_nets = params.get("returnNets", ["GND"])
+            if isinstance(return_nets, str):
+                return_nets = [return_nets]
+            return_nets_set = set(return_nets)
+            explicit_width_mm = params.get("width")
+            min_clearance = float(params.get("minClearance", 0.15))
+            apply_changes = bool(params.get("apply", False))
+            paired_vias = bool(params.get("pairedVias", False))
+
+            SCALE = 1_000_000
+            min_clearance_iu = int(min_clearance * SCALE)
+
+            # 1. Identify nets in the high-current class.
+            netinfo = self.board.GetNetInfo()
+            nbn = netinfo.NetsByName()
+            high_current_nets: set = set()
+            target_width_iu = 0
+            for net_name in netinfo.NetnamesList():
+                n = nbn[net_name]
+                nc = n.GetNetClass()
+                if nc is None:
+                    continue
+                if nc.GetName() == high_current_class:
+                    high_current_nets.add(net_name)
+                    if target_width_iu == 0:
+                        try:
+                            target_width_iu = int(nc.GetTrackWidth())
+                        except Exception:
+                            pass
+
+            if explicit_width_mm:
+                target_width_iu = int(float(explicit_width_mm) * SCALE)
+
+            if not high_current_nets:
+                return {
+                    "success": False,
+                    "message": (
+                        f"No nets matched netClass='{high_current_class}'. "
+                        f"Pass `width` explicitly if you want to widen "
+                        f"return stubs without a netclass anchor."
+                    ),
+                }
+            if target_width_iu <= 0:
+                return {
+                    "success": False,
+                    "message": (
+                        f"Could not resolve target width — netclass "
+                        f"'{high_current_class}' has no track width and no "
+                        f"explicit `width` parameter was given."
+                    ),
+                }
+
+            # 2. Find components with at least one pad on a high-current net.
+            target_fps: List[Any] = []
+            for fp in self.board.GetFootprints():
+                for pad in fp.Pads():
+                    if pad.GetNetname() in high_current_nets:
+                        target_fps.append(fp)
+                        break
+
+            # 3. For each target footprint, walk return-net stubs.
+            widened: List[Dict[str, Any]] = []
+            skipped_no_clearance: List[Dict[str, Any]] = []
+            skipped_already_wide: int = 0
+            via_partners: List[Dict[str, Any]] = []
+
+            # Pre-index same-net items for fast lookup
+            tracks_by_net: Dict[str, List[Any]] = {}
+            vias_by_net: Dict[str, List[Any]] = {}
+            for t in self.board.Tracks():
+                nm = t.GetNetname()
+                if t.Type() == pcbnew.PCB_VIA_T:
+                    vias_by_net.setdefault(nm, []).append(t)
+                else:
+                    tracks_by_net.setdefault(nm, []).append(t)
+
+            def _point_near(ax, ay, bx, by, tol=200) -> bool:
+                """200 nm = 0.2 µm — generous endpoint match tolerance."""
+                return abs(ax - bx) <= tol and abs(ay - by) <= tol
+
+            for fp in target_fps:
+                for pad in fp.Pads():
+                    net_name = pad.GetNetname()
+                    if net_name not in return_nets_set:
+                        continue
+
+                    pad_pos = pad.GetPosition()
+                    pad_size = pad.GetSize()
+                    half_x = pad_size.x // 2
+                    half_y = pad_size.y // 2
+                    pad_left = pad_pos.x - half_x
+                    pad_right = pad_pos.x + half_x
+                    pad_top = pad_pos.y - half_y
+                    pad_bottom = pad_pos.y + half_y
+
+                    def _in_pad(x, y) -> bool:
+                        return (
+                            pad_left <= x <= pad_right
+                            and pad_top <= y <= pad_bottom
+                        )
+
+                    # Walk same-net tracks from the pad. BFS terminates
+                    # at same-net vias. Each track touched is in the
+                    # stub.
+                    net_tracks = tracks_by_net.get(net_name, [])
+                    net_vias = vias_by_net.get(net_name, [])
+                    seen_uuids: set = set()
+                    frontier: List[Tuple[Any, Any]] = []  # (track, far_point)
+                    stub_tracks: List[Any] = []
+
+                    # Seed frontier with tracks touching the pad.
+                    for t in net_tracks:
+                        s = t.GetStart()
+                        e = t.GetEnd()
+                        uuid = str(t.m_Uuid.AsString())
+                        if uuid in seen_uuids:
+                            continue
+                        if _in_pad(s.x, s.y):
+                            seen_uuids.add(uuid)
+                            stub_tracks.append(t)
+                            frontier.append((t, e))
+                        elif _in_pad(e.x, e.y):
+                            seen_uuids.add(uuid)
+                            stub_tracks.append(t)
+                            frontier.append((t, s))
+
+                    # BFS forward until vias.
+                    while frontier:
+                        _, far = frontier.pop(0)
+                        # Stop if a same-net via lies at `far`.
+                        hit_via = False
+                        for v in net_vias:
+                            vp = v.GetPosition()
+                            if _point_near(vp.x, vp.y, far.x, far.y):
+                                hit_via = True
+                                if paired_vias:
+                                    via_partners.append({
+                                        "via": v,
+                                        "stubEndpoint": (far.x, far.y),
+                                        "pad": pad,
+                                    })
+                                break
+                        if hit_via:
+                            continue
+                        # Otherwise continue along any same-net tracks.
+                        for t in net_tracks:
+                            uuid = str(t.m_Uuid.AsString())
+                            if uuid in seen_uuids:
+                                continue
+                            s = t.GetStart()
+                            e = t.GetEnd()
+                            if _point_near(s.x, s.y, far.x, far.y):
+                                seen_uuids.add(uuid)
+                                stub_tracks.append(t)
+                                frontier.append((t, e))
+                            elif _point_near(e.x, e.y, far.x, far.y):
+                                seen_uuids.add(uuid)
+                                stub_tracks.append(t)
+                                frontier.append((t, s))
+
+                    # 4. Clearance-check each stub segment for widening.
+                    for t in stub_tracks:
+                        current_w = t.GetWidth()
+                        if current_w >= target_width_iu:
+                            skipped_already_wide += 1
+                            continue
+                        obstacles = list(self._iter_route_obstacles(
+                            t.GetStart(),
+                            t.GetEnd(),
+                            t.GetLayer(),
+                            net_name,
+                            target_width_iu,
+                            min_clearance_iu,
+                        ))
+                        if obstacles:
+                            skipped_no_clearance.append({
+                                "uuid": str(t.m_Uuid.AsString()),
+                                "padRef": fp.GetReference(),
+                                "obstacleCount": len(obstacles),
+                            })
+                            continue
+                        widened.append({
+                            "uuid": str(t.m_Uuid.AsString()),
+                            "padRef": fp.GetReference(),
+                            "padNum": pad.GetNumber(),
+                            "currentWidth": current_w / SCALE,
+                            "newWidth": target_width_iu / SCALE,
+                            "layer": self.board.GetLayerName(t.GetLayer()),
+                            "track": t,  # not serialised; consumed at apply time
+                        })
+
+            # 5. Apply.
+            if apply_changes and widened:
+                for entry in widened:
+                    entry["track"].SetWidth(target_width_iu)
+
+            # 6. Optional paired vias (in-line, along stub direction).
+            paired_via_results: List[Dict[str, Any]] = []
+            if paired_vias and via_partners and apply_changes:
+                nets_map = nbn
+                for vp in via_partners:
+                    v = vp["via"]
+                    sx, sy = vp["stubEndpoint"]
+                    vpos = v.GetPosition()
+                    # In-line direction = unit vector FROM stub endpoint
+                    # TOWARDS via. (Stub endpoint coincides with via; we
+                    # use the pad center → via direction as the axis.)
+                    pad = vp["pad"]
+                    pp = pad.GetPosition()
+                    dx = vpos.x - pp.x
+                    dy = vpos.y - pp.y
+                    mag = (dx * dx + dy * dy) ** 0.5
+                    if mag < 1.0:
+                        continue
+                    ux = dx / mag
+                    uy = dy / mag
+                    try:
+                        v_w = v.GetWidth(pcbnew.F_Cu)
+                    except TypeError:
+                        v_w = v.GetWidth()
+                    # Partner sits at via_center + offset along axis,
+                    # where offset = via_diameter + 0.4 mm gap.
+                    offset_iu = int(v_w + 0.4 * SCALE)
+                    cx = int(vpos.x + ux * offset_iu)
+                    cy = int(vpos.y + uy * offset_iu)
+                    cand = pcbnew.VECTOR2I(cx, cy)
+                    net_name = v.GetNetname()
+                    if self._via_clearance_violations(
+                        cand, v_w, net_name, min_clearance_iu
+                    ):
+                        continue
+                    new_via = pcbnew.PCB_VIA(self.board)
+                    new_via.SetPosition(cand)
+                    new_via.SetWidth(v_w)
+                    new_via.SetDrill(v.GetDrill())
+                    new_via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+                    if nets_map.has_key(net_name):
+                        new_via.SetNet(nets_map[net_name])
+                    self.board.Add(new_via)
+                    paired_via_results.append({
+                        "x": cx / SCALE,
+                        "y": cy / SCALE,
+                        "net": net_name,
+                    })
+
+            # Strip the live `track` references before returning so
+            # `widened` can be JSON-serialised.
+            for entry in widened:
+                entry.pop("track", None)
+
+            return {
+                "success": True,
+                "message": (
+                    f"{'Widened' if apply_changes else 'Would widen'} "
+                    f"{len(widened)} segment(s) to "
+                    f"{target_width_iu / SCALE:.2f} mm "
+                    f"(matched {len(target_fps)} component(s), "
+                    f"{len(skipped_no_clearance)} blocked by clearance, "
+                    f"{skipped_already_wide} already at target)"
+                ),
+                "applied": apply_changes,
+                "targetWidthMm": target_width_iu / SCALE,
+                "componentsMatched": len(target_fps),
+                "widenedSegments": widened,
+                "skippedNoClearance": skipped_no_clearance,
+                "skippedAlreadyWide": skipped_already_wide,
+                "pairedVias": paired_via_results,
+            }
+        except Exception as e:
+            logger.error(f"Error in widen_return_paths: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to widen return paths",
+                "errorDetails": str(e),
+            }
+
     def stitch_pour_vias(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Propose (and optionally apply) a grid of stitching vias on a
         copper pour net (#176).

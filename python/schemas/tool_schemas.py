@@ -1204,6 +1204,142 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "widen_return_paths",
+        "title": "Widen Return Paths",
+        "description": (
+            "Widen the GND/return-net stubs of high-current components. "
+            "Walks each return-net pad's traces along the same net until "
+            "hitting a same-net via, then widens cleared segments to the "
+            "high-current netclass width. Each candidate is clearance-"
+            "checked via swept-trace test; segments that would short are "
+            "skipped. Optional pairedVias adds an in-line partner past "
+            "each stub's terminating via."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "netClass": {
+                    "type": "string",
+                    "description": (
+                        "Netclass identifying high-current components "
+                        "(default 'POWER_4A')."
+                    ),
+                },
+                "returnNets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Nets to widen (default ['GND'])."
+                    ),
+                },
+                "width": {
+                    "type": "number",
+                    "description": (
+                        "Explicit target width mm. Default: netclass "
+                        "track width."
+                    ),
+                    "minimum": 0.05,
+                },
+                "minClearance": {
+                    "type": "number",
+                    "description": (
+                        "Minimum clearance mm against foreign-net copper "
+                        "(default 0.15)."
+                    ),
+                    "minimum": 0,
+                },
+                "pairedVias": {
+                    "type": "boolean",
+                    "description": (
+                        "Place an in-line partner via past each stub's "
+                        "terminating via (default false)."
+                    ),
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": (
+                        "Commit the widening (default false = preview)."
+                    ),
+                },
+            },
+        },
+    },
+    {
+        "name": "via_orphan_pads",
+        "title": "Via Orphan Pads",
+        "description": (
+            "Drop a via adjacent to every F.Cu/B.Cu pad on a plane net "
+            "(GND, BAT+, etc.) that isn't already connected to a same-net "
+            "via or track. Post-autoroute step: freerouting respects "
+            "(type power) plane layers by NOT placing landing vias on "
+            "them, leaving SMD pads floating relative to the inner pour. "
+            "Via-near-pad with a short stub trace; no via-in-pad."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "net": {
+                    "type": "string",
+                    "description": (
+                        "Plane net to via (e.g. 'GND', 'BAT+')."
+                    ),
+                },
+                "layer": {
+                    "type": "string",
+                    "description": (
+                        "Which pad side to target: 'F.Cu', 'B.Cu', or "
+                        "'both' (default 'F.Cu')."
+                    ),
+                },
+                "viaDiameter": {
+                    "type": "number",
+                    "description": "Via outer diameter mm (default 0.6).",
+                    "minimum": 0.1,
+                },
+                "viaDrill": {
+                    "type": "number",
+                    "description": "Via drill mm (default 0.3).",
+                    "minimum": 0.1,
+                },
+                "viaOffset": {
+                    "type": "number",
+                    "description": (
+                        "Gap between pad edge and via edge mm (default 0.6)."
+                    ),
+                    "minimum": 0,
+                },
+                "stubWidth": {
+                    "type": "number",
+                    "description": (
+                        "Width of stub trace from pad to via mm (default "
+                        "0.25)."
+                    ),
+                    "minimum": 0.05,
+                },
+                "minClearance": {
+                    "type": "number",
+                    "description": (
+                        "Minimum gap mm between via edge and foreign-net "
+                        "copper (default 0.15)."
+                    ),
+                    "minimum": 0,
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": (
+                        "Commit the vias (default false = preview)."
+                    ),
+                },
+                "maxVias": {
+                    "type": "number",
+                    "description": "Cap on proposed vias (default 200).",
+                    "minimum": 1,
+                },
+            },
+            "required": ["net"],
+        },
+    },
+    {
         "name": "dedupe_traces",
         "title": "Dedupe Traces",
         "description": (
