@@ -120,6 +120,70 @@ PREFERRED tool for pad-to-pad routing. Looks up pad positions automatically, det
 
 ## Vias (1 tool)
 
+### pair_via
+
+Propose (and optionally apply) a parallel partner via next to every existing via on the given net(s). Doubles current-carrying capacity and ~halves inductance for high-current power vias — needed because freerouting's DSN class-rule via spec can only pick a single via diameter per class, so high-current vias have always been hand-paired in past sessions.
+
+**Parameters:**
+
+| Parameter     | Type    | Required | Description                                          |
+| ------------- | ------- | -------- | ---------------------------------------------------- |
+| nets          | array   | No       | Explicit net list (e.g. `["BAT+","BAT-"]`). Overrides `netClass` when set. |
+| netClass      | string  | No       | Netclass name to filter by (default `"POWER_4A"`). Ignored if `nets` is set. |
+| offset        | number  | No       | Distance (mm) from the parent via center to the partner via (default 1.0). |
+| minClearance  | number  | No       | Minimum gap (mm) between the partner via edge and foreign-net copper (default 0.2). |
+| viaDiameter   | number  | No       | Partner via diameter (mm). Defaults to the parent via's. |
+| viaDrill      | number  | No       | Partner via drill (mm). Defaults to the parent via's. |
+| apply         | boolean | No       | Commit the proposed partner vias (default `false` = preview). |
+| maxPairs      | number  | No       | Safety cap on partner-via count (default 200).       |
+
+**Usage Notes:**
+
+- For each parent via, tries the 4 ±x/±y offset positions; the first that clears `minClearance` from foreign-net copper AND isn't within `offset × 0.5` of an existing same-net via wins.
+- Vias with no clear position are reported as `skippedNoClearance`.
+- Re-running the tool is safe — dedup logic prevents stacking the partner of one via on top of another.
+
+**Example:**
+
+```json
+{ "netClass": "POWER_4A", "offset": 1.0, "apply": true }
+```
+
+---
+
+### bridge_same_net_pins
+
+Create a small filled zone covering two same-net pads, replacing a thin sub-min-width trace that would violate the POWER netclass track-width rule. Standard practice for parallel power pins on IC datasheets (BAT+ pad doublings on TSSOP / QFN devices) — the zone bonds the pins with solid copper that isn't subject to `track_width` DRC.
+
+**Parameters:**
+
+| Parameter   | Type    | Required | Description                                          |
+| ----------- | ------- | -------- | ---------------------------------------------------- |
+| padA        | object  | Yes      | First pad: `{ref:"U4", pad:"2"}`.                    |
+| padB        | object  | Yes      | Second pad: `{ref:"U4", pad:"3"}`.                   |
+| layer       | string  | No       | Copper layer (default `"F.Cu"`).                     |
+| marginMm    | number  | No       | Margin around the pad-union bbox (default 0.1 mm).   |
+| connection  | string  | No       | `"solid"` (default; full bond, no relief spokes) or `"thermal"`. |
+| apply       | boolean | No       | Commit the zone (default `false` = preview outline). |
+
+**Usage Notes:**
+
+- Both pads must already be on the same net — refuses otherwise with a clear error pointing at the mismatched assignment.
+- Default `solid` connection is appropriate for current-carrying bridges where thermal-relief spokes would bottleneck. `thermal` for low-current cases where relief is desired.
+- Zone priority is 100 (above the board's main pour) so it takes precedence in any overlap area.
+
+**Example:**
+
+```json
+{
+  "padA": {"ref": "U4", "pad": "2"},
+  "padB": {"ref": "U4", "pad": "3"},
+  "apply": true
+}
+```
+
+---
+
 ### stitch_pour_vias
 
 Propose (and optionally apply) a grid of stitching vias on a copper pour net. Each candidate must sit inside a zone outline on the net, clear `minClearance` from any foreign-net copper on any layer, and not duplicate an existing same-net via. Through-via, F.Cu ↔ B.Cu.

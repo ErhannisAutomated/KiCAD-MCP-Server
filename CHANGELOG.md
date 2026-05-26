@@ -4,6 +4,82 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### bridge_same_net_pins MCP tool (develop, 2026-05-26)
+
+New tool that creates a small filled zone covering two same-net pads
+to replace a thin sub-min-width track. Standard practice for parallel
+power pins on IC datasheets (BAT+ doublings on TSSOP/QFN devices) —
+the zone bonds the pins with solid copper that isn't subject to the
+track_width DRC rule. Default connection mode is `solid` (full bond)
+so the zone actually carries current; `thermal` mode available for
+the cases where relief spokes are wanted. Required: padA + padB
+(both as `{ref, pad}`); refuses if the pads aren't already on the
+same net. Default preview (returns outline coords + area); pass
+`apply=true` to commit. Registered in `_BOARD_MUTATING_COMMANDS`.
+4 unit + 4 real-pcbnew integration tests.
+
+### pair_via MCP tool for high-current via doubling (develop, 2026-05-26)
+
+New tool that drops a parallel partner via next to every existing via
+on the given net(s). Doubles current-carrying capacity and ~halves
+inductance — needed because freerouting's DSN class-rule via spec
+only takes a single via per class, so high-current vias have always
+been hand-paired (user did this manually on BAT1 in past sessions).
+
+Default filter: `netClass="POWER_4A"` (also accepts explicit
+`nets=["BAT+", …]`). For each parent via, tries the four ±x/±y
+offsets at `offset` mm (default 1.0) and picks the first that clears
+`minClearance` (default 0.2 mm) from foreign-net copper AND isn't
+within `offset × 0.5` of another same-net via. Skipped vias are
+reported as `skippedNoClearance`. Default preview; `apply=true`
+commits.
+
+### verify_netclass_patterns MCP tool + autoroute pre-flight (develop, 2026-05-26)
+
+Mitigation for the recurring concern that KiCAD's GUI may silently
+strip `netclass_patterns` entries on save when normalising the
+project file across version upgrades. Power_module hit exactly this:
+commit `14a143a` lost `CELL1_TOP` / `CELL2_TOP` → `POWER_4A`
+patterns, falling the 4 A cell-stack traces back to Default 0.2 mm.
+
+This tool stores the expected pattern set in a namespaced
+`mcp_expected_netclass_patterns` section that KiCAD's GUI leaves
+alone, then compares the live `net_settings.netclass_patterns`
+against it. First call bootstraps the expected from the current
+state (no drift reported). Subsequent calls report missing / extra;
+pass `restore=true` to re-add missing patterns. `Restore` is additive
+only — it never strips intentional new additions.
+
+Autoroute runs the verify as a pre-flight (report-only) and surfaces
+drift in `netclassPatternDrift` on its response.  10 unit tests
+(bootstrap idempotence, missing / extra / no-drift detection,
+restore additivity, missing-file + corrupt-JSON edge cases).
+
+### Tag plane layers as (type power) in DSN export (develop, 2026-05-26)
+
+pcbnew's `ExportSpecctraDSN` always marks every copper layer as
+`(type signal)` even when the layer is a continuous GND/PWR pour
+declared via `(plane NET (polygon LAYER …))`. Freerouting then
+treats those layers as routable and routes long-distance nets
+straight through the pour — carving up the plane and ruining
+return-current paths.
+
+Root-cause discovery for the power_module autoroute issue: all BAT1
+cell-terminal traces ended up on In1.Cu (GND) even when their pads
+were both on B.Cu and a straight B.Cu shot was geometrically
+possible.  The aggregate `F.Cu 509 / B.Cu 36 / In2.Cu 30 / In1.Cu
+18` segment counts showed the GND-last layer-order hint *did*
+partially work, but freerouting still favoured "uncluttered" inner
+layers for long-haul nets.
+
+Fix: post-process the DSN to flip every layer hosting a `(plane …)`
+declaration from `(type signal)` to `(type power)`. New helper
+`_rewrite_dsn_plane_layer_types(dsn_text)` + wired into both
+`autoroute` and `export_dsn` after the existing layer-order rewrite.
+Returns the list of flipped layers in `planeLayersFlippedToPower`.
+5 unit tests covering flipping, no-planes no-op, content
+preservation, idempotence, and selective flipping.
+
 ### analyze_congestion layer filter (develop, 2026-05-26)
 
 `analyze_congestion` gains an optional `layer` parameter — when set to

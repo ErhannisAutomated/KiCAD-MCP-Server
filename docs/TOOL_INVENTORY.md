@@ -97,6 +97,9 @@ _Source: `src/tools/routing.ts`_
 | `find_via_lane`           | Propose via-jumper route around foreign-net blockers | Additional       |
 | `check_route_segment`     | Pre-flight obstacle check for a candidate segment    | Additional       |
 | `stitch_pour_vias`        | Propose grid of stitching vias on a pour net         | Additional       |
+| `pair_via`                | Drop a parallel partner via on high-current power vias | Additional     |
+| `bridge_same_net_pins`    | Bridge two same-net IC pads with a small filled zone | Additional       |
+| `verify_netclass_patterns`| Detect / restore netclass_patterns stripped by KiCAD GUI saves | Additional |
 | `dedupe_traces`           | Remove duplicate tracks / vias (e.g. autoroute reimports) | Additional   |
 | `copy_routing_pattern`    | Copy routing from source to target component groups  | Additional       |
 
