@@ -1129,8 +1129,9 @@ class RoutingCommands:
                 p = t.GetPosition()
                 existing_vias_xy.append((p.x, p.y))
 
-            # Inside-zone candidates are tested against the zone
-            # outline (not the filled polygon).  Two reasons:
+            # Inside-zone candidates are tested with a point-in-polygon
+            # check against the zone outline (not the filled polygon).
+            # Two reasons:
             #   1. ZONE_FILLER.Fill() has known SWIG segfault risk
             #      (see refill_zones notes); we don't want to depend
             #      on the fill being computed at call time.
@@ -1139,6 +1140,12 @@ class RoutingCommands:
             #      checked separately by `_via_clearance_violations`
             #      below. The outline check + explicit clearance is
             #      equivalent and more robust.
+            #
+            # NOTE: ZONE.HitTest(point) is a *graphical* hit test —
+            # returns True only when the point is on or very close to
+            # the polygon boundary, not when it's contained. We use
+            # SHAPE_POLY_SET.Contains() for actual containment.
+            outlines = [z.Outline() for z in zones_on_net]
 
             proposed = []
             skipped_outside = 0
@@ -1157,9 +1164,9 @@ class RoutingCommands:
 
                     # Inside any zone outline on the net?
                     inside = False
-                    for z in zones_on_net:
+                    for outline in outlines:
                         try:
-                            if z.HitTest(pos):
+                            if outline.Contains(pos):
                                 inside = True
                                 break
                         except Exception:

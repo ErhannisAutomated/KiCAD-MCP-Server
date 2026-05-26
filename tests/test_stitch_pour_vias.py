@@ -128,6 +128,38 @@ class TestStitchPourViasOnRealBoard:
             assert 0 <= p["x"] <= 40, p
             assert 0 <= p["y"] <= 30, p
 
+    def test_interior_grid_points_get_proposed(self):
+        """Regression for the original ship: stitch_pour_vias was using
+        ZONE.HitTest, which only matches the outline boundary. Interior
+        points like (20, 15) inside a 40×30 zone were silently skipped.
+        With Outline().Contains(), they should be proposed."""
+        board = self._build_board_with_gnd_zone()
+        r = RoutingCommands(board=board)
+        result = r.stitch_pour_vias({
+            "net": "GND",
+            "gridPitch": 5.0,
+            "apply": False,
+        })
+        # Strong interior point — far from any edge.
+        interior_xy = (20.0, 15.0)
+        positions = [(p["x"], p["y"]) for p in result["positions"]]
+        assert interior_xy in positions, (
+            f"interior point {interior_xy} missing from positions; "
+            f"got {positions}"
+        )
+
+    def test_off_grid_outside_point_not_proposed(self):
+        """A point well outside the zone bbox cannot be proposed."""
+        board = self._build_board_with_gnd_zone()
+        r = RoutingCommands(board=board)
+        result = r.stitch_pour_vias({
+            "net": "GND",
+            "gridPitch": 5.0,
+            "apply": False,
+        })
+        for p in result["positions"]:
+            assert not (p["x"] > 40 or p["y"] > 30 or p["x"] < 0 or p["y"] < 0), p
+
     def test_apply_adds_vias_to_board(self):
         import pcbnew
 
