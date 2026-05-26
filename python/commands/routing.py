@@ -1102,9 +1102,21 @@ class RoutingCommands:
             )
 
             proposed: List[Dict[str, Any]] = []
-            skipped_no_cluster: List[str] = []
+            rejected: List[Dict[str, Any]] = []
 
             nets_map = self.board.GetNetInfo().NetsByName()
+
+            # Pre-collect all pads on the board so we can check
+            # whether a proposed zone bbox overlaps foreign-net pads
+            # (e.g. pads 2-7 on an 8-pin SOIC sitting between pads
+            # 1 and 8). Indexed by layer for layer-aware overlap.
+            all_pads_by_layer: Dict[int, List[Tuple[Any, Any]]] = {}
+            for fp in self.board.GetFootprints():
+                for pad in fp.Pads():
+                    for lid in pad.GetLayerSet().Seq():
+                        if not pcbnew.IsCopperLayer(lid):
+                            continue
+                        all_pads_by_layer.setdefault(lid, []).append((fp, pad))
 
             for fp in self.board.GetFootprints():
                 fp_ref = fp.GetReference()
@@ -1213,6 +1225,45 @@ class RoutingCommands:
                         right = max(bb.GetRight() for bb in bbs) + margin_iu
                         top = min(bb.GetTop() for bb in bbs) - margin_iu
                         bottom = max(bb.GetBottom() for bb in bbs) + margin_iu
+
+                        # Reject if the zone bbox overlaps any pad on
+                        # a foreign net on the zone's layer — e.g. an
+                        # 8-pin SOIC's pads 1 and 8 are both on
+                        # USB_VBUS, but pads 2-7 (other nets) sit
+                        # between them and a zone bridging 1 and 8
+                        # would short them.
+                        cluster_pad_ids = {
+                            id(pads[i]) for i in cluster_pads
+                        }
+                        overlap_refs: List[str] = []
+                        for ofp, opad in all_pads_by_layer.get(layer_id, []):
+                            if id(opad) in cluster_pad_ids:
+                                continue
+                            if opad.GetNetname() == net_name:
+                                continue
+                            obb = opad.GetBoundingBox()
+                            if (obb.GetRight() < left
+                                    or obb.GetLeft() > right
+                                    or obb.GetBottom() < top
+                                    or obb.GetTop() > bottom):
+                                continue
+                            overlap_refs.append(
+                                f"{ofp.GetReference()}.{opad.GetNumber()}"
+                                f" [{opad.GetNetname() or '<no net>'}]"
+                            )
+                        if overlap_refs:
+                            rejected.append({
+                                "ref": fp_ref,
+                                "net": net_name,
+                                "layer": self.board.GetLayerName(layer_id),
+                                "pads": [
+                                    pads[i].GetNumber() for i in cluster_pads
+                                ],
+                                "reason": "would_overlap_foreign_pads",
+                                "overlappingPads": overlap_refs[:10],
+                            })
+                            continue
+
                         area_mm2 = (
                             ((right - left) / SCALE)
                             * ((bottom - top) / SCALE)
@@ -1264,11 +1315,14 @@ class RoutingCommands:
                 "message": (
                     f"{'Applied' if apply_changes else 'Proposed'} "
                     f"{len(proposed)} pin-zone(s) "
-                    f"(adjacencyFactor={adjacency_factor})"
+                    f"(adjacencyFactor={adjacency_factor}, "
+                    f"{len(rejected)} rejected for foreign-pad overlap)"
                 ),
                 "applied": apply_changes,
                 "proposedCount": len(proposed),
+                "rejectedCount": len(rejected),
                 "zones": proposed,
+                "rejected": rejected,
             }
         except Exception as e:
             logger.error(f"Error in pin_zone_same_net: {str(e)}")
