@@ -104,6 +104,7 @@ class RoutingCommands:
             width = params.get("width")
             net = params.get("net")  # optional override
             check_obstacles = params.get("checkObstacles", True)
+            clearance = params.get("clearance")  # mm; default = netclass
 
             if not from_ref or not from_pad or not to_ref or not to_pad:
                 return {
@@ -197,10 +198,15 @@ class RoutingCommands:
 
                 if check_obstacles:
                     via_pt = pcbnew.VECTOR2I(int(via_x * scale), int(via_y * scale))
+                    trace_width_iu, min_clearance_iu = self._resolve_route_clearance(
+                        width, clearance, net
+                    )
                     obs = self._find_route_obstacles(
-                        start_pos, via_pt, self.board.GetLayerID(start_layer), net
+                        start_pos, via_pt, self.board.GetLayerID(start_layer), net,
+                        trace_width_iu, min_clearance_iu,
                     ) + self._find_route_obstacles(
-                        via_pt, end_pos, self.board.GetLayerID(end_layer), net
+                        via_pt, end_pos, self.board.GetLayerID(end_layer), net,
+                        trace_width_iu, min_clearance_iu,
                     )
                     if obs:
                         return _obstacle_error(obs)
@@ -248,8 +254,12 @@ class RoutingCommands:
                 # Same layer — direct trace
                 seg_layer = layer if layer else start_layer
                 if check_obstacles:
+                    trace_width_iu, min_clearance_iu = self._resolve_route_clearance(
+                        width, clearance, net
+                    )
                     obs = self._find_route_obstacles(
-                        start_pos, end_pos, self.board.GetLayerID(seg_layer), net
+                        start_pos, end_pos, self.board.GetLayerID(seg_layer), net,
+                        trace_width_iu, min_clearance_iu,
                     )
                     if obs:
                         return _obstacle_error(obs)
@@ -305,6 +315,7 @@ class RoutingCommands:
             net = params.get("net")
             via = params.get("via", False)
             check_obstacles = params.get("checkObstacles", True)
+            clearance = params.get("clearance")  # mm; default = netclass
 
             if not start or not end:
                 return {
@@ -332,8 +343,12 @@ class RoutingCommands:
             # to override (e.g. when intentionally routing through a region
             # that DRC will tolerate, or when restoring a known-good trace).
             if check_obstacles and net:
+                trace_width_iu, min_clearance_iu = self._resolve_route_clearance(
+                    width, clearance, net
+                )
                 obs = self._find_route_obstacles(
-                    start_point, end_point, layer_id, net
+                    start_point, end_point, layer_id, net,
+                    trace_width_iu, min_clearance_iu,
                 )
                 if obs:
                     shown = "; ".join(obs[:8])
@@ -2434,6 +2449,8 @@ class RoutingCommands:
             end = params.get("end")
             layer = params.get("layer", "F.Cu")
             net = params.get("net")
+            width = params.get("width")
+            clearance = params.get("clearance")
 
             if not start or not end:
                 return {
@@ -2462,7 +2479,13 @@ class RoutingCommands:
 
             start_pt = self._get_point(start)
             end_pt = self._get_point(end)
-            obstacles = self._find_route_obstacles(start_pt, end_pt, layer_id, net)
+            trace_width_iu, min_clearance_iu = self._resolve_route_clearance(
+                width, clearance, net
+            )
+            obstacles = self._find_route_obstacles(
+                start_pt, end_pt, layer_id, net,
+                trace_width_iu, min_clearance_iu,
+            )
             return {
                 "success": True,
                 "clear": not obstacles,
@@ -2481,14 +2504,67 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def _resolve_route_clearance(
+        self,
+        width_mm: Optional[float],
+        clearance_mm: Optional[float],
+        net_name: str,
+    ) -> Tuple[int, int]:
+        """Compute (trace_width_iu, min_clearance_iu) for obstacle checks.
+
+        `width_mm` and `clearance_mm` are explicit caller overrides; either
+        may be None. When width is None, falls back to the board's current
+        track width. When clearance is None, looks up the net's netclass
+        clearance, then the design rules default, then 0 as a last resort.
+        Returned values are in pcbnew internal units (nm).
+        """
+        SCALE = 1_000_000
+
+        if width_mm is not None:
+            trace_width_iu = int(float(width_mm) * SCALE)
+        else:
+            try:
+                trace_width_iu = int(
+                    self.board.GetDesignSettings().GetCurrentTrackWidth()
+                )
+            except Exception:
+                trace_width_iu = 0
+
+        if clearance_mm is not None:
+            min_clearance_iu = int(float(clearance_mm) * SCALE)
+        else:
+            min_clearance_iu = 0
+            try:
+                nets_map = self.board.GetNetInfo().NetsByName()
+                if nets_map.has_key(net_name):
+                    nc = nets_map[net_name].GetNetClass()
+                    if nc is not None:
+                        min_clearance_iu = int(nc.GetClearance())
+            except Exception:
+                pass
+            if min_clearance_iu <= 0:
+                try:
+                    bds = self.board.GetDesignSettings()
+                    default_nc = bds.GetDefault() if hasattr(
+                        bds, "GetDefault"
+                    ) else None
+                    if default_nc is not None:
+                        min_clearance_iu = int(default_nc.GetClearance())
+                except Exception:
+                    pass
+
+        return max(0, int(trace_width_iu)), max(0, int(min_clearance_iu))
+
     def _iter_route_obstacles(
         self,
         start: pcbnew.VECTOR2I,
         end: pcbnew.VECTOR2I,
         layer_id: int,
         net_name: str,
+        trace_width_iu: int = 0,
+        min_clearance_iu: int = 0,
     ):
-        """Yield the foreign-net copper objects that a straight segment
+        """Yield the foreign-net copper objects that a proposed trace
         start->end on layer_id would collide with. Each yielded item is
         a tuple of (kind, obj[, extra]):
 
@@ -2496,12 +2572,19 @@ class RoutingCommands:
           ("track", pcbnew.PCB_TRACK)
           ("pad", pcbnew.PAD, footprint_ref_str)
 
+        With `trace_width_iu=0` the test degenerates to centerline-only
+        crossing (legacy behaviour for callers that don't know the
+        width). With a non-zero width the trace is treated as a stadium
+        of half-width = `trace_width_iu/2 + min_clearance_iu`; obstacles
+        within that swept distance are reported. This catches the
+        edge-clipping case where the centerline misses a neighbouring
+        pad but the trace edge does not (#177).
+
         Shared core for both `_find_route_obstacles` (string output) and
-        `_obstacle_union_bbox` (bbox geometry). Same detection rules:
-        track segment intersection on layer, via centre within via radius
-        of segment (all layers), pad shape sampled along segment.
+        `_obstacle_union_bbox` (bbox geometry).
         """
         sx, sy, ex, ey = start.x, start.y, end.x, end.y
+        trace_half = trace_width_iu // 2
 
         def seg_pt_dist(px: float, py: float) -> float:
             vx, vy = ex - sx, ey - sy
@@ -2520,6 +2603,33 @@ class RoutingCommands:
                 sx, sy, ex, ey, cx, cy
             ) != ccw(sx, sy, ex, ey, dx, dy)
 
+        def seg_seg_min_dist(
+            ax: float, ay: float, bx: float, by: float,
+            cx: float, cy: float, dx: float, dy: float,
+        ) -> float:
+            """Minimum distance between segment AB and segment CD in 2D.
+            Returns 0 if they cross; otherwise the smallest endpoint-to-
+            opposite-segment distance."""
+            if (ccw(ax, ay, cx, cy, dx, dy) != ccw(bx, by, cx, cy, dx, dy)
+                    and ccw(ax, ay, bx, by, cx, cy) != ccw(ax, ay, bx, by, dx, dy)):
+                return 0.0
+
+            def pt_seg(px, py, x1, y1, x2, y2):
+                vx, vy = x2 - x1, y2 - y1
+                ll = vx * vx + vy * vy
+                if ll == 0:
+                    return ((px - x1) ** 2 + (py - y1) ** 2) ** 0.5
+                t = max(0.0, min(1.0, ((px - x1) * vx + (py - y1) * vy) / ll))
+                qx, qy = x1 + t * vx, y1 + t * vy
+                return ((px - qx) ** 2 + (py - qy) ** 2) ** 0.5
+
+            return min(
+                pt_seg(ax, ay, cx, cy, dx, dy),
+                pt_seg(bx, by, cx, cy, dx, dy),
+                pt_seg(cx, cy, ax, ay, bx, by),
+                pt_seg(dx, dy, ax, ay, bx, by),
+            )
+
         seg_len = ((ex - sx) ** 2 + (ey - sy) ** 2) ** 0.5
 
         # Tracks and vias
@@ -2534,16 +2644,36 @@ class RoutingCommands:
                     via_w = t.GetWidth(pcbnew.F_Cu)
                 except TypeError:
                     via_w = t.GetWidth()
-                if seg_pt_dist(pos.x, pos.y) < via_w / 2.0:
+                # Inflate the via radius by trace half-width + clearance so
+                # the swept trace stadium is what's tested (not just the
+                # centerline). With trace_half=0 + min_clearance_iu=0 this
+                # reduces to the legacy radius-only check.
+                threshold = via_w / 2.0 + trace_half + min_clearance_iu
+                if seg_pt_dist(pos.x, pos.y) < threshold:
                     yield ("via", t)
             else:
                 if t.GetLayer() != layer_id:
                     continue
                 ts, te = t.GetStart(), t.GetEnd()
-                if segs_cross(ts.x, ts.y, te.x, te.y):
-                    yield ("track", t)
+                if trace_half == 0 and min_clearance_iu == 0:
+                    # Legacy centerline cross detection; preserves existing
+                    # callers (find_via_lane diagnostic strings, etc.).
+                    if segs_cross(ts.x, ts.y, te.x, te.y):
+                        yield ("track", t)
+                else:
+                    other_half = t.GetWidth() / 2.0
+                    threshold = trace_half + other_half + min_clearance_iu
+                    if seg_seg_min_dist(
+                        sx, sy, ex, ey, ts.x, ts.y, te.x, te.y
+                    ) < threshold:
+                        yield ("track", t)
 
-        # Pads — sample the segment through the pad's real shape
+        # Pads — sample the segment through the pad's real shape. With a
+        # non-zero accuracy, pcbnew's PAD.HitTest returns True when the
+        # pad's shape comes within `accuracy` iu of the sample point;
+        # combined with centerline sampling, that detects edge-clipping
+        # without polygon-vs-stadium geometry.
+        accuracy = trace_half + min_clearance_iu
         steps = max(2, int(seg_len / 100000))  # ~0.1mm sampling
         for fp in self.board.GetFootprints():
             for pad in fp.Pads():
@@ -2554,16 +2684,21 @@ class RoutingCommands:
                 pc = pad.GetPosition()
                 bb = pad.GetBoundingBox()
                 half_diag = (bb.GetWidth() ** 2 + bb.GetHeight() ** 2) ** 0.5 / 2.0
-                if seg_pt_dist(pc.x, pc.y) > half_diag:
-                    continue  # quick reject — pad nowhere near the segment
+                # Inflate quick-reject so an off-centerline pad still
+                # makes it to the precise HitTest pass.
+                if seg_pt_dist(pc.x, pc.y) > half_diag + accuracy:
+                    continue
                 for i in range(steps + 1):
                     f = i / steps
                     px = int(sx + f * (ex - sx))
                     py = int(sy + f * (ey - sy))
                     try:
-                        inside = pad.HitTest(pcbnew.VECTOR2I(px, py))
-                    except Exception:
-                        inside = bb.Contains(pcbnew.VECTOR2I(px, py))
+                        inside = pad.HitTest(pcbnew.VECTOR2I(px, py), accuracy)
+                    except (TypeError, Exception):
+                        try:
+                            inside = pad.HitTest(pcbnew.VECTOR2I(px, py))
+                        except Exception:
+                            inside = bb.Contains(pcbnew.VECTOR2I(px, py))
                     if inside:
                         yield ("pad", pad, fp.GetReference())
                         break
@@ -2574,16 +2709,23 @@ class RoutingCommands:
         end: pcbnew.VECTOR2I,
         layer_id: int,
         net_name: str,
+        trace_width_iu: int = 0,
+        min_clearance_iu: int = 0,
     ) -> list:
         """Return human-readable descriptions of foreign-net copper that a
         straight segment start->end on layer_id would collide with.
 
         Checks tracks (same-layer segment intersection), vias (all layers,
         centre within via radius of the segment) and pads (segment sampled
-        through the pad's real shape via HitTest). Empty list = clear path.
+        through the pad's real shape via HitTest). With non-zero
+        `trace_width_iu` and/or `min_clearance_iu`, the check accounts
+        for the trace's swept width + clearance margin instead of only the
+        centerline (#177). Empty list = clear path.
         """
         out: list = []
-        for item in self._iter_route_obstacles(start, end, layer_id, net_name):
+        for item in self._iter_route_obstacles(
+            start, end, layer_id, net_name, trace_width_iu, min_clearance_iu
+        ):
             kind = item[0]
             if kind == "via":
                 t = item[1]

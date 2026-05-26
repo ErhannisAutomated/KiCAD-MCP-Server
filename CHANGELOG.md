@@ -4,6 +4,50 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Width- and clearance-aware route obstacle detection (develop, 2026-05-26)
+
+`route_trace`, `route_pad_to_pad`, and `check_route_segment` now treat
+the proposed trace as a swept stadium (centerline ± trace half-width ±
+netclass clearance) when running their default `checkObstacles`
+check, rather than a one-dimensional centerline.  Fixes the failure
+mode from #177: a 1.5 mm V12_OUT trace exiting U4.13 used to be
+accepted even though its edge clipped neighbouring pad U4.14, because
+the centerline alone didn't enter U4.14's pad shape.
+
+* New helper `_resolve_route_clearance(width, clearance, net)`
+  resolves `(trace_width_iu, min_clearance_iu)` in pcbnew internal
+  units. `width=None` falls back to the board's current track width;
+  `clearance=None` falls back to the net's netclass clearance and
+  then to the board default.
+* `_iter_route_obstacles` / `_find_route_obstacles` gain
+  `trace_width_iu=0` and `min_clearance_iu=0` parameters; both
+  default to 0 so existing callers preserve their centerline-only
+  behaviour.
+* Vias: distance check inflated by `trace_half + min_clearance`.
+* Tracks: minimum segment-to-segment distance (Jacobi-style 4-corner
+  parametric min) compared against the sum of half-widths +
+  clearance, replacing centerline cross detection when width > 0.
+* Pads: `pad.HitTest(point, accuracy=trace_half+clearance)` uses
+  pcbnew's built-in inflation rather than re-sampling polygon
+  geometry; quick-reject bbox distance is inflated by `accuracy`.
+* New tool parameter: `clearance` (mm) on `route_trace`,
+  `route_pad_to_pad`, and `check_route_segment` lets callers
+  override the default lookup (e.g. an intentionally tight one-off
+  routing pass).
+* MCP-side schema (Python `tool_schemas.py` + TypeScript `routing.ts`)
+  + tool descriptions updated to surface the new behaviour and
+  parameters.
+* Unit tests cover `_resolve_route_clearance` defaulting, override,
+  and missing-net fallback. Real-pcbnew integration tests assert the
+  edge-clipping case is detected with width inflation, that the
+  legacy centerline path still passes when width=0, and that a
+  parallel near-miss track is flagged once the swept region overlaps.
+* Side fix while in the area: `test_placement_constraints.py` and
+  `test_placement_constraint_propagation.py` referenced
+  `CONSTRAINT_VERSION == 1`; the prior session bumped it to 2 for
+  spring-class IO.  Tests now reference the constant directly so
+  future bumps don't need test edits.
+
 ### .kicad_pro spring class IO (develop, 2026-05-22)
 
 Spring class definitions and per-net assignments now persist in the

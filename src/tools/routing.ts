@@ -30,7 +30,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Route trace tool
   server.tool(
     "route_trace",
-    "Route a trace segment between two XY points on a fixed layer. By default refuses (checkObstacles) when the proposed segment would cross foreign-net copper — pass checkObstacles=false to override (e.g. restoring a known-good trace by coordinates). WARNING: Does NOT handle layer changes — if start and end are on different copper layers, use route_pad_to_pad instead, which automatically inserts a via.",
+    "Route a trace segment between two XY points on a fixed layer. By default refuses (checkObstacles) when the proposed trace would cross or come within clearance of foreign-net copper. The check is width-aware: it inflates the trace centerline by half the trace width plus the net's netclass clearance (overridable with the `clearance` param) so an edge-clipping case where a fat trace exits an IC pin grazes the neighbouring pad is caught. Pass checkObstacles=false to override (e.g. restoring a known-good trace by coordinates). WARNING: Does NOT handle layer changes — if start and end are on different copper layers, use route_pad_to_pad instead, which automatically inserts a via.",
     {
       start: z
         .object({
@@ -53,7 +53,13 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         .boolean()
         .optional()
         .describe(
-          "Refuse the route if the straight path would cross foreign-net tracks, vias or pads (default: true). Set false to force the trace anyway — useful when restoring a previously-deleted segment by coordinates, or routing through a region you've verified is clear via other means.",
+          "Refuse the route if the swept trace (width + clearance) would touch foreign-net tracks, vias or pads (default: true). Set false to force the trace anyway — useful when restoring a previously-deleted segment by coordinates, or routing through a region you've verified is clear via other means.",
+        ),
+      clearance: z
+        .number()
+        .optional()
+        .describe(
+          "Minimum gap in mm between the trace edge and any foreign-net copper (used only when checkObstacles is true). Defaults to the net's netclass clearance, falling back to the board default.",
         ),
     },
     async (args: any) => {
@@ -141,7 +147,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Check route segment tool (pre-flight, no commit)
   server.tool(
     "check_route_segment",
-    "Pre-flight check: would a straight segment from start to end on the given layer (for the given net) cross foreign-net copper? Returns {clear, obstacles[]} without committing the route. Same obstacle detection as route_trace's default checkObstacles, useful for plan-first workflows where you want to enumerate candidate paths before committing one. Cheaper than route_trace + run_drc + delete_trace round-trips when iterating.",
+    "Pre-flight check: would a straight segment from start to end on the given layer (for the given net) cross or come within clearance of foreign-net copper? Returns {clear, obstacles[]} without committing the route. Same width- and clearance-aware obstacle detection as route_trace's default checkObstacles — pass `width` (defaults to the board's current track width) and optionally `clearance` (defaults to netclass) to size the swept-trace test. Useful for plan-first workflows where you want to enumerate candidate paths before committing one. Cheaper than route_trace + run_drc + delete_trace round-trips when iterating.",
     {
       start: z
         .object({
@@ -162,6 +168,18 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         .string()
         .describe(
           "Net name you intend to route — same-net copper isn't counted as an obstacle.",
+        ),
+      width: z
+        .number()
+        .optional()
+        .describe(
+          "Planned trace width in mm. Inflates the obstacle check by half this width so edge-clipping is caught. Defaults to the board's current track width.",
+        ),
+      clearance: z
+        .number()
+        .optional()
+        .describe(
+          "Minimum gap in mm between the trace edge and foreign-net copper. Defaults to the net's netclass clearance, falling back to the board default.",
         ),
     },
     async (args: any) => {
@@ -496,7 +514,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Route pad to pad tool
   server.tool(
     "route_pad_to_pad",
-    "PREFERRED tool for pad-to-pad routing. Looks up pad positions automatically, detects the net from the pad, and — critically — if the two pads are on different copper layers (e.g. J1 on F.Cu and J2 on B.Cu) automatically inserts a via at the midpoint so the connection is complete. Always use this instead of route_trace when routing between named component pads. NOTE: it only draws STRAIGHT segments — by default it refuses (checkObstacles) if the straight path would cross foreign-net copper; route around obstacles with route_trace waypoints in that case.",
+    "PREFERRED tool for pad-to-pad routing. Looks up pad positions automatically, detects the net from the pad, and — critically — if the two pads are on different copper layers (e.g. J1 on F.Cu and J2 on B.Cu) automatically inserts a via at the midpoint so the connection is complete. Always use this instead of route_trace when routing between named component pads. NOTE: it only draws STRAIGHT segments — by default it refuses (checkObstacles) if the swept trace (width + netclass clearance) would touch foreign-net copper; route around obstacles with route_trace waypoints in that case.",
     {
       fromRef: z.string().describe("Reference of the source component (e.g. 'U2')"),
       fromPad: z
@@ -513,7 +531,13 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         .boolean()
         .optional()
         .describe(
-          "Refuse the route if the straight path would cross foreign-net tracks, vias or pads (default: true). Set false to force the trace anyway.",
+          "Refuse the route if the swept trace (width + clearance) would touch foreign-net tracks, vias or pads (default: true). Set false to force the trace anyway.",
+        ),
+      clearance: z
+        .number()
+        .optional()
+        .describe(
+          "Minimum gap in mm between the trace edge and any foreign-net copper (used only when checkObstacles is true). Defaults to the net's netclass clearance, falling back to the board default.",
         ),
     },
     async (args: any) => {

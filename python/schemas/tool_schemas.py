@@ -740,8 +740,13 @@ ROUTING_TOOLS = [
         "description": (
             "Routes a single copper trace segment between two XY points on a "
             "fixed layer. Refuses by default (checkObstacles) when the proposed "
-            "segment would cross foreign-net copper. Does not handle layer "
-            "changes — use route_pad_to_pad for inter-layer pad-to-pad routes."
+            "trace would cross or come within clearance of foreign-net copper. "
+            "The obstacle check is width- and clearance-aware: it inflates the "
+            "trace centerline by half its width plus the net's netclass "
+            "clearance (overridable with `clearance`), so an edge-clipping "
+            "case where a fat trace exits an IC pin grazes the neighbouring "
+            "pad is caught. Does not handle layer changes — use "
+            "route_pad_to_pad for inter-layer pad-to-pad routes."
         ),
         "inputSchema": {
             "type": "object",
@@ -783,11 +788,22 @@ ROUTING_TOOLS = [
                 "checkObstacles": {
                     "type": "boolean",
                     "description": (
-                        "Refuse the route if the straight path would cross "
-                        "foreign-net tracks, vias or pads (default: true). "
-                        "Set false to force the trace — useful when restoring "
-                        "a deleted segment by coordinates."
+                        "Refuse the route if the swept trace (width + "
+                        "clearance) would touch foreign-net tracks, vias or "
+                        "pads (default: true). Set false to force the trace "
+                        "— useful when restoring a deleted segment by "
+                        "coordinates."
                     ),
+                },
+                "clearance": {
+                    "type": "number",
+                    "description": (
+                        "Minimum gap in mm between the trace edge and any "
+                        "foreign-net copper (only used when checkObstacles "
+                        "is true). Defaults to the net's netclass clearance, "
+                        "falling back to the board default."
+                    ),
+                    "minimum": 0,
                 },
             },
             "required": ["start", "end", "layer", "width", "net"],
@@ -932,6 +948,25 @@ ROUTING_TOOLS = [
                         "Net name you intend to route — same-net copper "
                         "isn't counted as an obstacle."
                     ),
+                },
+                "width": {
+                    "type": "number",
+                    "description": (
+                        "Planned trace width in mm. Inflates the obstacle "
+                        "check by half this width so edge-clipping is "
+                        "caught. Defaults to the board's current track "
+                        "width."
+                    ),
+                    "minimum": 0,
+                },
+                "clearance": {
+                    "type": "number",
+                    "description": (
+                        "Minimum gap in mm between the trace edge and "
+                        "foreign-net copper. Defaults to the net's netclass "
+                        "clearance, falling back to the board default."
+                    ),
+                    "minimum": 0,
                 },
             },
             "required": ["start", "end", "layer", "net"],
