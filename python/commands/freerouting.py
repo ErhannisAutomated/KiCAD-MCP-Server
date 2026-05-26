@@ -397,6 +397,32 @@ class FreeroutingCommands:
         dsn_path = os.path.join(board_dir, f"{board_stem}.dsn")
         ses_path = os.path.join(board_dir, f"{board_stem}.ses")
 
+        # Step 0: Pre-flight — verify netclass patterns haven't drifted
+        # since the project was last sanity-checked. KiCAD GUI can
+        # silently strip patterns on save; if that happened, the
+        # DSN's (class POWER_4A …) will be missing nets and freerouting
+        # will route them at Default width. Warn loudly but proceed —
+        # the user may have an in-progress refactor.
+        netclass_drift: Optional[Dict[str, Any]] = None
+        try:
+            from commands.netclass_patterns import verify_netclass_patterns
+
+            pro_path = Path(board_path).with_suffix(".kicad_pro")
+            if pro_path.exists():
+                netclass_drift = verify_netclass_patterns(
+                    pro_path, restore=False
+                )
+                if netclass_drift.get("drifted"):
+                    logger.warning(
+                        "Netclass-pattern drift detected before autoroute: "
+                        f"missing={netclass_drift.get('missing')} "
+                        f"extra={netclass_drift.get('extra')}. Run "
+                        f"verify_netclass_patterns with restore=true to "
+                        f"fix, or accept the drift if intentional."
+                    )
+        except Exception as e:
+            logger.debug(f"Netclass-pattern pre-flight failed (non-fatal): {e}")
+
         # Step 1: Export DSN
         logger.info(f"Exporting DSN to {dsn_path}")
         try:
@@ -541,6 +567,7 @@ class FreeroutingCommands:
             "elapsed_seconds": elapsed,
             "layerOrder": applied_layer_order,
             "planeLayersFlippedToPower": plane_layers,
+            "netclassPatternDrift": netclass_drift,
             "board_stats": {
                 "tracks": track_count,
                 "vias": via_count,

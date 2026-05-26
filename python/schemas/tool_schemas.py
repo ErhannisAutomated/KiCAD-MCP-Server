@@ -1334,6 +1334,42 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "verify_netclass_patterns",
+        "title": "Verify Netclass Patterns",
+        "description": (
+            "Compare the live net_settings.netclass_patterns in "
+            ".kicad_pro against the expected set captured in the "
+            "mcp_expected_netclass_patterns section (which KiCAD's GUI "
+            "leaves alone). KiCAD has been observed to silently strip "
+            "patterns on save when normalising the project across "
+            "version upgrades — this catches that drift. First call on "
+            "a project bootstraps the expected section from the "
+            "current state (no drift reported). Pass restore=true to "
+            "re-add missing patterns back into net_settings."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "proPath": {
+                    "type": "string",
+                    "description": (
+                        "Path to the .kicad_pro. Defaults to the "
+                        "currently-loaded board's sibling .kicad_pro."
+                    ),
+                },
+                "restore": {
+                    "type": "boolean",
+                    "description": (
+                        "Re-add missing patterns into "
+                        "net_settings.netclass_patterns. Default false "
+                        "(report-only)."
+                    ),
+                    "default": False,
+                },
+            },
+        },
+    },
+    {
         "name": "decoupling_audit",
         "title": "Decoupling Audit",
         "description": "Find decoupling caps (or any constrained component) too far from their target IC pin on the PCB. Reads Placement_Anchor properties on schematic symbols AND auto-discovers cap↔IC power-pin pairs by net analysis. Property grammar: 'Placement_Anchor = \"U1.10/within=3mm[; U1.9/within=3mm]\"'. The property lives on the SCHEMATIC symbol (PCB sync drops most custom props). Controlled by 'mcp_constraint_version: 1' in .kicad_pro.",

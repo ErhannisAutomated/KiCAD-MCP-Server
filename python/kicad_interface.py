@@ -349,6 +349,7 @@ class KiCADInterface:
             "query_traces": self.routing_commands.query_traces,
             "audit_plane_cuts": self.routing_commands.audit_plane_cuts,
             "decoupling_audit": self._handle_decoupling_audit,
+            "verify_netclass_patterns": self._handle_verify_netclass_patterns,
             "place_near": self._handle_place_near,
             "check_pcb_integrity": self._handle_check_pcb_integrity,
             "analyze_congestion": self._handle_analyze_congestion,
@@ -6705,6 +6706,53 @@ print("ok")
             )
         except Exception as e:
             logger.error(f"Error in relax_placement: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_verify_netclass_patterns(
+        self, params: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        """Verify that the live ``net_settings.netclass_patterns`` in
+        ``.kicad_pro`` matches the expected set captured in the
+        ``mcp_expected_netclass_patterns`` section (which KiCAD does
+        not touch). KiCAD's GUI has been observed to silently strip
+        patterns when normalising the project file across version
+        upgrades — this catches that drift.
+
+        Bootstrap: if the ``mcp_expected_netclass_patterns`` section
+        is absent, this call seeds it from the current state. No drift
+        is reported on the bootstrap call.
+
+        Optional: ``proPath`` (else derived from the current board),
+        ``restore`` (default false; when true, re-adds missing
+        patterns back into ``net_settings.netclass_patterns``).
+        """
+        logger.info("Running verify_netclass_patterns")
+        try:
+            from commands.netclass_patterns import verify_netclass_patterns
+            from pathlib import Path
+
+            pro_path = params.get("proPath")
+            if not pro_path:
+                if self.board is None:
+                    return {
+                        "success": False,
+                        "message": "No board loaded",
+                        "errorDetails": (
+                            "Pass proPath= or call open_project first"
+                        ),
+                    }
+                pcb_path = Path(self.board.GetFileName())
+                pro_path = pcb_path.with_suffix(".kicad_pro")
+            pro_path = Path(pro_path)
+            if not pro_path.exists():
+                return {
+                    "success": False,
+                    "message": f"Not found: {pro_path}",
+                }
+            restore = bool(params.get("restore", False))
+            return verify_netclass_patterns(pro_path, restore=restore)
+        except Exception as e:
+            logger.error(f"Error in verify_netclass_patterns: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
     def _handle_decoupling_audit(self, params: Dict[str, Any]) -> Dict[str, Any]:

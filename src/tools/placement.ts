@@ -24,6 +24,22 @@ import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
 export function registerPlacementTools(server: McpServer, callKicadScript: Function) {
+  // verify_netclass_patterns
+  server.tool(
+    "verify_netclass_patterns",
+    "Compare the live `net_settings.netclass_patterns` in `.kicad_pro` against the expected set captured in the `mcp_expected_netclass_patterns` section. KiCAD's GUI has been observed to silently strip patterns on save when it normalises the project across version upgrades — once gone, affected nets fall back to Default netclass and routing tools silently pick the wrong width. First call on a project bootstraps the expected section from the current state (no drift reported). Pass restore=true to re-add missing patterns. The autoroute tool runs this automatically as a pre-flight check and surfaces drift in `netclassPatternDrift` on its response.",
+    {
+      proPath: z.string().optional().describe("Path to the .kicad_pro. Defaults to the currently-loaded board's sibling .kicad_pro."),
+      restore: z.boolean().optional().describe("Re-add missing patterns into net_settings.netclass_patterns. Default false (report-only)."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("verify_netclass_patterns", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // decoupling_audit
   server.tool(
     "decoupling_audit",
