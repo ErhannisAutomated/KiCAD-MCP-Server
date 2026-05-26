@@ -648,6 +648,212 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def pair_via(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Propose (and optionally apply) a parallel partner via next to
+        every existing via on the given net(s).
+
+        For high-current power vias, doubling them up halves the
+        current per via and ~halves the inductance. Freerouting's DSN
+        class-rule via specification has no concept of "use two vias
+        in parallel" — it can only pick a single via diameter — so the
+        pairing has to be applied as a post-process. This is the
+        standard practice the user followed by hand in past sessions
+        (BAT1 cell-terminal pads got two through-vias each).
+
+        For each existing via on a matching net:
+          1. Try four offset positions (±x, ±y) at `offset` mm from
+             the original via center
+          2. Skip the position if a foreign-net pad/track/via is
+             within `minClearance` (reuses `_via_clearance_violations`)
+          3. Skip the position if it's within ``offset * 0.5`` of
+             another same-net via already on the board (avoids
+             stacking when this tool is re-run)
+          4. The first clearing position wins; if none clear, skip
+             the via and report it as `skippedNoClearance`.
+
+        Default behaviour: preview only (proposed positions, no
+        mutations). Pass `apply=true` to commit.
+
+        Net filter: pass `nets=["BAT+","V12_OUT"]` for an explicit
+        list, or `netClass="POWER_4A"` to use the .kicad_pro netclass
+        membership. Default = `netClass="POWER_4A"`.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            nets_filter = params.get("nets")
+            net_class = params.get("netClass", "POWER_4A")
+            offset_mm = float(params.get("offset", 1.0))
+            min_clearance = float(params.get("minClearance", 0.2))
+            via_diameter = params.get("viaDiameter")
+            via_drill = params.get("viaDrill")
+            apply_changes = params.get("apply", False)
+            max_pairs = int(params.get("maxPairs", 200))
+
+            if offset_mm <= 0:
+                return {
+                    "success": False,
+                    "message": "offset must be > 0",
+                }
+
+            SCALE = 1_000_000
+            offset_iu = int(offset_mm * SCALE)
+            min_clearance_iu = int(min_clearance * SCALE)
+
+            # Resolve the net filter.
+            target_net_names: set
+            if nets_filter:
+                target_net_names = {str(n) for n in nets_filter}
+            else:
+                # Pull netclass membership from BOARD's net info — each
+                # net's GetNetClass().GetName() reflects the resolved
+                # class (default if no pattern matched).
+                target_net_names = set()
+                try:
+                    netinfo = self.board.GetNetInfo()
+                    nbn = netinfo.NetsByName()
+                    for net_name in netinfo.NetnamesList():
+                        n = nbn[net_name]
+                        nc = n.GetNetClass()
+                        if nc is not None and nc.GetName() == net_class:
+                            target_net_names.add(net_name)
+                except Exception:
+                    pass
+
+            if not target_net_names:
+                return {
+                    "success": False,
+                    "message": (
+                        f"No nets matched the filter "
+                        f"(nets={nets_filter}, netClass={net_class!r})"
+                    ),
+                }
+
+            # Index existing vias by net (kept for the same-net dedup
+            # check) AND collect candidates to consider pairing.
+            candidates = []   # list of pcbnew.PCB_VIA
+            same_net_via_xy = {}  # {net: [(x, y), ...]}
+            for t in self.board.Tracks():
+                if t.Type() != pcbnew.PCB_VIA_T:
+                    continue
+                pos = t.GetPosition()
+                net_name = t.GetNetname()
+                same_net_via_xy.setdefault(net_name, []).append(
+                    (pos.x, pos.y)
+                )
+                if net_name in target_net_names:
+                    candidates.append(t)
+
+            proposed = []
+            skipped_no_clearance = 0
+            offsets = [
+                (offset_iu, 0),
+                (-offset_iu, 0),
+                (0, offset_iu),
+                (0, -offset_iu),
+            ]
+            dedup_dist_sq = (offset_iu * 0.5) ** 2
+
+            for via in candidates:
+                if len(proposed) >= max_pairs:
+                    break
+                pos = via.GetPosition()
+                net_name = via.GetNetname()
+                try:
+                    via_w = via.GetWidth(pcbnew.F_Cu)
+                except TypeError:
+                    via_w = via.GetWidth()
+                # Use the requested via geometry, falling back to the
+                # parent via's dimensions.
+                pair_w_iu = int(via_diameter * SCALE) if via_diameter else via_w
+                try:
+                    pair_d_iu = (
+                        int(via_drill * SCALE)
+                        if via_drill else via.GetDrill()
+                    )
+                except Exception:
+                    pair_d_iu = pair_w_iu // 2
+
+                chosen = None
+                for dx, dy in offsets:
+                    cand = pcbnew.VECTOR2I(pos.x + dx, pos.y + dy)
+                    # Skip if too close to an existing same-net via
+                    # (parent counts — so we move > offset*0.5 away).
+                    too_close = False
+                    for ex, ey in same_net_via_xy.get(net_name, []):
+                        ddx = ex - cand.x
+                        ddy = ey - cand.y
+                        if ddx * ddx + ddy * ddy < dedup_dist_sq:
+                            too_close = True
+                            break
+                    if too_close:
+                        continue
+                    # Clearance vs foreign-net copper.
+                    violations = self._via_clearance_violations(
+                        cand, pair_w_iu, net_name, min_clearance_iu
+                    )
+                    if violations:
+                        continue
+                    chosen = (cand.x, cand.y, pair_w_iu, pair_d_iu, net_name)
+                    break
+
+                if chosen is None:
+                    skipped_no_clearance += 1
+                    continue
+                proposed.append(chosen)
+                # Update the dedup set so subsequent vias in the same
+                # call don't overlap the partner we just chose.
+                same_net_via_xy.setdefault(net_name, []).append(
+                    (chosen[0], chosen[1])
+                )
+
+            if apply_changes and proposed:
+                nets_map = self.board.GetNetInfo().NetsByName()
+                for x, y, w, d, net_name in proposed:
+                    via = pcbnew.PCB_VIA(self.board)
+                    via.SetPosition(pcbnew.VECTOR2I(x, y))
+                    via.SetWidth(w)
+                    via.SetDrill(d)
+                    via.SetLayerPair(pcbnew.F_Cu, pcbnew.B_Cu)
+                    if nets_map.has_key(net_name):
+                        via.SetNet(nets_map[net_name])
+                    self.board.Add(via)
+
+            return {
+                "success": True,
+                "message": (
+                    f"{'Applied' if apply_changes else 'Proposed'} "
+                    f"{len(proposed)} partner via(s) "
+                    f"(matched {len(candidates)} parent via(s) on "
+                    f"{len(target_net_names)} net(s))"
+                ),
+                "applied": apply_changes,
+                "candidateCount": len(candidates),
+                "proposedCount": len(proposed),
+                "skippedNoClearance": skipped_no_clearance,
+                "positions": [
+                    {
+                        "x": x / SCALE,
+                        "y": y / SCALE,
+                        "unit": "mm",
+                        "net": n,
+                    }
+                    for x, y, _, _, n in proposed
+                ],
+            }
+        except Exception as e:
+            logger.error(f"Error in pair_via: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to pair vias",
+                "errorDetails": str(e),
+            }
+
     def stitch_pour_vias(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Propose (and optionally apply) a grid of stitching vias on a
         copper pour net (#176).

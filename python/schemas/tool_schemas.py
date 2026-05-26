@@ -1000,6 +1000,86 @@ ROUTING_TOOLS = [
         },
     },
     {
+        "name": "pair_via",
+        "title": "Pair Via for High-Current Doubling",
+        "description": (
+            "Propose (and optionally apply) a parallel partner via "
+            "next to every existing via on the given net(s). Doubles "
+            "the current-carrying capacity and ~halves inductance for "
+            "high-current power vias. Default: nets matching the "
+            "POWER_4A netclass. The first ±x/±y offset that clears "
+            "`minClearance` from foreign-net copper wins; vias with "
+            "no clear offset are reported as `skippedNoClearance`."
+        ),
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "nets": {
+                    "type": "array",
+                    "items": {"type": "string"},
+                    "description": (
+                        "Explicit net list (e.g. [\"BAT+\",\"BAT-\"]). "
+                        "Overrides netClass when set."
+                    ),
+                },
+                "netClass": {
+                    "type": "string",
+                    "description": (
+                        "Netclass name to filter by (default "
+                        "\"POWER_4A\"). Ignored if `nets` is set."
+                    ),
+                },
+                "offset": {
+                    "type": "number",
+                    "description": (
+                        "Distance (mm) from the parent via center to "
+                        "the partner via (default 1.0)."
+                    ),
+                    "minimum": 0.1,
+                },
+                "minClearance": {
+                    "type": "number",
+                    "description": (
+                        "Minimum gap (mm) between the partner via edge "
+                        "and foreign-net copper (default 0.2)."
+                    ),
+                    "minimum": 0,
+                },
+                "viaDiameter": {
+                    "type": "number",
+                    "description": (
+                        "Partner via diameter (mm). Defaults to the "
+                        "parent via's diameter."
+                    ),
+                    "minimum": 0.1,
+                },
+                "viaDrill": {
+                    "type": "number",
+                    "description": (
+                        "Partner via drill (mm). Defaults to the parent "
+                        "via's drill."
+                    ),
+                    "minimum": 0.1,
+                },
+                "apply": {
+                    "type": "boolean",
+                    "description": (
+                        "Commit the proposed partner vias (default "
+                        "false = preview)."
+                    ),
+                },
+                "maxPairs": {
+                    "type": "number",
+                    "description": (
+                        "Safety cap on the number of partners to "
+                        "propose (default 200)."
+                    ),
+                    "minimum": 1,
+                },
+            },
+        },
+    },
+    {
         "name": "stitch_pour_vias",
         "title": "Stitch Pour Vias",
         "description": (

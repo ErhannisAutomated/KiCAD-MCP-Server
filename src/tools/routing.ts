@@ -195,6 +195,28 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Pair via tool (high-current via doubling)
+  server.tool(
+    "pair_via",
+    "Propose (and optionally apply) a parallel partner via next to every existing via on the given net(s). Doubles current capacity and ~halves inductance for high-current power vias — needed for POWER_4A nets because freerouting's DSN class-rule via spec can only pick a single via diameter, not a pair. Default: nets matching the POWER_4A netclass. For each parent via, tries the four ±x/±y offset positions at `offset` mm; the first that clears `minClearance` from foreign-net copper (and isn't within offset/2 of another same-net via) wins. Default preview; pass apply=true to commit.",
+    {
+      nets: z.array(z.string()).optional().describe("Explicit net list (e.g. [\"BAT+\",\"BAT-\"]). Overrides netClass when set."),
+      netClass: z.string().optional().describe("Netclass name to filter by (default \"POWER_4A\"). Ignored if nets is set."),
+      offset: z.number().optional().describe("Distance (mm) from the parent via center to the partner via (default 1.0)."),
+      minClearance: z.number().optional().describe("Minimum gap (mm) between the partner via edge and foreign-net copper (default 0.2)."),
+      viaDiameter: z.number().optional().describe("Partner via diameter (mm). Defaults to the parent via's diameter."),
+      viaDrill: z.number().optional().describe("Partner via drill (mm). Defaults to the parent via's drill."),
+      apply: z.boolean().optional().describe("Commit the proposed partner vias (default false = preview)."),
+      maxPairs: z.number().optional().describe("Safety cap on the number of partners to propose (default 200)."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("pair_via", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // Stitch pour vias tool
   server.tool(
     "stitch_pour_vias",
