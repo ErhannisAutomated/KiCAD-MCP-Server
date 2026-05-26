@@ -1527,10 +1527,32 @@ class RoutingCommands:
                             pad_half_y + via_offset_iu + via_radius_iu
                         )
                     cand = pcbnew.VECTOR2I(cx, cy)
+                    # 1) Via clearance against foreign-net copper on
+                    #    all layers.
                     violations = self._via_clearance_violations(
                         cand, via_diameter_iu, net_name, min_clearance_iu
                     )
                     if violations:
+                        continue
+                    # 2) v3: stub-trace clearance. The stub goes from
+                    #    the pad center to the via center on the pad's
+                    #    layer at `stub_width_iu`. A 1.5 mm stub on a
+                    #    BAT+ pad next to a foreign-net signal trace
+                    #    shorts when the stub is fatter than the gap
+                    #    to the neighbour. Use the swept-trace
+                    #    obstacle check (#177) — same helper
+                    #    widen_return_paths relies on.
+                    stub_start = pcbnew.VECTOR2I(pad_pos.x, pad_pos.y)
+                    stub_end = cand
+                    stub_obstacles = list(self._iter_route_obstacles(
+                        stub_start,
+                        stub_end,
+                        layer_id,
+                        net_name,
+                        stub_width_iu,
+                        min_clearance_iu,
+                    ))
+                    if stub_obstacles:
                         continue
                     chosen = (cx, cy)
                     break
