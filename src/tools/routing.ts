@@ -244,14 +244,14 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Via orphan pads (plane-net via-near-pad)
   server.tool(
     "via_orphan_pads",
-    "Drop a via adjacent to every F.Cu/B.Cu pad on a plane net (GND, BAT+, etc.) that isn't already connected to a same-net via or track. Necessary post-autoroute step because freerouting respects (type power) plane layers by NOT placing landing vias on them — orphan SMD pads stay floating relative to the inner-layer pour. Via-near-pad with a short stub trace; no via-in-pad, so no special manufacturing required. Tries the pad's outward direction first (perpendicular to the pin row on QFN/TSSOP perimeter pads), then the three other cardinals. First clearance-passing position wins; failing pads counted in skippedNoClearance. Default preview; pass apply=true to commit.",
+    "Drop a via adjacent to every F.Cu/B.Cu SMD pad on a plane net (GND, BAT+, etc.) that isn't already plane-connected. Necessary post-autoroute step because freerouting respects (type power) plane layers by NOT placing landing vias on them — orphan SMD pads stay floating relative to the inner-layer pour. Via-near-pad with a short stub trace; no via-in-pad, so no special manufacturing required. v2 behaviour: skips PTH/NPTH pads (already plane-connected); detects embedded thermal vias in footprints (e.g. _ThermalVias variants) and treats the SMD thermal pad as connected; stub width defaults to the pad's netclass min track width (so a BAT+ stub is POWER_4A's 1.5mm, not 0.25mm); only same-net VIAS within pickup radius count as 'already connected' (adjacent tracks don't, because they may form an orphan chain). Tries the pad's outward direction first, then three cardinals. Default preview; pass apply=true to commit.",
     {
       net: z.string().describe("Plane net to via (e.g. 'GND', 'BAT+', 'V12_OUT')."),
       layer: z.string().optional().describe("Which pad side to target: 'F.Cu', 'B.Cu', or 'both' (default 'F.Cu')."),
       viaDiameter: z.number().optional().describe("Via outer diameter in mm (default 0.6)."),
       viaDrill: z.number().optional().describe("Via drill diameter in mm (default 0.3)."),
       viaOffset: z.number().optional().describe("Gap between pad edge and via edge in mm (default 0.6). Via center sits at pad_half + viaOffset + via_radius from the pad center."),
-      stubWidth: z.number().optional().describe("Width of the stub trace from pad center to via center in mm (default 0.25)."),
+      stubWidth: z.number().optional().describe("Width of the stub trace from pad center to via center in mm. Default: max(0.25, pad net's netclass min track width) so the stub doesn't violate the netclass."),
       minClearance: z.number().optional().describe("Minimum gap in mm between the via edge and foreign-net copper on any layer (default 0.15)."),
       apply: z.boolean().optional().describe("Commit the proposed vias and stubs (default false = preview)."),
       maxVias: z.number().optional().describe("Safety cap on the number of proposed vias (default 200)."),

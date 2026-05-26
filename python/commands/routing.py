@@ -1038,8 +1038,8 @@ class RoutingCommands:
             }
 
     def via_orphan_pads(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Drop a via adjacent to every plane-net pad (F.Cu/B.Cu) that
-        isn't already connected to a same-net via or track (#213).
+        """Drop a via adjacent to every plane-net SMD pad (F.Cu/B.Cu)
+        that isn't already connected to the plane (#213).
 
         Why this exists: pcbnew exports the DSN with `(type power)` for
         layers that host a plane pour (commit 3579223). Freerouting
@@ -1053,6 +1053,22 @@ class RoutingCommands:
         Via-NEAR-pad, not via-IN-pad: the via center sits at `viaOffset`
         mm beyond the pad's farthest edge in the chosen direction. No
         special manufacturing required.
+
+        v2 behaviour (2026-05-27):
+          - **Skips PTH/NPTH pads** entirely — they already connect to
+            the plane by passing through every copper layer.
+          - **Detects embedded thermal vias**: an SMD thermal pad
+            whose footprint defines through-hole pads at the same XY
+            (KiCAD's `_ThermalVias` footprints) is treated as
+            plane-connected — no extra via added.
+          - **Stub width defaults to netclass minimum**: a stub from a
+            BAT+ pad gets POWER_4A's 1.5 mm, not 0.25 mm. Prevents
+            track_width DRC violations on the new stubs.
+          - **Conservative connectivity**: only same-net VIAS within
+            pickup radius count as "already connected." Adjacent
+            same-net tracks no longer count, because they may form an
+            orphan chain (multiple GND pads connected only to each
+            other, never to the plane).
 
         Algorithm:
           1. Enumerate every pad on `net` that has copper on the target
@@ -1091,7 +1107,10 @@ class RoutingCommands:
             via_diameter = float(params.get("viaDiameter", 0.6))
             via_drill = float(params.get("viaDrill", 0.3))
             via_offset = float(params.get("viaOffset", 0.6))
-            stub_width = float(params.get("stubWidth", 0.25))
+            # stubWidth default deferred — resolved later as
+            # max(0.25mm, pad's netclass min track width) so a stub
+            # on a POWER_4A pad doesn't violate the netclass.
+            explicit_stub_width = params.get("stubWidth")
             min_clearance = float(params.get("minClearance", 0.15))
             apply_changes = bool(params.get("apply", False))
             max_vias = int(params.get("maxVias", 200))
@@ -1100,8 +1119,8 @@ class RoutingCommands:
             via_diameter_iu = int(via_diameter * SCALE)
             via_drill_iu = int(via_drill * SCALE)
             via_offset_iu = int(via_offset * SCALE)
-            stub_width_iu = int(stub_width * SCALE)
             min_clearance_iu = int(min_clearance * SCALE)
+            min_stub_width_iu = int(0.25 * SCALE)
 
             target_layers: List[int] = []
             if layer_param == "F.Cu":
@@ -1119,32 +1138,70 @@ class RoutingCommands:
                     ),
                 }
 
-            # Pre-collect same-net vias and same-net tracks by endpoint.
-            # We use these for the "is this pad already covered" check.
+            # Pre-collect same-net vias. (v2 no longer trusts adjacent
+            # same-net TRACKS for "already connected" — an orphan
+            # chain of GND caps connected only to each other looks
+            # connected by track-adjacency but is electrically floating
+            # from the plane.)
             same_net_via_xy: List[Tuple[int, int]] = []
-            same_net_track_xy: List[Tuple[int, int]] = []
             for t in self.board.Tracks():
                 if t.GetNetname() != net_name:
                     continue
                 if t.Type() == pcbnew.PCB_VIA_T:
                     p = t.GetPosition()
                     same_net_via_xy.append((p.x, p.y))
-                else:
-                    s, e = t.GetStart(), t.GetEnd()
-                    same_net_track_xy.append((s.x, s.y))
-                    same_net_track_xy.append((e.x, e.y))
 
-            # Collect candidate pads: on the right net, on F.Cu/B.Cu.
-            pad_records: List[Tuple[Any, Any, int]] = []  # (footprint, pad, layer)
+            # Resolve the net's netclass min track width so the stub
+            # width default respects POWER_4A=1.5mm, POWER_2A=0.8mm,
+            # etc. Otherwise a 0.25mm stub on a BAT+ pad violates DRC.
+            net_settings = self.board.GetDesignSettings().m_NetSettings
+            netclass_min_width_iu = 0
+            try:
+                netinfo = self.board.GetNetInfo()
+                nbn = netinfo.NetsByName()
+                if nbn.has_key(net_name):
+                    n = nbn[net_name]
+                    nc_name = str(n.GetNetClassName())
+                    if net_settings.HasNetclass(nc_name):
+                        nc = net_settings.GetNetClassByName(nc_name)
+                        netclass_min_width_iu = int(nc.GetTrackWidth())
+            except Exception:
+                pass
+
+            # Resolve effective stub width: explicit override wins,
+            # otherwise max(0.25mm, netclass min track width).
+            if explicit_stub_width is not None:
+                stub_width_iu = int(float(explicit_stub_width) * SCALE)
+            else:
+                stub_width_iu = max(min_stub_width_iu, netclass_min_width_iu)
+
+            # v2: skip PTH/NPTH pads — they're already plane-connected
+            # by virtue of passing through every copper layer.
+            # Also pre-index per-footprint PTH pads on this net so we
+            # can detect embedded thermal vias (an SMD thermal pad
+            # whose footprint defines through-hole pads at the same
+            # XY is already plane-connected).
+            pad_records: List[Tuple[Any, Any, int]] = []
+            pth_pads_by_fp: Dict[str, List[Tuple[Any, int, int]]] = {}
             for fp in self.board.GetFootprints():
+                fp_ref = fp.GetReference()
                 for pad in fp.Pads():
                     if pad.GetNetname() != net_name:
+                        continue
+                    attr = pad.GetAttribute()
+                    if attr in (pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH):
+                        # Catalog for thermal-via detection, but don't
+                        # via this pad — already plane-connected.
+                        pp = pad.GetPosition()
+                        pth_pads_by_fp.setdefault(fp_ref, []).append(
+                            (pad, pp.x, pp.y)
+                        )
                         continue
                     pad_layerset = pad.GetLayerSet().Seq()
                     for lid in target_layers:
                         if lid in pad_layerset:
                             pad_records.append((fp, pad, lid))
-                            break  # one record per pad even if both layers
+                            break
 
             proposed: List[Dict[str, Any]] = []
             skipped_already_connected = 0
@@ -1164,8 +1221,11 @@ class RoutingCommands:
                 )
                 pickup_sq = pickup * pickup
 
-                # Already connected? Same-net via within pickup OR
-                # same-net track endpoint within the pad's bbox.
+                # Already connected? v2: only same-net VIAS within
+                # pickup radius count, plus embedded thermal vias
+                # (PTH/NPTH same-net pads in this footprint that
+                # overlap the candidate pad's bbox). Tracks DON'T
+                # count because they might be an orphan chain.
                 already = False
                 for vx, vy in same_net_via_xy:
                     ddx = vx - pad_pos.x
@@ -1180,7 +1240,10 @@ class RoutingCommands:
                     pad_right = pad_pos.x + half_x
                     pad_top = pad_pos.y - half_y
                     pad_bottom = pad_pos.y + half_y
-                    for tx, ty in same_net_track_xy:
+                    # Embedded thermal-via detection: footprint-local
+                    # PTH/NPTH pads on the same net at the candidate
+                    # pad's location.
+                    for _, tx, ty in pth_pads_by_fp.get(fp.GetReference(), []):
                         if pad_left <= tx <= pad_right and pad_top <= ty <= pad_bottom:
                             already = True
                             break
