@@ -888,14 +888,18 @@ class RoutingCommands:
                 # net's GetNetClass().GetName() reflects the resolved
                 # class (default if no pattern matched).
                 target_net_names = set()
+                # NETINFO_LIST has no NetnamesList() in KiCAD 9 SWIG;
+                # iterate the NetsByName() map directly. Was previously
+                # wrapped in a try/except that silently swallowed the
+                # AttributeError, giving empty net sets every call.
                 try:
                     netinfo = self.board.GetNetInfo()
                     nbn = netinfo.NetsByName()
-                    for net_name in netinfo.NetnamesList():
-                        n = nbn[net_name]
+                    for key_wx in list(nbn.keys()):
+                        n = nbn[key_wx]
                         nc = n.GetNetClass()
                         if nc is not None and nc.GetName() == net_class:
-                            target_net_names.add(net_name)
+                            target_net_names.add(str(key_wx))
                 except Exception:
                     pass
 
@@ -1376,18 +1380,21 @@ class RoutingCommands:
             SCALE = 1_000_000
             min_clearance_iu = int(min_clearance * SCALE)
 
-            # 1. Identify nets in the high-current class.
+            # 1. Identify nets in the high-current class. NETINFO_LIST
+            # has no NetnamesList() method in KiCAD 9; iterate the
+            # NetsByName() map directly.
             netinfo = self.board.GetNetInfo()
             nbn = netinfo.NetsByName()
             high_current_nets: set = set()
             target_width_iu = 0
-            for net_name in netinfo.NetnamesList():
-                n = nbn[net_name]
+            for key_wx in list(nbn.keys()):
+                net_name_str = str(key_wx)
+                n = nbn[key_wx]
                 nc = n.GetNetClass()
                 if nc is None:
                     continue
                 if nc.GetName() == high_current_class:
-                    high_current_nets.add(net_name)
+                    high_current_nets.add(net_name_str)
                     if target_width_iu == 0:
                         try:
                             target_width_iu = int(nc.GetTrackWidth())
