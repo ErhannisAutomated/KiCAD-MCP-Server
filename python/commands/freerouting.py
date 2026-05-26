@@ -15,7 +15,7 @@ import shutil
 import subprocess
 import time
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger("kicad_interface")
 
@@ -184,6 +184,62 @@ def _maybe_apply_layer_order(
     except ValueError as e:
         logger.warning(f"Skipping DSN layer reorder: {e}")
         return None
+
+
+def _rewrite_dsn_plane_layer_types(dsn_text: str) -> Tuple[str, List[str]]:
+    """Mark every copper layer that hosts a (plane …) declaration as
+    ``(type power)`` instead of ``(type signal)``.
+
+    pcbnew's `ExportSpecctraDSN` always emits ``(type signal)`` for
+    every copper layer, even when the layer is a continuous GND / PWR
+    pour declared via ``(plane NET (polygon LAYER …))``. Freerouting
+    treats signal layers as routable, so long-distance nets often get
+    routed straight through the pour layer — carving up the plane and
+    wrecking the intended low-impedance return paths.
+
+    This post-process scans the DSN for plane declarations, identifies
+    which layers carry a plane, and flips those layers' ``type signal``
+    line to ``type power``. Freerouting then leaves those layers alone.
+
+    Returns (rewritten_text, list_of_plane_layer_names).
+    """
+    import re
+
+    plane_re = re.compile(
+        r"\(plane\s+\S+\s*\(polygon\s+(\S+)\s",
+        re.MULTILINE,
+    )
+    plane_layers = sorted({m.group(1) for m in plane_re.finditer(dsn_text)})
+    if not plane_layers:
+        return dsn_text, []
+
+    new_text = dsn_text
+    for lname in plane_layers:
+        # Match e.g. "    (layer In1.Cu\n      (type signal)" — replace
+        # only the matching layer block's type line.
+        block_re = re.compile(
+            r"(\(layer " + re.escape(lname) + r"\n\s+\(type )signal(\))",
+            re.MULTILINE,
+        )
+        new_text = block_re.sub(r"\1power\2", new_text)
+    return new_text, plane_layers
+
+
+def _maybe_apply_plane_layer_types(dsn_path: str) -> List[str]:
+    """Rewrite plane layers in the DSN to ``(type power)`` so freerouting
+    leaves them alone. Returns the list of plane layers that were
+    flipped (empty if no planes were detected)."""
+    try:
+        with open(dsn_path, "r") as f:
+            txt = f.read()
+        new_txt, layers = _rewrite_dsn_plane_layer_types(txt)
+        if layers and new_txt != txt:
+            with open(dsn_path, "w") as f:
+                f.write(new_txt)
+        return layers
+    except Exception as e:
+        logger.warning(f"Skipping DSN plane-layer rewrite: {e}")
+        return []
 
 
 def _build_freerouting_cmd(
@@ -378,6 +434,19 @@ class FreeroutingCommands:
         if applied_layer_order:
             logger.info(f"DSN layer order set to: {applied_layer_order}")
 
+        # Step 1c: Flip plane layers (those hosting a `(plane …)`
+        # declaration) from `(type signal)` to `(type power)` so
+        # freerouting leaves them alone.  pcbnew's DSN exporter marks
+        # every copper layer as signal even when there's a continuous
+        # pour on it; without this step long-distance signal nets get
+        # routed straight through the plane, carving up the pour and
+        # ruining the return-current path.
+        plane_layers = _maybe_apply_plane_layer_types(dsn_path)
+        if plane_layers:
+            logger.info(
+                f"DSN plane layers marked (type power): {plane_layers}"
+            )
+
         # Step 2: Run Freerouting
         cmd = _build_freerouting_cmd(jar_path, dsn_path, ses_path, passes, use_docker)
 
@@ -471,6 +540,7 @@ class FreeroutingCommands:
             "ses_path": ses_path,
             "elapsed_seconds": elapsed,
             "layerOrder": applied_layer_order,
+            "planeLayersFlippedToPower": plane_layers,
             "board_stats": {
                 "tracks": track_count,
                 "vias": via_count,
@@ -529,6 +599,9 @@ class FreeroutingCommands:
         applied_layer_order = _maybe_apply_layer_order(
             self.board, output_path, layer_order
         )
+        # Flip plane layers to (type power) so freerouting won't route
+        # signals across them — see _rewrite_dsn_plane_layer_types.
+        plane_layers = _maybe_apply_plane_layer_types(output_path)
 
         file_size = os.path.getsize(output_path) if os.path.isfile(output_path) else 0
         return {
@@ -537,6 +610,7 @@ class FreeroutingCommands:
             "path": output_path,
             "size_bytes": file_size,
             "layerOrder": applied_layer_order,
+            "planeLayersFlippedToPower": plane_layers,
         }
 
     def import_ses(self, params: Dict[str, Any]) -> Dict[str, Any]:
