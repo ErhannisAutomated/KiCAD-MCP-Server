@@ -151,6 +151,103 @@ Propose (and optionally apply) a parallel partner via next to every existing via
 
 ---
 
+### pin_zone_same_net
+
+Proactive counterpart to `bridge_same_net_pins`. Drops a single zone covering runs of contiguous same-net pins on an IC **before** autoroute, so the autorouter never creates a thin sub-min-width bridge that would have to be retroactively fixed.
+
+**Parameters:**
+
+| Parameter           | Type    | Required | Description                                          |
+| ------------------- | ------- | -------- | ---------------------------------------------------- |
+| nets                | array   | No       | Optional net filter (default: all nets).             |
+| components          | array   | No       | Optional component-ref filter (default: all).        |
+| marginMm            | number  | No       | Margin (mm) around the pad-union bbox (default 0.1). |
+| adjacencyFactor     | number  | No       | Adjacency threshold multiplier on NN-dist (default 1.25). |
+| minPinDistMm        | number  | No       | Min distance below which two pads are considered co-located, not adjacent (default 0.001). |
+| absoluteMaxDistMm   | number  | No       | Absolute cap (mm) on adjacent-pair distance regardless of NN ratio (default 5.0). |
+| connection          | string  | No       | `"solid"` (default) or `"thermal"`.                  |
+| apply               | boolean | No       | Commit the zones (default `false` = preview).        |
+
+**Usage Notes:**
+
+- Adjacency heuristic: for each pad, compute distance to all other same-net pads on the same footprint+layer; NN-dist = smallest above `minPinDistMm`. Two pads are adjacent iff distance ≤ `adjacencyFactor × max(NN-dist of A, NN-dist of B)`.
+- At `adjacencyFactor=1.25`, opposite-side IC pins are naturally rejected (distance ~ body width >> 1.25 × pitch); corner-adjacent QFN pins still cluster.
+- `absoluteMaxDistMm` handles the 2-pad pathology: with exactly 2 pads on a net, each is the other's only NN, so the NN-based threshold always accepts them. Cap rejects far-apart pairs regardless.
+- After computing each cluster's bbox, the tool scans all pads on the zone's layer. **If any non-cluster foreign-net pad's bbox intersects the zone bbox, the zone is rejected** (surfaced in `rejected` with the offending pads). Prevents zones that would bridge over inter-pin gaps onto pads on different nets.
+- Result includes both `zones` (accepted) and `rejected` (with reasons), so failures are visible at the preview step.
+
+**Example:**
+
+```json
+{ "components": ["U4"], "adjacencyFactor": 1.25, "apply": true }
+```
+
+---
+
+### widen_return_paths
+
+Widen GND/return-net stubs near high-current components. The power-rail trace into the component is netclass-sized (POWER_4A = 1.5 mm) but the GND return stub on the same component defaults to 0.2 mm — carrying the same current to the GND plane via. This tool fixes the thermal/IR-drop asymmetry.
+
+**Parameters:**
+
+| Parameter     | Type    | Required | Description                                          |
+| ------------- | ------- | -------- | ---------------------------------------------------- |
+| netClass      | string  | No       | Netclass identifying high-current components (default `"POWER_4A"`). |
+| returnNets    | array   | No       | Nets to widen (default `["GND"]`).                   |
+| width         | number  | No       | Explicit target width mm (default: netclass track width). |
+| minClearance  | number  | No       | Clearance vs foreign-net copper when widening (default 0.15). |
+| pairedVias    | boolean | No       | Place an in-line partner past each stub's terminating via (default false). |
+| apply         | boolean | No       | Commit the widened widths (default `false` = preview). |
+
+**Usage Notes:**
+
+- For each footprint with at least one pad on a high-current net, walks each of its return-net pads via BFS along same-net tracks, stopping at the first same-net via. The traversed segments are the "return stub."
+- Each candidate segment is clearance-checked via the swept-trace test (#177) — segments that would short adjacent foreign-net copper are skipped and reported.
+- With `pairedVias=true`, places an in-line partner past each stub's terminating via for current sharing and inductance symmetry (in-line is electrically equivalent to a fork because the plane absorbs current at each via).
+
+**Example:**
+
+```json
+{ "netClass": "POWER_4A", "returnNets": ["GND"], "apply": true }
+```
+
+---
+
+### via_orphan_pads
+
+Drop a via adjacent to every F.Cu/B.Cu SMD pad on a plane net (GND, BAT+, V12_OUT) that isn't already plane-connected. Necessary post-autoroute step because freerouting respects `(type power)` plane layers (per #203) by *not* placing landing vias on them, leaving SMD pads floating relative to the inner-layer pour.
+
+**Parameters:**
+
+| Parameter     | Type    | Required | Description                                          |
+| ------------- | ------- | -------- | ---------------------------------------------------- |
+| net           | string  | Yes      | Plane net to via (e.g. `"GND"`, `"BAT+"`).           |
+| layer         | string  | No       | Pad side: `"F.Cu"`, `"B.Cu"`, or `"both"` (default `"F.Cu"`). |
+| viaDiameter   | number  | No       | Via outer diameter mm (default 0.6).                 |
+| viaDrill      | number  | No       | Via drill mm (default 0.3).                          |
+| viaOffset     | number  | No       | Gap between pad edge and via edge mm (default 0.6).  |
+| stubWidth     | number  | No       | Stub trace width mm. Default: `max(0.25, pad netclass min track width)`. |
+| minClearance  | number  | No       | Min gap mm between via edge and foreign-net copper (default 0.15). |
+| apply         | boolean | No       | Commit (default `false` = preview).                  |
+| maxVias       | number  | No       | Safety cap (default 200).                            |
+
+**Usage Notes:**
+
+- Via-NEAR-pad with a short stub trace; no via-in-pad, so no special manufacturing required.
+- Skips PTH/NPTH pads (already plane-connected via through-hole drill).
+- Detects embedded thermal vias: an SMD thermal pad whose footprint has PTH same-net pads inside its bbox (e.g. KiCAD's `*_ThermalVias` HTSSOP footprints) is treated as plane-connected.
+- Stub width defaults to the pad's netclass minimum — so a BAT+ stub is POWER_4A's 1.0 mm (1.5 mm preferred), not 0.25 mm. Prevents `track_width` DRC violations on the new stubs.
+- Conservative connectivity: only same-net VIAS within pickup radius count as "already connected." Adjacent same-net tracks don't, because they may form an orphan chain (pads bonded only to each other, not to the plane).
+- Both the via *position* and the stub *trace* are clearance-checked against foreign-net copper. If all four cardinal directions fail, the pad is reported in `skippedNoClearance` and not via'd.
+
+**Example:**
+
+```json
+{ "net": "GND", "apply": true }
+```
+
+---
+
 ### bridge_same_net_pins
 
 Create a small filled zone covering two same-net pads, replacing a thin sub-min-width trace that would violate the POWER netclass track-width rule. Standard practice for parallel power pins on IC datasheets (BAT+ pad doublings on TSSOP / QFN devices) — the zone bonds the pins with solid copper that isn't subject to `track_width` DRC.

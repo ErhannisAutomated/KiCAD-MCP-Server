@@ -98,7 +98,10 @@ _Source: `src/tools/routing.ts`_
 | `check_route_segment`     | Pre-flight obstacle check for a candidate segment    | Additional       |
 | `stitch_pour_vias`        | Propose grid of stitching vias on a pour net         | Additional       |
 | `pair_via`                | Drop a parallel partner via on high-current power vias | Additional     |
-| `bridge_same_net_pins`    | Bridge two same-net IC pads with a small filled zone | Additional       |
+| `bridge_same_net_pins`    | Bridge two same-net IC pads with a small filled zone (reactive) | Additional |
+| `pin_zone_same_net`       | Drop zones over contiguous same-net IC pins (proactive, before autoroute) | Additional |
+| `via_orphan_pads`         | Drop via near each plane-net SMD pad not already plane-connected | Additional |
+| `widen_return_paths`      | Widen GND/return stubs near high-current components to netclass width | Additional |
 | `verify_netclass_patterns`| Detect / restore netclass_patterns stripped by KiCAD GUI saves | Additional |
 | `dedupe_traces`           | Remove duplicate tracks / vias (e.g. autoroute reimports) | Additional   |
 | `copy_routing_pattern`    | Copy routing from source to target component groups  | Additional       |

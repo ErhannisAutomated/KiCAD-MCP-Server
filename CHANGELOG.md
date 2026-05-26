@@ -4,6 +4,105 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### pin_zone_same_net MCP tool (develop, 2026-05-27, #216-#219)
+
+New proactive tool that drops a single zone covering runs of
+contiguous same-net pins on an IC. Counterpart to the reactive
+`bridge_same_net_pins`: this runs *before* autoroute and pins the
+bond into the design, preventing the autorouter from creating thin
+sub-min-width bridges that would then need post-route fixing.
+
+Adjacency heuristic: for each pad, compute distance to all other
+same-net pads on the same footprint+layer; nearest-neighbor distance
+(NN-dist) is the smallest above `minPinDistMm` (default 0.001 mm —
+rejects stacked-pad cases). Two pads are adjacent iff distance ≤
+`adjacencyFactor` × max(NN-dist of A, NN-dist of B). Default
+`adjacencyFactor=1.25` naturally rejects opposite-side IC pins
+(distance ~ body width >> 1.25 × pitch) while accepting corner-
+adjacent QFN pins (still ≈ pitch). Union-find clusters mutually-
+adjacent pads; clusters of ≥2 pads get one zone each.
+
+Two safety checks added in iteration (#218, #219):
+  - `absoluteMaxDistMm` (default 5 mm) caps pair distance regardless
+    of NN ratio. Handles the 2-pad pathology: with exactly 2 pads
+    on a net, each is the other's only neighbor so NN-based
+    threshold always accepts.
+  - Foreign-pad-overlap rejection: after computing the cluster bbox,
+    scan all pads on the zone's layer. Reject if any non-cluster
+    foreign-net pad's bbox intersects the zone bbox (e.g. 8-pin
+    SOIC pads 1+8 with pads 2-7 of other nets between them).
+    Rejections are surfaced in `rejected` with the offending pads
+    listed.
+
+Result reports `proposedCount`, `rejectedCount`, and per-zone
+outlines + areas. Default preview; pass `apply=true` to commit
+(solid connection mode by default — current-carrying bond).
+
+### widen_return_paths MCP tool (develop, 2026-05-27, #214)
+
+New tool that widens GND/return-net stubs near high-current
+components. Power-rail traces into a component are netclass-sized
+(POWER_4A = 1.5 mm) but the GND return stub on the same component
+sits in Default at 0.2 mm — carrying the same current until it
+reaches the GND plane. This is both an IR-drop and a thermal
+liability.
+
+Algorithm: walk each return-net pad (default `GND`) of every
+component with at least one pad on a high-current netclass (default
+`POWER_4A`); BFS along same-net tracks, stopping at the first same-
+net via; widen cleared segments to the netclass width. Each
+candidate segment is clearance-checked via the swept-trace test
+(#177); segments that would short are skipped and reported.
+Optional `pairedVias=true` places an in-line partner past each
+stub's terminating via for current sharing.
+
+### via_orphan_pads MCP tool (develop, 2026-05-27, #213, #215, #217)
+
+New post-autoroute tool that drops a via adjacent to every F.Cu/B.Cu
+SMD pad on a plane net (GND, BAT+, V12_OUT) that isn't already
+plane-connected. Necessary because freerouting respects `(type
+power)` plane layers from #203 by not placing landing vias on them
+— SMD pads stay floating relative to the inner pour. Via-NEAR-pad
+with a short stub trace; no via-in-pad, so no special manufacturing
+required.
+
+Shipped in three iterations:
+  - v1 (#213): basic via-near-pad with cardinal-direction search.
+  - v2 (#215): skip PTH/NPTH pads (already plane-connected); detect
+    embedded thermal vias (PTH same-net pads inside the candidate
+    SMD pad's bbox — e.g. KiCAD `*_ThermalVias` footprints); stub
+    width defaults to max(0.25 mm, pad's netclass min track width);
+    conservative connectivity (only same-net VIAS count as
+    connected, not adjacent tracks — those may form an orphan
+    chain).
+  - v3 (#217): stub-trace clearance check using `_iter_route_obstacles`
+    (the same swept-trace helper that route_pad_to_pad and
+    widen_return_paths use). v2's fat 1.5 mm BAT+ stubs were
+    shorting adjacent foreign-net traces; v3 tries the next cardinal
+    direction or skips the via if the stub can't clear.
+
+### stitch_pour_vias point-in-polygon fix (develop, 2026-05-27, #212)
+
+Long-standing bug in `stitch_pour_vias`: it used `ZONE.HitTest()`
+which is a *graphical* hit test — returns True only for points on
+the polygon boundary (within accuracy), not points contained. Result
+was that every via proposed sat on the zone edge (typically x=0 or
+y=0 along the board outline) and the interior of the pour got no
+stitching. Fixed by switching to `SHAPE_POLY_SET.Contains()` for
+actual point-in-polygon containment. Strengthened the integration
+test with an explicit interior-point assertion.
+
+### NETINFO_LIST iteration / NETCLASS accessor fix (develop, 2026-05-27)
+
+In KiCAD 9's SWIG bindings, `NETINFO_LIST` doesn't expose
+`NetnamesList()` and `NETINFO_ITEM.GetNetClass()` returns a bare
+`SwigPyObject` without type info. Code that called either of those
+silently failed inside a `try/except` and returned empty net sets.
+This had been silently breaking `pair_via netClass=POWER_4A` since
+#206 — every call returned "No nets matched." Fixed by iterating
+`NetsByName().keys()` directly and using `GetNetClassName()` +
+`NET_SETTINGS.GetNetClassByName()` for the typed netclass.
+
 ### bridge_same_net_pins MCP tool (develop, 2026-05-26)
 
 New tool that creates a small filled zone covering two same-net pads
