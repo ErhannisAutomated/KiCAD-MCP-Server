@@ -122,6 +122,48 @@ List components in the schematic with their footprints and LCSC numbers.
 fields are present on every non-power component. (Power flags, mounting
 holes, and decorative symbols don't need either.)
 
+### Annotate Placement Intent (Pin_Spring_Class)
+
+The auto-placer (`relax_placement`) defaults every connection to a
+medium-strength `LOCAL_SIGNAL` spring. For most circuits that's fine,
+but two cases benefit from explicit intent:
+
+1. **Bypass / decoupling capacitors** that must sit *right next to* their
+   IC pin (typically <2 mm). Mark these `DECOUPLING` and the engine will
+   pull the cap hard onto the pin. **Easy to miss — caps marked as
+   "bypass" in the schematic comment text get no special treatment from
+   the auto-placer unless you tag them explicitly.**
+2. **Long-distance / cross-group connections** (e.g. a status LED on the
+   far side of the board, a connector pinout dictated by the case). Mark
+   these `INTER_GROUP` so the engine pulls weakly and lets the local
+   layout breathe.
+
+Tag the pad with `Pin_Spring_Class:<padNum>` on the **PCB footprint**
+(see also #228 for in-progress schematic-side authoring):
+
+```
+Set Pin_Spring_Class:1 on C29 to DECOUPLING.
+Set Pin_Spring_Class:1 on C30 to DECOUPLING.
+Set Pin_Spring_Class:1 on C3 to DECOUPLING.
+Set Pin_Spring_Class:1 on C4 to DECOUPLING.
+```
+
+The accepted class names are `DECOUPLING` (strong, spring_k≈5.0),
+`LOCAL_SIGNAL` (default, spring_k≈1.0), `INTER_GROUP` (weak,
+spring_k≈0.3), `PLANE` (zero — used automatically for power nets like
+GND/BAT+/V12_OUT). Per-target overrides are also supported via JSON,
+e.g. `{"*": "LOCAL_SIGNAL", "U1.4": "DECOUPLING"}` — see
+`PLACEMENT_CONSTRAINTS_REFERENCE.md` for the full grammar.
+
+Without this annotation, the auto-placer will still find a *valid*
+layout, but bypass caps may sit 5+ mm from their target pin and you'll
+need to nudge them manually later. With the annotation in place, the
+spring force ramp during `relax_placement` parks the cap at <1 mm
+automatically.
+
+**Tools:** `set_schematic_component_property` (one footprint property),
+`edit_schematic_component` (multiple in one call).
+
 ### Preview the Schematic
 
 ```

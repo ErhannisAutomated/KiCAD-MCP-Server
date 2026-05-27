@@ -4,6 +4,36 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Doc: placement-constraint annotation step (develop, 2026-05-28, #229)
+
+User flagged that bypass caps on the power_module schematic
+(C29/C30/C3/C4) had no `Pin_Spring_Class` annotation despite being
+explicitly marked as bypass caps in the schematic comments. Result:
+`relax_placement` parked them several mm from their IC pin and the
+user had to nudge them manually each session.
+
+Root cause: the constraint-annotation workflow was implemented (#201,
+#202) but never written into `docs/PCB_DESIGN_WORKFLOW.md` or the
+workflow memory. Easy to lose during stop-and-go work — the auto-
+placer silently runs with defaults when intent is missing.
+
+Added:
+- New "Annotate Placement Intent (Pin_Spring_Class)" section in
+  `docs/PCB_DESIGN_WORKFLOW.md` between the metadata-assignment and
+  preview-the-schematic steps.
+- New `docs/PLACEMENT_CONSTRAINTS_REFERENCE.md` covering the class
+  table (DECOUPLING / LOCAL_SIGNAL / INTER_GROUP / PLANE), the bare-
+  string and per-target JSON value grammar, resolution order, a
+  suggested two-pass annotation workflow, and visual debugging via
+  pcb_autoplacer_viz colours.
+- Step 3b added to the workflow memory pointing at the reference doc
+  with the "easy to skip" warning.
+
+The reference doc is honest about the current limitation: properties
+are read from the PCB footprint, not the schematic symbol (KiCad's
+schematic→PCB sync doesn't carry custom properties through by
+default). Task #228 tracks fixing that.
+
 ### autoroute / import_ses: auto-dedupe to prevent doubled traces (develop, 2026-05-28, #227)
 
 `pcbnew.ImportSpecctraSES` *appends* tracks to the board rather than
