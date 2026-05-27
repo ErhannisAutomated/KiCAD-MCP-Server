@@ -91,8 +91,12 @@ def _serialize_default_spring_classes() -> Dict[str, Dict[str, float]]:
 
 def _load_spring_classes_from_project(
     pro_path: Path,
+    sch_path: Optional[Path] = None,
 ) -> Tuple[Dict[str, SpringClass], Dict[str, str]]:
-    """Read ``mcp_spring_classes`` from a ``.kicad_pro`` file.
+    """Read ``mcp_spring_classes`` from the Schematic_Metadata
+    singleton (preferred, when ``sch_path`` is given and the
+    singleton has the key) or from a ``.kicad_pro`` file (legacy
+    fallback). See #230.
 
     Returns ``(classes, net_assignments)``:
       - classes      — name → SpringClass, merged with defaults.  User
@@ -106,16 +110,42 @@ def _load_spring_classes_from_project(
     """
     classes: Dict[str, SpringClass] = dict(DEFAULT_SPRING_CLASSES)
     nets: Dict[str, str] = {}
-    try:
-        with open(pro_path, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning("Could not read %s for spring classes: %s", pro_path, e)
-        return classes, nets
 
-    section = data.get("mcp_spring_classes")
-    if not isinstance(section, dict):
+    section: Optional[Dict[str, Any]] = None
+    source = "missing"
+
+    # 1. Singleton (preferred)
+    if sch_path is not None and Path(sch_path).exists():
+        try:
+            from commands.schematic_metadata import read_metadata_json
+            from_sch = read_metadata_json(Path(sch_path), "mcp_spring_classes")
+            if isinstance(from_sch, dict):
+                section = from_sch
+                source = "singleton"
+        except Exception as e:
+            logger.debug(
+                "spring-classes singleton read failed for %s: %s; "
+                "falling back to .kicad_pro", sch_path, e,
+            )
+
+    # 2. .kicad_pro (legacy fallback)
+    if section is None:
+        try:
+            with open(pro_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as e:
+            logger.warning(
+                "Could not read %s for spring classes: %s", pro_path, e,
+            )
+            return classes, nets
+        pro_section = data.get("mcp_spring_classes")
+        if isinstance(pro_section, dict):
+            section = pro_section
+            source = "pro"
+
+    if section is None:
         return classes, nets
+    logger.debug("spring-classes loaded from %s", source)
 
     raw_classes = section.get("classes")
     if isinstance(raw_classes, dict):
@@ -398,15 +428,22 @@ def load_pcb_session(
     ``bootstrap_kicad_pro=True`` (default) the section is created
     with defaults on first load so users have something to edit.
     """
-    # Spring class registry from the .kicad_pro file, falling back to
-    # the engine defaults if no project file is present or the
-    # section is absent.
+    # Spring class registry from the Schematic_Metadata singleton
+    # (preferred, #230) or .kicad_pro (legacy fallback). Falls back
+    # to engine defaults if neither source has the section.
     pro_path = _kicad_pro_path_for_board(board)
+    sch_path: Optional[Path] = None
+    if pro_path is not None:
+        candidate = pro_path.with_suffix(".kicad_sch")
+        if candidate.exists():
+            sch_path = candidate
     net_class_assignments: Dict[str, str] = {}
     if pro_path is not None:
         if bootstrap_kicad_pro:
             _bootstrap_spring_classes_in_project(pro_path)
-        classes, net_class_assignments = _load_spring_classes_from_project(pro_path)
+        classes, net_class_assignments = _load_spring_classes_from_project(
+            pro_path, sch_path=sch_path,
+        )
     else:
         classes = dict(DEFAULT_SPRING_CLASSES)
 

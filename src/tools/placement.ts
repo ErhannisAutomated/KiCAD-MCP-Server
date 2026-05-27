@@ -27,9 +27,10 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
   // verify_netclass_patterns
   server.tool(
     "verify_netclass_patterns",
-    "Compare the live `net_settings.netclass_patterns` in `.kicad_pro` against the expected set captured in the `mcp_expected_netclass_patterns` section. KiCAD's GUI has been observed to silently strip patterns on save when it normalises the project across version upgrades — once gone, affected nets fall back to Default netclass and routing tools silently pick the wrong width. First call on a project bootstraps the expected section from the current state (no drift reported). Pass restore=true to re-add missing patterns. The autoroute tool runs this automatically as a pre-flight check and surfaces drift in `netclassPatternDrift` on its response.",
+    "Compare the live `net_settings.netclass_patterns` in `.kicad_pro` against the expected set, stored either on the schematic's Schematic_Metadata singleton (preferred, #230) or in the legacy `.kicad_pro` `mcp_expected_netclass_patterns` key. KiCAD's GUI has been observed to silently strip patterns on save when it normalises the project across version upgrades — once gone, affected nets fall back to Default netclass and routing tools silently pick the wrong width. First call on a project bootstraps the expected section from the current state (no drift reported). Pass restore=true to re-add missing patterns. The autoroute tool runs this automatically as a pre-flight check and surfaces drift in `netclassPatternDrift` on its response. The response's `expectedSource` field reports whether the expected set came from the singleton or `.kicad_pro`.",
     {
       proPath: z.string().optional().describe("Path to the .kicad_pro. Defaults to the currently-loaded board's sibling .kicad_pro."),
+      schematicPath: z.string().optional().describe("Path to the .kicad_sch. Defaults to the proPath's sibling .kicad_sch. When the file exists, the Schematic_Metadata singleton is checked first for the expected-pattern set, falling back to .kicad_pro."),
       restore: z.boolean().optional().describe("Re-add missing patterns into net_settings.netclass_patterns. Default false (report-only)."),
     },
     async (args: any) => {

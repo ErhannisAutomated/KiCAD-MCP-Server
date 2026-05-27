@@ -408,9 +408,12 @@ class FreeroutingCommands:
             from commands.netclass_patterns import verify_netclass_patterns
 
             pro_path = Path(board_path).with_suffix(".kicad_pro")
+            sch_path = Path(board_path).with_suffix(".kicad_sch")
+            if not sch_path.exists():
+                sch_path = None
             if pro_path.exists():
                 netclass_drift = verify_netclass_patterns(
-                    pro_path, restore=False
+                    pro_path, restore=False, sch_path=sch_path,
                 )
                 if netclass_drift.get("drifted"):
                     logger.warning(

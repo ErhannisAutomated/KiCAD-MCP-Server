@@ -6814,8 +6814,19 @@ print("ok")
                     "success": False,
                     "message": f"Not found: {pro_path}",
                 }
+            # Derive the schematic path so verify can prefer the
+            # Schematic_Metadata singleton over .kicad_pro (#231).
+            sch_path_param = params.get("schematicPath")
+            if sch_path_param:
+                sch_path = Path(sch_path_param)
+            else:
+                sch_path = pro_path.with_suffix(".kicad_sch")
+            if not sch_path.exists():
+                sch_path = None
             restore = bool(params.get("restore", False))
-            return verify_netclass_patterns(pro_path, restore=restore)
+            return verify_netclass_patterns(
+                pro_path, restore=restore, sch_path=sch_path,
+            )
         except Exception as e:
             logger.error(f"Error in verify_netclass_patterns: {e}", exc_info=True)
             return {"success": False, "message": str(e)}

@@ -4,6 +4,47 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Schematic_Metadata singleton — phase 2: consumers wired (develop, 2026-05-28, #231)
+
+Phase 1 of #230 shipped the storage layer + migration tool, but
+the existing consumers (`verify_netclass_patterns`, the
+`pcb_autoplacer` spring-class loader) still read from `.kicad_pro`.
+Phase 2 wires them to prefer the schematic singleton.
+
+`verify_netclass_patterns`:
+- Now accepts a `schematicPath` parameter and a new helper
+  `_read_expected_patterns` resolves the source: singleton →
+  `.kicad_pro` → defaults. The response carries a new
+  `expectedSource` field ("singleton" / "pro" / "missing") so
+  callers can see where the data came from.
+- Bootstrap writes to the singleton when a schematic path is
+  available, otherwise to `.kicad_pro`. Existing projects keep
+  working without migration — the fallback path is preserved.
+- Restoration (`restore=true`) still writes to `.kicad_pro` —
+  that's where KiCad reads the live `netclass_patterns` from.
+
+`pcb_autoplacer._load_spring_classes_from_project`:
+- Now accepts `sch_path`. When present, reads `mcp_spring_classes`
+  from the Schematic_Metadata singleton first; otherwise falls
+  back to `.kicad_pro`. Caller in
+  `_build_session_from_board` derives the schematic path from
+  the board's project sibling.
+- Singleton REPLACES `.kicad_pro` (does not merge) — if a project
+  is half-migrated and both sources have entries, the singleton
+  wins. Use `migrate_metadata_to_singleton` to consolidate.
+
+Tests: `tests/test_schematic_metadata_consumers.py` covers
+expectedSource resolution, singleton-wins-over-pro, drift
+detection against the singleton, bootstrap target selection,
+and spring-class loader source selection. All 10 new tests
+pass alongside the 12 from phase 1.
+
+The autoroute pre-flight (`commands/freerouting.py`) and the
+`_handle_verify_netclass_patterns` handler both derive
+`sch_path = board_path.with_suffix(".kicad_sch")` and pass it
+through automatically, so a freshly-migrated project benefits
+immediately on the next autoroute.
+
 ### Schematic_Metadata singleton (phase 1) (develop, 2026-05-28, #230)
 
 User asked for project-wide MCP metadata
