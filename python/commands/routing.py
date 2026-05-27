@@ -2547,6 +2547,216 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def audit_plane_connectivity(
+        self, params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Diagnose disconnected islands within same-net copper pours
+        (#236).
+
+        For each net with at least one zone, list every filled-
+        polygon island with its bbox, area, and the pads/vias on the
+        same net that sit inside it. Plus an ``outOfFill`` list of
+        pads/vias on the net that DON'T sit in any plane fill — those
+        are the orphans a stitching via has to bridge.
+
+        Limitations:
+          - Reports geometric island membership, not full electrical
+            connectivity. A via that bridges two islands by
+            punching through both layers shows up in BOTH islands'
+            member lists; the user infers that those islands are
+            electrically joined.
+          - Treats zones whose fill outline count is 0 as no-ops
+            (un-refilled or empty). Run ``refill_zones`` first if
+            results look stale.
+
+        Returns ``{nets: [{net, islands: [{...}], outOfFill: [...]}]}``.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            SCALE = 1_000_000
+            net_filter = params.get("net")
+
+            # Collect all zones, indexed by net name. For each zone
+            # expand into one or more island records (one per filled
+            # polygon outline — a zone can split into multiple fill
+            # islands when foreign-net voids divide it).
+            islands_by_net: Dict[str, List[Dict[str, Any]]] = {}
+            for z in self.board.Zones():
+                netname = z.GetNetname()
+                if not netname:
+                    continue
+                if net_filter and netname != net_filter:
+                    continue
+                layer = z.GetLayer()
+                layer_name = self.board.GetLayerName(layer)
+                try:
+                    filled = z.GetFilledPolysList(layer)
+                except Exception:
+                    continue
+                n_polys = filled.OutlineCount()
+                for poly_idx in range(n_polys):
+                    # Build a single-island SHAPE_POLY_SET (one
+                    # outline + its holes) so Contains() respects
+                    # both the outer boundary AND any internal voids
+                    # around foreign-net copper. Many KiCad versions
+                    # encode voids into a complex outline rather
+                    # than separate holes, but we handle both.
+                    one_poly = pcbnew.SHAPE_POLY_SET()
+                    one_poly.AddOutline(filled.Outline(poly_idx))
+                    try:
+                        n_holes = filled.HoleCount(poly_idx)
+                    except Exception:
+                        n_holes = 0
+                    for h_idx in range(n_holes):
+                        try:
+                            one_poly.AddHole(filled.Hole(poly_idx, h_idx))
+                        except Exception:
+                            pass
+                    # Bounding box for reporting.
+                    try:
+                        bb = one_poly.BBox()
+                        min_x, min_y = bb.GetX(), bb.GetY()
+                        w, h = bb.GetWidth(), bb.GetHeight()
+                    except Exception:
+                        min_x = min_y = w = h = 0
+                    # Approximate area via the outline's signed area.
+                    try:
+                        area_iu = abs(one_poly.Area())
+                    except Exception:
+                        area_iu = 0
+                    islands_by_net.setdefault(netname, []).append({
+                        "_poly": one_poly,
+                        "layer": layer_name,
+                        "polyIndex": poly_idx,
+                        "bbox": {
+                            "x1": min_x / SCALE,
+                            "y1": min_y / SCALE,
+                            "x2": (min_x + w) / SCALE,
+                            "y2": (min_y + h) / SCALE,
+                            "unit": "mm",
+                        },
+                        "areaMm2": round(area_iu / (SCALE * SCALE), 3),
+                        "padCount": 0,
+                        "viaCount": 0,
+                        "pads": [],
+                        "vias": [],
+                    })
+
+            # For each net, walk every pad and via on the net and
+            # bin it into the island(s) whose polygon contains its
+            # position. Items not in any island become outOfFill.
+            result_nets: List[Dict[str, Any]] = []
+            for netname in sorted(islands_by_net):
+                islands = islands_by_net[netname]
+                out_of_fill: List[Dict[str, Any]] = []
+
+                # Pads
+                for fp in self.board.GetFootprints():
+                    for pad in fp.Pads():
+                        if pad.GetNetname() != netname:
+                            continue
+                        pos = pad.GetPosition()
+                        hit_any = False
+                        for isl in islands:
+                            try:
+                                if isl["_poly"].Contains(pos):
+                                    isl["pads"].append({
+                                        "ref": fp.GetReference(),
+                                        "padNum": pad.GetNumber(),
+                                        "position": {
+                                            "x": pos.x / SCALE,
+                                            "y": pos.y / SCALE,
+                                            "unit": "mm",
+                                        },
+                                    })
+                                    isl["padCount"] += 1
+                                    hit_any = True
+                            except Exception:
+                                continue
+                        if not hit_any:
+                            out_of_fill.append({
+                                "type": "pad",
+                                "ref": fp.GetReference(),
+                                "padNum": pad.GetNumber(),
+                                "position": {
+                                    "x": pos.x / SCALE,
+                                    "y": pos.y / SCALE,
+                                    "unit": "mm",
+                                },
+                            })
+
+                # Vias
+                for t in self.board.Tracks():
+                    if t.Type() != pcbnew.PCB_VIA_T:
+                        continue
+                    if t.GetNetname() != netname:
+                        continue
+                    pos = t.GetPosition()
+                    uuid = t.m_Uuid.AsString()
+                    hit_any = False
+                    for isl in islands:
+                        try:
+                            if isl["_poly"].Contains(pos):
+                                isl["vias"].append({
+                                    "uuid": uuid,
+                                    "position": {
+                                        "x": pos.x / SCALE,
+                                        "y": pos.y / SCALE,
+                                        "unit": "mm",
+                                    },
+                                })
+                                isl["viaCount"] += 1
+                                hit_any = True
+                        except Exception:
+                            continue
+                    if not hit_any:
+                        out_of_fill.append({
+                            "type": "via",
+                            "uuid": uuid,
+                            "position": {
+                                "x": pos.x / SCALE,
+                                "y": pos.y / SCALE,
+                                "unit": "mm",
+                            },
+                        })
+
+                # Strip the internal _poly key before emitting.
+                for isl in islands:
+                    isl.pop("_poly", None)
+
+                result_nets.append({
+                    "net": netname,
+                    "zoneCount": len(islands),  # one entry per
+                                                # filled-polygon island
+                    "islandCount": len(islands),
+                    "islands": islands,
+                    "outOfFillCount": len(out_of_fill),
+                    "outOfFill": out_of_fill,
+                })
+
+            return {
+                "success": True,
+                "netCount": len(result_nets),
+                "message": (
+                    f"Audited {len(result_nets)} net(s) with zones"
+                    + (f" matching '{net_filter}'" if net_filter else "")
+                ),
+                "nets": result_nets,
+            }
+        except Exception as e:
+            logger.error(f"Error in audit_plane_connectivity: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to audit plane connectivity",
+                "errorDetails": str(e),
+            }
+
     def dedupe_traces(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Remove exact-duplicate tracks (and optionally vias) left over
         from autoroute SES re-imports and similar.

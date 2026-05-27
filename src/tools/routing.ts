@@ -304,6 +304,21 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Audit plane connectivity (find disconnected islands within same-net pours)
+  server.tool(
+    "audit_plane_connectivity",
+    "Diagnose disconnected islands within same-net copper pours. For each net with at least one zone, list every filled-polygon island (bbox, layer, area, member pads/vias) plus an `outOfFill` list of pads/vias on the net that DON'T sit in any plane fill — those are the orphans a stitching via has to bridge. Use this when you see a 'Zone X / Zone Y' ratsnest gap and want to know which pads each island holds and where to drop the bridging via (#236). A via that physically bridges two islands by punching through both layers shows up in BOTH islands' member lists; the user infers that those islands are electrically joined.",
+    {
+      net: z.string().optional().describe("Optional net filter — scan only this net. Defaults to every net with at least one zone."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("audit_plane_connectivity", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // Pair via tool (high-current via doubling)
   server.tool(
     "pair_via",

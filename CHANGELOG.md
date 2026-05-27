@@ -4,6 +4,48 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### audit_plane_connectivity MCP tool (develop, 2026-05-28, #236)
+
+When a same-net ratsnest gap shows up as "Zone X / Zone Y" (two
+sub-islands of the same net's plane fill, electrically separate)
+the diagnostic question is which pads sit in each island and
+where to drop the bridging via. Previously had to read the
+`.kicad_pcb` directly and reason about zone outlines vs pad
+positions by hand — that ate hours during the BAT+ debugging
+session today.
+
+New tool: for each net with at least one zone, list every
+filled-polygon island with its layer, bbox, area, member pads
+and vias. Plus an `outOfFill` list — pads/vias on the net that
+DON'T sit in any plane fill (those are the orphans a stitching
+via has to bridge).
+
+Implementation accesses `zone.GetFilledPolysList(layer)` and
+walks each outline as a separate island. SHAPE_POLY_SET
+`Contains(point)` respects the void-subtracted geometry, so a
+foreign-net pad sitting in a clearance void shows up correctly
+as "not in this island". Defensive hole-copy added for KiCad
+versions that emit voids as separate `Hole` records rather than
+encoded in the outline path.
+
+A via that physically bridges two islands by punching through
+both layers shows up in BOTH islands' member lists — the user
+infers the islands are electrically joined. This intentionally
+under-reports rather than over-reports: a member-only-in-one-
+island pad is a clear orphan; a member-in-multiple is just
+a bridge candidate.
+
+Tests: `tests/test_audit_plane_connectivity.py` — 6 integration
+tests covering net filter, island field shape, In2.Cu plane
+size, all-nets scan, pad listing, outOfFill type field. All
+skip in the harness (pcbnew stub) but run against the real
+power_module project.
+
+Smoke-tested against power_module BAT+: 4 islands (3 small
+F.Cu fragments around Q3, U1, plus a 6995mm² In2.Cu plane
+covering 17 pads + 17 vias). 0 outOfFill — confirms today's
+plane stitching work brought every BAT+ pad inside the fill.
+
 ### get_pad_position returns escape vector (develop, 2026-05-28, #235)
 
 When routing a pin-escape stub from an IC pin, the agent needs to

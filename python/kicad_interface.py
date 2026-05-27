@@ -348,6 +348,7 @@ class KiCADInterface:
             "via_orphan_pads": self.routing_commands.via_orphan_pads,
             "widen_return_paths": self.routing_commands.widen_return_paths,
             "find_redundant_vias": self.routing_commands.find_redundant_vias,
+            "audit_plane_connectivity": self.routing_commands.audit_plane_connectivity,
             "pin_zone_same_net": self.routing_commands.pin_zone_same_net,
             "bridge_same_net_pins": self.routing_commands.bridge_same_net_pins,
             "delete_trace": self.routing_commands.delete_trace,
