@@ -4,6 +4,40 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### add_via pre-flight clearance check (develop, 2026-05-27, #222)
+
+`add_via` now defaults to `checkClearance=true` and refuses to commit
+when the proposed via would conflict with foreign-net copper or
+violate the board's `m_HoleToHoleMin`. Mirrors `route_trace`'s
+`checkObstacles` pattern. Pass `checkClearance: false` to override
+(useful when restoring a known-good via by coordinates or under tools
+that already pre-check, like `via_orphan_pads`).
+
+Two new checks combined:
+  - **Copper clearance:** delegates to the existing
+    `_via_clearance_violations` helper. Iterates every track, via,
+    and pad on the board, computes copper-edge-to-via-edge gap, and
+    flags anything closer than the resolved netclass clearance
+    (overridable via the new `clearance` param).
+  - **Hole-to-hole:** new `_via_hole_to_hole_violations` helper.
+    Iterates every other via + every PTH/NPTH pad, computes drill-
+    edge-to-drill-edge gap, and flags anything closer than
+    `m_HoleToHoleMin`. Net-independent — two same-net vias too close
+    together still trip the rule (PCB manufacturers need physical
+    spacing between drilled holes regardless of electrical state).
+
+Failure response shape matches `route_trace`'s: `success: false`,
+`message: "Via placement blocked by N obstacle(s)"`, and an
+`obstacles` list naming each conflict + the missing gap in mm. This
+closes the recurring "place via → run DRC → discover short → delete
+via → reposition" loop that dominated the routing workflow before
+the check existed (a single session of power_module routing spent
+5 round-trips on this).
+
+Tests: `tests/test_add_via_clearance.py` covers clean-spot acceptance,
+foreign-track rejection, `checkClearance=false` override, hole-to-
+hole rejection, and explicit `clearance` parameter behaviour.
+
 ### pin_zone_same_net MCP tool (develop, 2026-05-27, #216-#219)
 
 New proactive tool that drops a single zone covering runs of

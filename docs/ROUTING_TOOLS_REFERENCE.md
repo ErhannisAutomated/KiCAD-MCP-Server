@@ -319,15 +319,20 @@ Propose (and optionally apply) a grid of stitching vias on a copper pour net. Ea
 
 ### add_via
 
-Add a via to the PCB.
+Add a via to the PCB. By default refuses (`checkClearance=true`) when the
+proposed via would conflict with foreign-net copper or violate the board's
+min hole-to-hole — preventing the common "place via → DRC short → delete
+via" loop.
 
 **Parameters:**
 
-| Parameter | Type   | Required | Description                               |
-| --------- | ------ | -------- | ----------------------------------------- |
-| position  | object | Yes      | Via position with x, y, and optional unit |
-| net       | string | Yes      | Net name                                  |
-| viaType   | string | No       | Via type: "through", "blind", or "buried" |
+| Parameter        | Type    | Required | Description                                                                                                                                                                |
+| ---------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| position         | object  | Yes      | Via position with x, y, and optional unit                                                                                                                                  |
+| net              | string  | Yes      | Net name                                                                                                                                                                   |
+| viaType          | string  | No       | Via type: "through", "blind", or "buried"                                                                                                                                  |
+| checkClearance   | boolean | No       | Pre-flight check: refuse the via if it would come within netclass clearance of foreign-net copper or within `m_HoleToHoleMin` of another drilled hole (default: **true**). |
+| clearance        | number  | No       | Override the copper-clearance margin (mm). Defaults to the net's netclass clearance, falling back to the board default.                                                    |
 
 **Usage Notes:**
 
@@ -335,14 +340,31 @@ Add a via to the PCB.
 - Blind vias connect an outer layer to one or more inner layers
 - Buried vias connect two or more inner layers without reaching outer layers
 - Position coordinates use mm by default
+- When `checkClearance` rejects a via, the response carries an `obstacles`
+  list naming the foreign-net copper item and the missing gap in mm
+- Pass `checkClearance: false` only when you've already verified the spot
+  via another tool (e.g. `via_orphan_pads` uses the same logic internally
+  and is the preferred path for bulk plane stitching)
 
 **Example:**
 
 ```json
 {
   "position": { "x": 110.0, "y": 50.0, "unit": "mm" },
-  "net": "GND",
-  "viaType": "through"
+  "net": "GND"
+}
+```
+
+**Example — failure response:**
+
+```json
+{
+  "success": false,
+  "message": "Via placement blocked by 2 obstacle(s)",
+  "obstacles": [
+    "track on net 'BB_FB' on F.Cu near (74.02,63.12) (-0.350 mm gap, need ≥0.200 mm)",
+    "via on net 'GND' at (63.58,67.82) (hole-to-hole gap 0.100 mm, need ≥0.250 mm)"
+  ]
 }
 ```
 

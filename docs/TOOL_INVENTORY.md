@@ -84,7 +84,7 @@ _Source: `src/tools/routing.ts`_
 | ------------------------- | ---------------------------------------------------- | ---------------- |
 | `add_net`                 | Create a new net on the PCB                          | Direct           |
 | `route_trace`             | Route trace segment between XY points (single layer) | Direct           |
-| `add_via`                 | Add via (through/blind/buried)                       | Routed (routing) |
+| `add_via`                 | Add via (through/blind/buried); pre-checks clearance + hole-to-hole (#222) | Routed (routing) |
 | `add_copper_pour`         | Add copper pour / ground plane                       | Routed (routing) |
 | `delete_trace`            | Delete traces by UUID, position, or bulk by net      | Additional       |
 | `query_traces`            | Query/filter traces by net, layer, or bounding box   | Additional       |

@@ -357,7 +357,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Add via tool
   server.tool(
     "add_via",
-    "Add a via to the PCB",
+    "Add a via to the PCB. By default refuses (checkClearance=true) when the proposed via would come within the net's netclass clearance of foreign-net copper, or within the board's min hole-to-hole of another drilled hole (same or different net). Pass checkClearance=false to commit the via unconditionally (use only when you've already verified the spot is safe — e.g. via_orphan_pads has the same clearance logic and is the preferred path for bulk plane stitching).",
     {
       position: z
         .object({
@@ -368,6 +368,18 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         .describe("Via position"),
       net: z.string().describe("Net name"),
       viaType: z.string().optional().describe("Via type (through, blind, buried)"),
+      checkClearance: z
+        .boolean()
+        .optional()
+        .describe(
+          "Refuse the via if it would conflict with foreign-net copper or violate min hole-to-hole (default: true). Set false to force the via anyway — useful when restoring a known-good via or bulk-placing under tools that already pre-check.",
+        ),
+      clearance: z
+        .number()
+        .optional()
+        .describe(
+          "Minimum gap in mm between the via edge and any foreign-net copper (used only when checkClearance is true). Defaults to the net's netclass clearance, falling back to the board default.",
+        ),
     },
     async (args: any) => {
       const result = await callKicadScript("add_via", args);

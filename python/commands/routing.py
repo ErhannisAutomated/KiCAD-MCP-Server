@@ -579,6 +579,8 @@ class RoutingCommands:
             net = params.get("net")
             from_layer = params.get("from_layer", "F.Cu")
             to_layer = params.get("to_layer", "B.Cu")
+            check_clearance = params.get("checkClearance", True)
+            clearance = params.get("clearance")  # mm; default = netclass
 
             if not position:
                 return {
@@ -587,19 +589,20 @@ class RoutingCommands:
                     "errorDetails": "position parameter is required",
                 }
 
-            # Create via
-            via = pcbnew.PCB_VIA(self.board)
-
             # Set position
             scale = 1000000 if position["unit"] == "mm" else 25400000  # mm or inch to nm
             x_nm = int(position["x"] * scale)
             y_nm = int(position["y"] * scale)
-            via.SetPosition(pcbnew.VECTOR2I(x_nm, y_nm))
+            pos_vec = pcbnew.VECTOR2I(x_nm, y_nm)
 
-            # Set size and drill (default to board's current via settings)
+            # Resolve size and drill (default to board's current via settings)
             design_settings = self.board.GetDesignSettings()
-            via.SetWidth(int(size * 1000000) if size else design_settings.GetCurrentViaSize())
-            via.SetDrill(int(drill * 1000000) if drill else design_settings.GetCurrentViaDrill())
+            via_size_iu = (
+                int(size * 1000000) if size else design_settings.GetCurrentViaSize()
+            )
+            via_drill_iu = (
+                int(drill * 1000000) if drill else design_settings.GetCurrentViaDrill()
+            )
 
             # Set layers
             from_id = self.board.GetLayerID(from_layer)
@@ -610,6 +613,49 @@ class RoutingCommands:
                     "message": "Invalid layer",
                     "errorDetails": "Specified layers do not exist",
                 }
+
+            # Pre-flight clearance check (#222). Catches the case where the
+            # via would short adjacent foreign-net copper or violate the
+            # board's min hole-to-hole. Pass checkClearance=false to skip
+            # (e.g. when restoring a known-good via by coordinate).
+            if check_clearance and net:
+                _, min_clearance_iu = self._resolve_route_clearance(
+                    None, clearance, net
+                )
+                copper_obs = self._via_clearance_violations(
+                    pos_vec, via_size_iu, net, min_clearance_iu
+                )
+                try:
+                    min_hth_iu = int(design_settings.m_HoleToHoleMin)
+                except Exception:
+                    min_hth_iu = 0
+                hole_obs = self._via_hole_to_hole_violations(
+                    pos_vec, via_drill_iu, min_hth_iu
+                )
+                obs = copper_obs + hole_obs
+                if obs:
+                    shown = "; ".join(obs[:8])
+                    if len(obs) > 8:
+                        shown += f" (+{len(obs) - 8} more)"
+                    return {
+                        "success": False,
+                        "message": f"Via placement blocked by {len(obs)} "
+                                   f"obstacle(s)",
+                        "errorDetails": (
+                            "The via would conflict with: "
+                            + shown
+                            + ". Pass checkClearance=false to override "
+                            "(only safe when you've already verified the "
+                            "spot via check_route_segment or via_orphan_pads)."
+                        ),
+                        "obstacles": obs,
+                    }
+
+            # Create via
+            via = pcbnew.PCB_VIA(self.board)
+            via.SetPosition(pos_vec)
+            via.SetWidth(via_size_iu)
+            via.SetDrill(via_drill_iu)
             via.SetLayerPair(from_id, to_id)
 
             # Set net if provided
@@ -4593,6 +4639,78 @@ class RoutingCommands:
                         f"at ({pp.x / 1e6:.2f},{pp.y / 1e6:.2f}) "
                         f"({gap / 1e6:.3f} mm gap, "
                         f"need ≥{min_clearance_iu / 1e6:.3f} mm)"
+                    )
+
+        return out
+
+    def _via_hole_to_hole_violations(
+        self,
+        pos: pcbnew.VECTOR2I,
+        via_drill_iu: int,
+        min_hole_to_hole_iu: int,
+    ) -> list:
+        """For a proposed via with the given drill diameter centered at `pos`,
+        return human-readable descriptions of any other drilled hole (via or
+        PTH pad, any net) whose drill edge would be within
+        `min_hole_to_hole_iu` of the proposed drill edge.
+
+        Hole-to-hole is net-independent — two same-net vias too close
+        together still trip this DRC rule (PCB manufacturers need physical
+        spacing between drilled holes). Complements
+        `_via_clearance_violations`, which only catches copper-edge
+        clearance.
+        """
+        if min_hole_to_hole_iu <= 0:
+            return []
+        radius = via_drill_iu // 2
+        px, py = pos.x, pos.y
+        out: list = []
+
+        # Other vias
+        for t in self.board.Tracks():
+            if t.Type() != pcbnew.PCB_VIA_T:
+                continue
+            tp = t.GetPosition()
+            try:
+                other_drill = t.GetDrill()
+            except Exception:
+                continue
+            other_radius = other_drill // 2
+            center_dist = ((tp.x - px) ** 2 + (tp.y - py) ** 2) ** 0.5
+            gap = center_dist - radius - other_radius
+            if gap < min_hole_to_hole_iu:
+                out.append(
+                    f"via on net '{t.GetNetname() or '<no net>'}' "
+                    f"at ({tp.x / 1e6:.2f},{tp.y / 1e6:.2f}) "
+                    f"(hole-to-hole gap {gap / 1e6:.3f} mm, "
+                    f"need ≥{min_hole_to_hole_iu / 1e6:.3f} mm)"
+                )
+
+        # PTH pads
+        for fp in self.board.GetFootprints():
+            for pad in fp.Pads():
+                if pad.GetAttribute() not in (
+                    pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH,
+                ):
+                    continue
+                pp = pad.GetPosition()
+                try:
+                    drill = pad.GetDrillSize()
+                    other_drill = max(drill.x, drill.y)
+                except Exception:
+                    continue
+                if other_drill <= 0:
+                    continue
+                other_radius = other_drill // 2
+                center_dist = ((pp.x - px) ** 2 + (pp.y - py) ** 2) ** 0.5
+                gap = center_dist - radius - other_radius
+                if gap < min_hole_to_hole_iu:
+                    out.append(
+                        f"PTH pad {fp.GetReference()}-{pad.GetNumber()} on "
+                        f"net '{pad.GetNetname() or '<no net>'}' at "
+                        f"({pp.x / 1e6:.2f},{pp.y / 1e6:.2f}) "
+                        f"(hole-to-hole gap {gap / 1e6:.3f} mm, "
+                        f"need ≥{min_hole_to_hole_iu / 1e6:.3f} mm)"
                     )
 
         return out
