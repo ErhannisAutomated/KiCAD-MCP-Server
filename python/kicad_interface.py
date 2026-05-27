@@ -357,6 +357,8 @@ class KiCADInterface:
             "decoupling_audit": self._handle_decoupling_audit,
             "verify_netclass_patterns": self._handle_verify_netclass_patterns,
             "migrate_metadata_to_singleton": self._handle_migrate_metadata_to_singleton,
+            "get_schematic_metadata": self._handle_get_schematic_metadata,
+            "set_schematic_metadata": self._handle_set_schematic_metadata,
             "place_near": self._handle_place_near,
             "check_pcb_integrity": self._handle_check_pcb_integrity,
             "analyze_congestion": self._handle_analyze_congestion,
@@ -6863,6 +6865,83 @@ print("ok")
         except Exception as e:
             logger.error(
                 f"Error in migrate_metadata_to_singleton: {e}", exc_info=True,
+            )
+            return {"success": False, "message": str(e)}
+
+    def _handle_get_schematic_metadata(
+        self, params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Return the merged metadata dict from all Schematic_Metadata
+        singletons on the schematic. {} when none exist (caller can
+        author the first one via set_schematic_metadata). #230."""
+        logger.info("Running get_schematic_metadata")
+        try:
+            from commands.schematic_metadata import (
+                find_singletons,
+                read_metadata,
+            )
+            sch_path = params.get("schematicPath")
+            if not sch_path:
+                return {
+                    "success": False,
+                    "message": "schematicPath is required",
+                }
+            sch_path = Path(sch_path)
+            if not sch_path.exists():
+                return {
+                    "success": False,
+                    "message": f"schematicPath not found: {sch_path}",
+                }
+            singletons = find_singletons(sch_path)
+            return {
+                "success": True,
+                "singletonCount": len(singletons),
+                "singletons": [
+                    {"reference": s["reference"], "uuid": s["uuid"]}
+                    for s in singletons
+                ],
+                "metadata": read_metadata(sch_path),
+            }
+        except Exception as e:
+            logger.error(
+                f"Error in get_schematic_metadata: {e}", exc_info=True,
+            )
+            return {"success": False, "message": str(e)}
+
+    def _handle_set_schematic_metadata(
+        self, params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Set a single metadata key on the schematic's
+        Schematic_Metadata singleton. Creates the singleton on first
+        call. Object/array values are JSON-encoded. Reserved
+        property names (Reference, Value, Footprint, Datasheet,
+        Description, Schematic_Metadata_Marker) are rejected. #230."""
+        logger.info("Running set_schematic_metadata")
+        try:
+            from commands.schematic_metadata import write_metadata_key
+            sch_path = params.get("schematicPath")
+            key = params.get("key")
+            if not sch_path:
+                return {
+                    "success": False,
+                    "message": "schematicPath is required",
+                }
+            if not key:
+                return {
+                    "success": False,
+                    "message": "key is required",
+                }
+            if "value" not in params:
+                return {
+                    "success": False,
+                    "message": "value is required",
+                }
+            return write_metadata_key(
+                Path(sch_path), key, params["value"],
+            )
+        except Exception as e:
+            logger.error(
+                f"Error in set_schematic_metadata: {e}", exc_info=True,
             )
             return {"success": False, "message": str(e)}
 

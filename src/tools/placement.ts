@@ -41,6 +41,38 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
+  // get_schematic_metadata
+  server.tool(
+    "get_schematic_metadata",
+    "Return the merged metadata dict from all Schematic_Metadata singletons on the schematic. {} when none exist (caller can author the first one via set_schematic_metadata). Excludes the singleton's own scaffolding properties (Reference / Value / Footprint / Datasheet / Description / Schematic_Metadata_Marker) — only the user-facing mcp_* keys are returned. Response also includes a singletons[] list with reference + uuid so multi-singleton merges can be inspected.",
+    {
+      schematicPath: z.string().describe("Path to the .kicad_sch."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("get_schematic_metadata", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  // set_schematic_metadata
+  server.tool(
+    "set_schematic_metadata",
+    "Set a single metadata key on the schematic's Schematic_Metadata singleton (#230). Creates the singleton on first call (a DNP symbol placed at the top-left of the schematic; user can drag it elsewhere). Object/array values are JSON-encoded into the property string; primitives (int, str, bool) are stored as-is. Reserved property names (Reference, Value, Footprint, Datasheet, Description, Schematic_Metadata_Marker) are rejected. Subsequent calls with the same key update in place — idempotent.",
+    {
+      schematicPath: z.string().describe("Path to the .kicad_sch."),
+      key: z.string().describe("Property name. Convention: prefix with `mcp_` for keys consumed by MCP tooling."),
+      value: z.any().describe("Property value. Primitives stored as-is; objects/arrays serialised to JSON."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("set_schematic_metadata", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // migrate_metadata_to_singleton
   server.tool(
     "migrate_metadata_to_singleton",

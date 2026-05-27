@@ -4,6 +4,32 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### get_schematic_metadata + set_schematic_metadata MCP tools (develop, 2026-05-28, #232)
+
+`migrate_metadata_to_singleton` handles legacy `.kicad_pro` →
+singleton conversion, but for ongoing authoring of metadata keys
+(or AI-driven reads of "what does this project know?") the user
+needs general get/set tools.
+
+`get_schematic_metadata(schematicPath)` returns the merged metadata
+dict from all Schematic_Metadata singletons. {} when none exist.
+Excludes the singleton's own scaffolding properties (Reference /
+Value / Footprint / Datasheet / Description /
+Schematic_Metadata_Marker) — only user-facing `mcp_*` keys come
+through. Response also includes a `singletons[]` list with each
+reference + uuid so multi-singleton merges can be inspected.
+
+`set_schematic_metadata(schematicPath, key, value)` writes a single
+key on the singleton (creates the singleton if absent). Reserved
+property names are rejected. Object/array values are JSON-encoded
+into the property string; primitives stored as-is. Idempotent:
+repeating with the same key updates in place.
+
+Both wrap `python/commands/schematic_metadata.py` helpers — no new
+storage logic. With these two plus `migrate_metadata_to_singleton`,
+users can author/inspect schematic-wide metadata entirely from
+within an AI conversation, no .kicad_pro editing needed.
+
 ### Schematic_Metadata singleton — phase 2: consumers wired (develop, 2026-05-28, #231)
 
 Phase 1 of #230 shipped the storage layer + migration tool, but
