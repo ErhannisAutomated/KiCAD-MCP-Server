@@ -947,6 +947,19 @@ class KiCADInterface:
                     "message": f"Schematic not found: {schematic_path}",
                 }
 
+            # Sub-sheet resolution (#234).
+            resolved_path = self._resolve_component_sheet(
+                str(sch_file), reference,
+            )
+            if resolved_path != str(sch_file):
+                logger.info(
+                    f"delete_schematic_component: {reference} not on "
+                    f"{sch_file.name}; resolved to "
+                    f"{Path(resolved_path).name}"
+                )
+                sch_file = Path(resolved_path)
+                schematic_path = resolved_path
+
             with open(sch_file, "r", encoding="utf-8") as f:
                 content = f.read()
 
@@ -1068,6 +1081,55 @@ class KiCADInterface:
                     return i
             i += 1
         return -1
+
+    @staticmethod
+    def _resolve_component_sheet(
+        schematic_path: str,
+        reference: str,
+    ) -> str:
+        """Locate the sheet (.kicad_sch) that actually contains `reference`.
+
+        Hierarchical KiCad projects split components across the top sheet
+        and any number of sub-sheets, but callers often pass only the
+        top-level path. This helper accepts ANY sheet path in the project:
+        if the given sheet contains the reference, returns it unchanged;
+        otherwise walks ``_all_sheet_paths`` and returns the first sheet
+        that does. Falls back to the given path when nothing matches —
+        downstream code then emits the standard "not found" error
+        (#234).
+        """
+        import re
+        from pathlib import Path
+
+        ref_pattern = re.compile(
+            r'\(property\s+"Reference"\s+"' + re.escape(reference) + r'"'
+        )
+
+        def _file_has_ref(p: Path) -> bool:
+            try:
+                return bool(ref_pattern.search(p.read_text(encoding="utf-8")))
+            except OSError:
+                return False
+
+        given = Path(schematic_path)
+        if _file_has_ref(given):
+            return schematic_path
+
+        # Scan every .kicad_sch in the project directory — KiCad keeps
+        # sub-sheets alongside the top schematic so a simple glob
+        # covers a hierarchical project regardless of which sheet the
+        # caller passed in (#234).
+        try:
+            for sheet in given.parent.glob("*.kicad_sch"):
+                if sheet.resolve() == given.resolve():
+                    continue
+                if _file_has_ref(sheet):
+                    return str(sheet)
+        except Exception as e:
+            logger.debug(
+                f"_resolve_component_sheet directory scan failed: {e}"
+            )
+        return schematic_path
 
     def _set_property_in_block(
         self,
@@ -1306,6 +1368,21 @@ class KiCADInterface:
                     "success": False,
                     "message": f"Schematic not found: {schematic_path}",
                 }
+
+            # Hierarchical projects: caller may pass the top-level sheet
+            # path even when the target component lives on a sub-sheet.
+            # Re-target the operation to the right sheet (#234).
+            resolved_path = self._resolve_component_sheet(
+                str(sch_file), reference,
+            )
+            if resolved_path != str(sch_file):
+                logger.info(
+                    f"edit_schematic_component: {reference} not on "
+                    f"{sch_file.name}; resolved to "
+                    f"{Path(resolved_path).name}"
+                )
+                sch_file = Path(resolved_path)
+                schematic_path = resolved_path
 
             with open(sch_file, "r", encoding="utf-8") as f:
                 content = f.read()
@@ -1608,6 +1685,19 @@ class KiCADInterface:
                     "success": False,
                     "message": f"Schematic not found: {schematic_path}",
                 }
+
+            # Sub-sheet resolution (#234).
+            resolved_path = self._resolve_component_sheet(
+                str(sch_file), reference,
+            )
+            if resolved_path != str(sch_file):
+                logger.info(
+                    f"get_schematic_component: {reference} not on "
+                    f"{sch_file.name}; resolved to "
+                    f"{Path(resolved_path).name}"
+                )
+                sch_file = Path(resolved_path)
+                schematic_path = resolved_path
 
             with open(sch_file, "r", encoding="utf-8") as f:
                 content = f.read()

@@ -4,6 +4,39 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Schematic property tools resolve across sub-sheets (develop, 2026-05-28, #234)
+
+`set_schematic_component_property`, `edit_schematic_component`,
+`remove_schematic_component_property`, `get_schematic_component`,
+and `delete_schematic_component` previously required the caller to
+pass the exact sub-sheet path that contained the target component.
+On a hierarchical project like power_module (top sheet + bms /
+charger / buckboost sub-sheets), this means failing with
+"Component C29 not found" on the top sheet, then grep-ing
+sub-sheets to find buckboost.kicad_sch, then retrying.
+
+New private helper `KiCADInterface._resolve_component_sheet(path,
+ref)`: given any sheet path in the project, returns the actual
+sheet containing the reference — falls back to the input path if
+no match (downstream emits the standard "not found" error).
+Implementation scans every `*.kicad_sch` in the same directory as
+the given sheet; that catches hierarchical projects without
+depending on the `find_top_schematic` / `_all_sheet_paths`
+sheet-discovery helpers (which have edge cases — e.g. an unrelated
+`.kicad_pro` lying around in the project dir misleads
+find_top_schematic into picking the wrong top).
+
+Wired into the four edit-style handlers + the get handler. Move /
+rotate use a different lookup style (sexpdata + WireDragger) and
+weren't part of this task's scope; they emit a different "not
+found" error so they'll still need manual sub-sheet selection
+until separately retrofitted.
+
+Tests: `tests/test_subsheet_component_resolve.py` covers top-sheet
+component, sub-sheet component, sub-sheet-as-input (cross-sheet
+hop), missing component (returns input unchanged). 5/5 pass
+against the real power_module project.
+
 ### pcb_autoplacer reads Pin_Spring_Class from schematic (no sync) (develop, 2026-05-28, #228)
 
 Original plan was to teach `sync_schematic_to_board` to copy
