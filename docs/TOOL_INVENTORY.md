@@ -103,7 +103,9 @@ _Source: `src/tools/routing.ts`_
 | `via_orphan_pads`         | Drop via near each plane-net SMD pad not already plane-connected | Additional |
 | `widen_return_paths`      | Widen GND/return stubs near high-current components to netclass width | Additional |
 | `find_redundant_vias`     | Detect vias whose drill is within m_HoleToHoleMin of another via or PTH pad; optionally delete (#224) | Additional |
-| `verify_netclass_patterns`| Detect / restore netclass_patterns stripped by KiCAD GUI saves | Additional |
+| `verify_netclass_patterns`| Detect / restore netclass_patterns stripped by KiCAD GUI saves (reads expected set from Schematic_Metadata singleton) | Additional |
+| `get_schematic_metadata`  | Read project-wide MCP metadata from the Schematic_Metadata singleton (#230) | Additional |
+| `set_schematic_metadata`  | Write a project-wide MCP metadata key on the Schematic_Metadata singleton; creates on first call (#230, #232) | Additional |
 | `dedupe_traces`           | Remove duplicate tracks / vias (e.g. autoroute reimports) | Additional   |
 | `copy_routing_pattern`    | Copy routing from source to target component groups  | Additional       |
 

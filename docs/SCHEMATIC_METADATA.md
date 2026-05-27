@@ -30,9 +30,7 @@ When tools read a metadata key:
 
 1. **Find singletons** = every schematic symbol whose
    `Schematic_Metadata_Marker` property equals `mcp/v1`.
-2. **0 singletons** → fall back to `.kicad_pro` (backwards
-   compatibility for legacy projects), then to the tool's
-   built-in default.
+2. **0 singletons** → tool falls back to its built-in default.
 3. **1 singleton** → read normally.
 4. **>1 singletons** → merge properties alphabetically by
    Reference, **last-wins** for duplicate keys. A warning is
@@ -65,22 +63,18 @@ error):
   standard KiCad symbol properties
 - `Schematic_Metadata_Marker` — the identifier itself
 
-## Migration from `.kicad_pro`
+## Authoring keys
 
-Run once per legacy project:
+Two MCP tools — `set_schematic_metadata` to write, `get_schematic_metadata`
+to inspect:
 
 ```
-Migrate the project's mcp_* metadata from .kicad_pro to the schematic
-singleton.
+Set mcp_constraint_version on the schematic to 2.
+Get the schematic metadata.
 ```
 
-Tool: `migrate_metadata_to_singleton`. Idempotent — running it on a
-project that's already migrated is a no-op.
-
-By default the migrated keys are also **removed from `.kicad_pro`**
-so the singleton becomes the single source of truth. Pass
-`removeFromPro: false` to keep both during a staged rollout (the
-read fallback ensures consumers see the same value either way).
+`set_schematic_metadata` creates the singleton on first call. Both
+tools are idempotent.
 
 ## Why a singleton instead of `.kicad_pro` keys
 
@@ -106,14 +100,18 @@ The architectural cost is two-fold:
 
 ## Where this lives in the code
 
-`python/commands/schematic_metadata.py` — read/write/migrate.
+`python/commands/schematic_metadata.py` — read/write only.
 
 Three public functions worth knowing:
 
+- `find_singletons(sch_path) → List[dict]` — every singleton on
+  the schematic, with its reference, uuid, and all properties.
 - `read_metadata(sch_path) → Dict[str, str]` — merged metadata
-  dict from all singletons. `{}` if no singleton.
-- `read_metadata_with_pro_fallback(sch_path, pro_path, key)` —
-  one-key lookup with `.kicad_pro` fallback. Used by consumers
-  during the legacy-support phase.
-- `write_metadata_key(sch_path, key, value)` — create or update.
-- `migrate_from_pro(sch_path, pro_path)` — one-shot migration.
+  dict from all singletons. `{}` if no singleton. Excludes
+  scaffolding properties (Reference, Value, etc., plus the marker
+  itself).
+- `read_metadata_json(sch_path, key) → Any | None` — convenience
+  wrapper that JSON-parses the stored value.
+- `write_metadata_key(sch_path, key, value) → dict` — create or
+  update. Object/array values are JSON-encoded; primitives stored
+  as-is.
