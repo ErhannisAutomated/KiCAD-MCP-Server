@@ -277,6 +277,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
       minClearance: z.number().optional().describe("Minimum gap in mm between the via edge and foreign-net copper on any layer (default 0.15)."),
       apply: z.boolean().optional().describe("Commit the proposed vias and stubs (default false = preview)."),
       maxVias: z.number().optional().describe("Safety cap on the number of proposed vias (default 200)."),
+      maxOffsetMultiplier: z.number().optional().describe("When all 4 cardinals at the base viaOffset are blocked, retry at 2× / 3× / ... × viaOffset up to this multiplier (default 4). Each tier pushes the via further from the pad, giving longer stubs but rescuing pads in dense areas. Pass 1 to disable the retry (#226). Each proposed via reports its `offsetMultiplier` so callers can spot pads that needed extended search."),
     },
     async (args: any) => {
       const result = await callKicadScript("via_orphan_pads", args);

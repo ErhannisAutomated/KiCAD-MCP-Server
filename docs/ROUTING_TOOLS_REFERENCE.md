@@ -230,6 +230,7 @@ Drop a via adjacent to every F.Cu/B.Cu SMD pad on a plane net (GND, BAT+, V12_OU
 | minClearance  | number  | No       | Min gap mm between via edge and foreign-net copper (default 0.15). |
 | apply         | boolean | No       | Commit (default `false` = preview).                  |
 | maxVias       | number  | No       | Safety cap (default 200).                            |
+| maxOffsetMultiplier | number | No  | When all 4 cardinals at the base `viaOffset` are blocked, retry at 2× / 3× / ... × viaOffset up to this multiplier (default 4). Pass `1` to disable the retry. Each proposed via reports its `offsetMultiplier` (#226). |
 
 **Usage Notes:**
 
@@ -238,7 +239,7 @@ Drop a via adjacent to every F.Cu/B.Cu SMD pad on a plane net (GND, BAT+, V12_OU
 - Detects embedded thermal vias: an SMD thermal pad whose footprint has PTH same-net pads inside its bbox (e.g. KiCAD's `*_ThermalVias` HTSSOP footprints) is treated as plane-connected.
 - Stub width defaults to the pad's netclass minimum — so a BAT+ stub is POWER_4A's 1.0 mm (1.5 mm preferred), not 0.25 mm. Prevents `track_width` DRC violations on the new stubs.
 - Conservative connectivity: only same-net VIAS within pickup radius count as "already connected." Adjacent same-net tracks don't, because they may form an orphan chain (pads bonded only to each other, not to the plane).
-- Both the via *position* and the stub *trace* are clearance-checked against foreign-net copper. If all four cardinal directions fail, the pad is reported in `skippedNoClearance` and not via'd.
+- Both the via *position* and the stub *trace* are clearance-checked against foreign-net copper. If all 4 cardinals at the base offset fail, the tool falls back to extended offsets (`2×`, `3×`, ... up to `maxOffsetMultiplier`) before reporting `skippedNoClearance`. Each proposed via reports the `offsetMultiplier` it ended up at — `1` is the base case, higher values mean the pad was crowded and the via had to be placed further out.
 
 **Example:**
 

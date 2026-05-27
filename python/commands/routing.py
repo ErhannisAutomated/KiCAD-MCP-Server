@@ -1455,6 +1455,17 @@ class RoutingCommands:
             min_clearance = float(params.get("minClearance", 0.15))
             apply_changes = bool(params.get("apply", False))
             max_vias = int(params.get("maxVias", 200))
+            # When all 4 cardinals at the base viaOffset fail, retry
+            # with progressively larger offsets (× 2, × 3, ... up to
+            # maxOffsetMultiplier ×). Each retry pushes the via
+            # further from the pad — longer stub trace but still
+            # obstacle-checked, so it won't create a short. Caps the
+            # search to avoid landing the via far from the pad it's
+            # supposed to bond. Pass 1 to disable the retry (legacy
+            # behaviour). #226.
+            max_offset_mult = int(params.get("maxOffsetMultiplier", 4))
+            if max_offset_mult < 1:
+                max_offset_mult = 1
 
             SCALE = 1_000_000
             via_diameter_iu = int(via_diameter * SCALE)
@@ -1624,49 +1635,62 @@ class RoutingCommands:
                     ]
 
                 chosen: Optional[Tuple[int, int]] = None
-                for dx, dy in cardinals:
-                    # Offset from pad center along this axis: half-pad
-                    # in the direction + via_offset + via_radius.
-                    if dx != 0:
-                        cx = pad_pos.x + dx * (
-                            pad_half_x + via_offset_iu + via_radius_iu
+                chosen_mult: int = 1
+                # Multi-tier offset retry: try the base via_offset
+                # first; if every cardinal is blocked, multiply the
+                # offset by 2, 3, ... up to maxOffsetMultiplier. The
+                # stub-obstacle check guarantees no short, so the
+                # only cost of pushing further is a longer stub
+                # trace. #226.
+                for mult in range(1, max_offset_mult + 1):
+                    tier_offset_iu = via_offset_iu * mult
+                    for dx, dy in cardinals:
+                        # Offset from pad center along this axis:
+                        # half-pad in the direction + tier_offset +
+                        # via_radius.
+                        if dx != 0:
+                            cx = pad_pos.x + dx * (
+                                pad_half_x + tier_offset_iu + via_radius_iu
+                            )
+                            cy = pad_pos.y
+                        else:
+                            cx = pad_pos.x
+                            cy = pad_pos.y + dy * (
+                                pad_half_y + tier_offset_iu + via_radius_iu
+                            )
+                        cand = pcbnew.VECTOR2I(cx, cy)
+                        # 1) Via clearance against foreign-net copper on
+                        #    all layers.
+                        violations = self._via_clearance_violations(
+                            cand, via_diameter_iu, net_name, min_clearance_iu
                         )
-                        cy = pad_pos.y
-                    else:
-                        cx = pad_pos.x
-                        cy = pad_pos.y + dy * (
-                            pad_half_y + via_offset_iu + via_radius_iu
-                        )
-                    cand = pcbnew.VECTOR2I(cx, cy)
-                    # 1) Via clearance against foreign-net copper on
-                    #    all layers.
-                    violations = self._via_clearance_violations(
-                        cand, via_diameter_iu, net_name, min_clearance_iu
-                    )
-                    if violations:
-                        continue
-                    # 2) v3: stub-trace clearance. The stub goes from
-                    #    the pad center to the via center on the pad's
-                    #    layer at `stub_width_iu`. A 1.5 mm stub on a
-                    #    BAT+ pad next to a foreign-net signal trace
-                    #    shorts when the stub is fatter than the gap
-                    #    to the neighbour. Use the swept-trace
-                    #    obstacle check (#177) — same helper
-                    #    widen_return_paths relies on.
-                    stub_start = pcbnew.VECTOR2I(pad_pos.x, pad_pos.y)
-                    stub_end = cand
-                    stub_obstacles = list(self._iter_route_obstacles(
-                        stub_start,
-                        stub_end,
-                        layer_id,
-                        net_name,
-                        stub_width_iu,
-                        min_clearance_iu,
-                    ))
-                    if stub_obstacles:
-                        continue
-                    chosen = (cx, cy)
-                    break
+                        if violations:
+                            continue
+                        # 2) v3: stub-trace clearance. The stub goes from
+                        #    the pad center to the via center on the pad's
+                        #    layer at `stub_width_iu`. A 1.5 mm stub on a
+                        #    BAT+ pad next to a foreign-net signal trace
+                        #    shorts when the stub is fatter than the gap
+                        #    to the neighbour. Use the swept-trace
+                        #    obstacle check (#177) — same helper
+                        #    widen_return_paths relies on.
+                        stub_start = pcbnew.VECTOR2I(pad_pos.x, pad_pos.y)
+                        stub_end = cand
+                        stub_obstacles = list(self._iter_route_obstacles(
+                            stub_start,
+                            stub_end,
+                            layer_id,
+                            net_name,
+                            stub_width_iu,
+                            min_clearance_iu,
+                        ))
+                        if stub_obstacles:
+                            continue
+                        chosen = (cx, cy)
+                        chosen_mult = mult
+                        break
+                    if chosen is not None:
+                        break
 
                 if chosen is None:
                     skipped_no_clearance += 1
@@ -1687,6 +1711,7 @@ class RoutingCommands:
                         "x": chosen[0] / SCALE,
                         "y": chosen[1] / SCALE,
                     },
+                    "offsetMultiplier": chosen_mult,
                 })
                 # Track the placed via so subsequent pads see it.
                 same_net_via_xy.append(chosen)

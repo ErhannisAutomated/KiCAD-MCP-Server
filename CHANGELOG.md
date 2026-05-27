@@ -4,6 +4,28 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### via_orphan_pads: extended-offset retry (develop, 2026-05-27, #226)
+
+When the 4 cardinal positions at the base `viaOffset` are blocked,
+`via_orphan_pads` now retries at progressively larger offsets — 2×,
+3×, ..., up to `maxOffsetMultiplier` (default 4). Each tier pushes
+the via further from the pad, producing a longer stub trace but
+still going through the same `_via_clearance_violations` and stub-
+trace obstacle check, so no shorts.
+
+Each proposed via reports its `offsetMultiplier` in the response.
+Callers can use this to spot pads that needed extended search
+(potentially flag for re-layout), and pass `maxOffsetMultiplier=1`
+to revert to the legacy behaviour for any reason.
+
+Motivation: in a real session, the tool rejected 7 BAT+ pads as "no
+clearance" — each could have been served by a via 2-3× further
+out. Without extended retry, every one needed manual placement.
+
+Backwards-compatible: previously-clean cases still get
+`offsetMultiplier=1`; only pads that would have been skipped see the
+new behaviour.
+
 ### get_ratsnest: staleness detection + optional auto-refresh (develop, 2026-05-27, #225)
 
 `get_ratsnest` reads from `{project}_drc_violations.json`, which is
