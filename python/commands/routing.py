@@ -2294,6 +2294,234 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def find_redundant_vias(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Scan the board for vias whose drill edge is within
+        `holeToHoleMin` of another via's drill or a PTH pad's drill.
+        Each pair is reported once. The redundant via is the one with
+        the lexicographically larger UUID (deterministic + lets the
+        caller reproduce the choice); the "keep" item is the other.
+
+        Hole-to-hole is net-independent — two same-net vias too close
+        together still trip the rule, and a same-net via sitting on
+        top of a PTH pad's drill is the most common form ("via
+        overlapping the IC thermal pad's own thermal vias"). Pass
+        `delete=true` to remove the proposed vias; default is dry-run
+        preview.
+
+        Catches the case where earlier autoroute / orphan-pad runs
+        left a via 0.5 mm or less from a neighbour: not severe enough
+        to short, but blocked at the PCB manufacturer's hole-to-hole
+        rule. Counterpart to `add_via`'s pre-flight clearance check —
+        that prevents new violations; this cleans up legacy ones
+        already on the board.
+        """
+        try:
+            if not self.board:
+                return {
+                    "success": False,
+                    "message": "No board is loaded",
+                    "errorDetails": "Load or create a board first",
+                }
+
+            SCALE = 1_000_000
+            min_hth_mm = params.get("holeToHoleMin")
+            net_filter = params.get("net")
+            delete = params.get("delete", False)
+
+            if min_hth_mm is None:
+                try:
+                    min_hth_iu = int(
+                        self.board.GetDesignSettings().m_HoleToHoleMin
+                    )
+                except Exception:
+                    min_hth_iu = int(0.25 * SCALE)
+            else:
+                min_hth_iu = int(float(min_hth_mm) * SCALE)
+
+            if min_hth_iu <= 0:
+                return {
+                    "success": False,
+                    "message": "holeToHoleMin must be > 0",
+                    "errorDetails": (
+                        "Board's m_HoleToHoleMin is 0 or unset; pass "
+                        "holeToHoleMin explicitly to enable the scan."
+                    ),
+                }
+
+            # Collect every drilled hole (via or PTH pad) with its
+            # drill size and net.
+            vias = []
+            for t in self.board.Tracks():
+                if t.Type() != pcbnew.PCB_VIA_T:
+                    continue
+                try:
+                    drill = int(t.GetDrill())
+                except Exception:
+                    continue
+                pos = t.GetPosition()
+                vias.append({
+                    "obj": t,
+                    "uuid": t.m_Uuid.AsString(),
+                    "type": "via",
+                    "net": t.GetNetname() or "",
+                    "pos": (pos.x, pos.y),
+                    "drill": drill,
+                })
+
+            pads = []
+            for fp in self.board.GetFootprints():
+                for pad in fp.Pads():
+                    if pad.GetAttribute() not in (
+                        pcbnew.PAD_ATTRIB_PTH, pcbnew.PAD_ATTRIB_NPTH,
+                    ):
+                        continue
+                    ds = pad.GetDrillSize()
+                    drill = max(ds.x, ds.y)
+                    if drill <= 0:
+                        continue
+                    pos = pad.GetPosition()
+                    pads.append({
+                        "uuid": pad.m_Uuid.AsString(),
+                        "type": "pth_pad",
+                        "ref": fp.GetReference(),
+                        "padNum": pad.GetNumber(),
+                        "net": pad.GetNetname() or "",
+                        "pos": (pos.x, pos.y),
+                        "drill": drill,
+                    })
+
+            # Score every via against every other hole. Sort vias
+            # deterministically so the redundancy choice is stable.
+            vias.sort(key=lambda v: v["uuid"])
+
+            conflicts = []
+            seen_pairs = set()  # (uuid_a, uuid_b) sorted
+
+            def gap_iu(a_pos, a_drill, b_pos, b_drill):
+                cd = (
+                    (a_pos[0] - b_pos[0]) ** 2
+                    + (a_pos[1] - b_pos[1]) ** 2
+                ) ** 0.5
+                return cd - a_drill / 2 - b_drill / 2
+
+            for i, va in enumerate(vias):
+                if net_filter and va["net"] != net_filter:
+                    continue
+                # Via vs other vias
+                for vb in vias[i + 1:]:
+                    if net_filter and vb["net"] != net_filter:
+                        continue
+                    gap = gap_iu(va["pos"], va["drill"], vb["pos"], vb["drill"])
+                    if gap < min_hth_iu:
+                        key = tuple(sorted([va["uuid"], vb["uuid"]]))
+                        if key in seen_pairs:
+                            continue
+                        seen_pairs.add(key)
+                        # Redundant = the one with the larger uuid
+                        # (deterministic). Caller may override.
+                        keep, drop = (va, vb) if va["uuid"] < vb["uuid"] else (vb, va)
+                        conflicts.append({
+                            "redundantUuid": drop["uuid"],
+                            "redundantType": "via",
+                            "redundantNet": drop["net"],
+                            "redundantPosition": {
+                                "x": drop["pos"][0] / SCALE,
+                                "y": drop["pos"][1] / SCALE,
+                                "unit": "mm",
+                            },
+                            "keepUuid": keep["uuid"],
+                            "keepType": "via",
+                            "keepNet": keep["net"],
+                            "keepPosition": {
+                                "x": keep["pos"][0] / SCALE,
+                                "y": keep["pos"][1] / SCALE,
+                                "unit": "mm",
+                            },
+                            "gapMm": gap / SCALE,
+                            "requiredGapMm": min_hth_iu / SCALE,
+                            "reason": (
+                                "same-net stacked vias"
+                                if va["net"] == vb["net"]
+                                else "different-net vias too close"
+                            ),
+                        })
+
+                # Via vs PTH pads — pad always wins (can't remove a
+                # pad to fix this); the via is always the proposed
+                # removal candidate.
+                for pad in pads:
+                    gap = gap_iu(va["pos"], va["drill"], pad["pos"], pad["drill"])
+                    if gap < min_hth_iu:
+                        key = tuple(sorted([va["uuid"], pad["uuid"]]))
+                        if key in seen_pairs:
+                            continue
+                        seen_pairs.add(key)
+                        conflicts.append({
+                            "redundantUuid": va["uuid"],
+                            "redundantType": "via",
+                            "redundantNet": va["net"],
+                            "redundantPosition": {
+                                "x": va["pos"][0] / SCALE,
+                                "y": va["pos"][1] / SCALE,
+                                "unit": "mm",
+                            },
+                            "keepUuid": pad["uuid"],
+                            "keepType": "pth_pad",
+                            "keepRef": pad["ref"],
+                            "keepPadNum": pad["padNum"],
+                            "keepNet": pad["net"],
+                            "keepPosition": {
+                                "x": pad["pos"][0] / SCALE,
+                                "y": pad["pos"][1] / SCALE,
+                                "unit": "mm",
+                            },
+                            "gapMm": gap / SCALE,
+                            "requiredGapMm": min_hth_iu / SCALE,
+                            "reason": (
+                                "via overlaps PTH pad drill (same net — "
+                                "likely a redundant stitching via on a "
+                                "thermal pad's own through-hole)"
+                                if va["net"] == pad["net"]
+                                else "via too close to foreign-net PTH "
+                                "pad drill"
+                            ),
+                        })
+
+            removed = 0
+            if delete and conflicts:
+                # Build a uuid → via-obj lookup for O(1) lookup; we
+                # iterate Tracks() each time because the SWIG handle
+                # collection mutates as we remove items.
+                drop_uuids = {c["redundantUuid"] for c in conflicts}
+                for track in list(self.board.Tracks()):
+                    if track.Type() != pcbnew.PCB_VIA_T:
+                        continue
+                    if track.m_Uuid.AsString() in drop_uuids:
+                        self.board.RemoveNative(track)
+                        removed += 1
+                if removed:
+                    self.board.SetModified()
+
+            return {
+                "success": True,
+                "message": (
+                    f"Found {len(conflicts)} hole-to-hole conflict(s)"
+                    + (f"; removed {removed} via(s)" if delete else "")
+                ),
+                "deleted": delete,
+                "conflictCount": len(conflicts),
+                "removedCount": removed if delete else 0,
+                "holeToHoleMinMm": min_hth_iu / SCALE,
+                "conflicts": conflicts,
+            }
+        except Exception as e:
+            logger.error(f"Error in find_redundant_vias: {str(e)}")
+            return {
+                "success": False,
+                "message": "Failed to find redundant vias",
+                "errorDetails": str(e),
+            }
+
     def dedupe_traces(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Remove exact-duplicate tracks (and optionally vias) left over
         from autoroute SES re-imports and similar.

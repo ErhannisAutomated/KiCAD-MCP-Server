@@ -286,6 +286,23 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Find redundant vias (hole-to-hole conflict detector)
+  server.tool(
+    "find_redundant_vias",
+    "Scan the board for vias whose drill edge is within m_HoleToHoleMin of another via's drill or a PTH pad's drill. Reports each pair once as {redundantUuid, keepUuid, gapMm, requiredGapMm, reason}. Catches the case where earlier autoroute or via_orphan_pads runs left a via 0.5mm or less from a neighbour — not severe enough to short, but blocked at the PCB manufacturer's hole-to-hole rule. Counterpart to add_via's pre-flight clearance check: that prevents new violations; this cleans up legacy ones already on the board. The redundant-vs-keep choice is deterministic (lexicographically-larger UUID is dropped); a via paired with a PTH pad is always the redundant one (you can't remove a pad). Default preview; pass delete=true to actually remove the redundant vias.",
+    {
+      holeToHoleMin: z.number().optional().describe("Override the minimum drill-to-drill gap in mm. Defaults to the board's design-rule setting (m_HoleToHoleMin)."),
+      net: z.string().optional().describe("Optional net filter — only scan vias on this net. Useful for cleaning up after a single via_orphan_pads run."),
+      delete: z.boolean().optional().describe("Actually remove the proposed redundant vias (default false = preview)."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("find_redundant_vias", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // Pair via tool (high-current via doubling)
   server.tool(
     "pair_via",

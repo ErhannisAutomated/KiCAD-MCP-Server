@@ -102,6 +102,7 @@ _Source: `src/tools/routing.ts`_
 | `pin_zone_same_net`       | Drop zones over contiguous same-net IC pins (proactive, before autoroute) | Additional |
 | `via_orphan_pads`         | Drop via near each plane-net SMD pad not already plane-connected | Additional |
 | `widen_return_paths`      | Widen GND/return stubs near high-current components to netclass width | Additional |
+| `find_redundant_vias`     | Detect vias whose drill is within m_HoleToHoleMin of another via or PTH pad; optionally delete (#224) | Additional |
 | `verify_netclass_patterns`| Detect / restore netclass_patterns stripped by KiCAD GUI saves | Additional |
 | `dedupe_traces`           | Remove duplicate tracks / vias (e.g. autoroute reimports) | Additional   |
 | `copy_routing_pattern`    | Copy routing from source to target component groups  | Additional       |

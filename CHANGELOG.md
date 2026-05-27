@@ -4,6 +4,37 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### find_redundant_vias MCP tool (develop, 2026-05-27, #224)
+
+Scans the board for vias whose drill edge is within
+`m_HoleToHoleMin` of another via's drill or a PTH pad's drill — i.e.
+existing DRC `hole_to_hole` violations involving at least one via.
+Reports each pair once as `{redundantUuid, keepUuid, gapMm,
+requiredGapMm, reason}`, with optional `delete=true` to actually
+remove the redundant vias.
+
+Counterpart to #222's `add_via` pre-flight clearance check: that
+prevents new violations going forward; this cleans up legacy ones
+that snuck in via earlier autoroute / `via_orphan_pads` /
+`stitch_pour_vias` passes.
+
+The redundant-vs-keep choice is deterministic (the lexicographically-
+larger UUID is dropped) so reruns produce stable results. A via
+paired with a PTH pad is always the redundant one — pads can't be
+removed.
+
+Catches three real patterns:
+  - **Same-net stacked vias** — e.g. two via_orphan_pads runs both
+    placed a via at the same plane-connect spot
+  - **Via overlapping PTH pad drill** — e.g. a GND stitching via
+    that landed on top of an IC's existing thermal-pad through-hole
+  - **Different-net vias too close** — manufacturer hole-to-hole
+    rule trips regardless of net
+
+Tests: `tests/test_find_redundant_vias.py` covers all 8 scenarios.
+Smoke-tested with real pcbnew outside the test harness's pcbnew-stub
+conftest.
+
 ### delete_trace: report what was deleted + scoped position search (develop, 2026-05-27, #223)
 
 Position-based `delete_trace` was picking the geometrically-nearest

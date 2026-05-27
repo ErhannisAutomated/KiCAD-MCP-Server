@@ -281,6 +281,74 @@ Create a small filled zone covering two same-net pads, replacing a thin sub-min-
 
 ---
 
+### find_redundant_vias
+
+Scan the board for vias whose drill edge is within `m_HoleToHoleMin` of
+another via or a PTH pad. Counterpart to `add_via`'s pre-flight
+clearance check — that prevents new violations; this cleans up legacy
+ones already on the board (e.g. left over from earlier autoroute or
+`via_orphan_pads` runs).
+
+**Parameters:**
+
+| Parameter      | Type    | Required | Description                                                                                                                |
+| -------------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------- |
+| holeToHoleMin  | number  | No       | Override the minimum drill-to-drill gap in mm. Defaults to the board's design-rule `m_HoleToHoleMin`.                       |
+| net            | string  | No       | Net filter — only scan vias on this net. Useful for cleaning up after a single `via_orphan_pads` run.                       |
+| delete         | boolean | No       | Actually remove the proposed redundant vias (default false = preview).                                                      |
+
+**Result fields:**
+
+- `conflictCount` — number of unique conflicts detected
+- `conflicts[]` — each entry has `redundantUuid`, `redundantPosition`,
+  `keepUuid`, `keepPosition`, `gapMm`, `requiredGapMm`, and `reason`
+  ("same-net stacked vias", "via overlaps PTH pad drill", or
+  "different-net vias too close")
+- `removedCount` — number of vias actually deleted (when `delete=true`)
+
+**Redundant-vs-keep selection:**
+
+- For a via-vs-via pair: lexicographically-larger UUID is the redundant
+  one. Deterministic so callers can reproduce the choice.
+- For a via-vs-PTH-pad pair: the via is always redundant — pads can't
+  be removed.
+
+**Example:**
+
+```json
+{
+  "delete": false
+}
+```
+
+**Example response:**
+
+```json
+{
+  "success": true,
+  "conflictCount": 2,
+  "removedCount": 0,
+  "holeToHoleMinMm": 0.25,
+  "conflicts": [
+    {
+      "redundantUuid": "a0ea97a6-1556-4d0d-903c-6e4f0c1917bc",
+      "redundantType": "via",
+      "redundantNet": "GND",
+      "redundantPosition": { "x": 65.159, "y": 19.799, "unit": "mm" },
+      "keepUuid": "45edb5f3-5087-4a6a-864e-be0bb527ad3a",
+      "keepType": "via",
+      "keepNet": "GND",
+      "keepPosition": { "x": 65.159, "y": 19.299, "unit": "mm" },
+      "gapMm": 0.200,
+      "requiredGapMm": 0.250,
+      "reason": "same-net stacked vias"
+    }
+  ]
+}
+```
+
+---
+
 ### stitch_pour_vias
 
 Propose (and optionally apply) a grid of stitching vias on a copper pour net. Each candidate must sit inside a zone outline on the net, clear `minClearance` from any foreign-net copper on any layer, and not duplicate an existing same-net via. Through-via, F.Cu ↔ B.Cu.
