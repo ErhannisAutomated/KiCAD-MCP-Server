@@ -659,31 +659,49 @@ and can silently grab the wrong segment in dense areas.
 
 ### query_traces
 
-Query traces on the board with optional filters by net, layer, or bounding box.
+Query traces on the board with optional filters by net, layer, or bounding box. On dense boards a full per-trace dump can overflow the tool-result budget — `summarize`, `limit`, and `offset` let callers ask for only what they need (#237).
 
 **Parameters:**
 
-| Parameter   | Type   | Required | Description                                                   |
-| ----------- | ------ | -------- | ------------------------------------------------------------- |
-| net         | string | No       | Filter by net name                                            |
-| layer       | string | No       | Filter by layer name                                          |
-| boundingBox | object | No       | Filter by bounding box region (x1, y1, x2, y2, optional unit) |
-| unit        | string | No       | Unit for coordinates: "mm" or "inch"                          |
+| Parameter   | Type    | Required | Description                                                                                                                                                              |
+| ----------- | ------- | -------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| net         | string  | No       | Filter by net name                                                                                                                                                       |
+| layer       | string  | No       | Filter by layer name                                                                                                                                                     |
+| boundingBox | object  | No       | Filter by bounding box region (x1, y1, x2, y2, optional unit)                                                                                                            |
+| unit        | string  | No       | Unit for coordinates: "mm" or "inch"                                                                                                                                     |
+| summarize   | boolean | No       | Return per-net counts + total length + layer breakdown only, no individual trace records. ~30× smaller in measured cases (142KB → 4.7KB on a populated board).           |
+| limit       | number  | No       | Cap per-trace records emitted in this response. `traceTotal` / `viaTotal` always reflect the full filtered counts, so callers can keep paging.                           |
+| offset      | number  | No       | Skip the first N filtered records before emitting `limit`. Pairs with `limit` to walk a large set in chunks.                                                             |
 
 **Usage Notes:**
 
-- Returns trace information including UUID, position, width, layer, and net
-- Filters can be combined (e.g., specific net on specific layer)
-- Bounding box uses rectangular region defined by opposite corners
-- Useful for analyzing routing in specific board regions or on specific nets
+- Default (no `summarize`/`limit`) preserves the original full-dump
+  behaviour — passes through unchanged.
+- `summarize: true` is the lightest mode and is the recommended first
+  pass: tells you whether a deeper query is even worth the budget.
+- When paginating, watch `traceTotal` / `viaTotal` to know when you've
+  walked the full set — `summarize` is not emitted in paginated mode.
+- Bounding box uses rectangular region defined by opposite corners.
 
-**Example:**
+**Example (full dump, single net):**
 
 ```json
 {
   "net": "VCC_3V3",
   "layer": "F.Cu"
 }
+```
+
+**Example (summary across all nets):**
+
+```json
+{ "summarize": true }
+```
+
+**Example (paginate dense net):**
+
+```json
+{ "net": "GND", "limit": 200, "offset": 0 }
 ```
 
 ---

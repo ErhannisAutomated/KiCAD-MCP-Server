@@ -102,6 +102,7 @@ Run the full autorouting workflow (export DSN, route, import SES).
 | `freeroutingJar` | string | No | ~/.kicad-mcp/freerouting.jar | Path to freerouting.jar |
 | `maxPasses` | number | No | 20 | Maximum routing passes |
 | `timeout` | number | No | 300 | Timeout in seconds |
+| `autoDedupe` | boolean | No | true | After importing the SES result, run `dedupe_traces(apply=true, includeVias=true)` to drop duplicates. `pcbnew.ImportSpecctraSES` **appends** tracks rather than replacing them, so re-routing the same nets used to silently leave doubled traces — sometimes hundreds of them on iterative re-routes. Set false only when chaining `import_ses` calls and dedupe is intentionally deferred. Response carries `autoDedupeRemovedCount` so callers can spot leakage (#227). |
 
 **Example:**
 
@@ -128,6 +129,7 @@ Import a routed Specctra SES file back into the PCB.
 |-----------|------|----------|-------------|
 | `sesPath` | string | Yes | Path to the .ses file to import |
 | `boardPath` | string | No | Path to .kicad_pcb file (default: current board) |
+| `autoDedupe` | boolean | No | Default true. Same behaviour as `autoroute.autoDedupe` (#227) — drops the duplicate tracks/vias `ImportSpecctraSES` appends. |
 
 ---
 

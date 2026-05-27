@@ -46,7 +46,7 @@ _Source: `src/tools/board.ts`_
 | `add_board_text`    | Add text annotation to board                                      | Routed (board) |
 | `add_zone`          | Add copper zone/pour with clearance settings                      | Routed (board) |
 | `get_board_extents` | Get bounding box of board                                         | Routed (board) |
-| `get_board_2d_view` | Render 2D board view (PNG/JPG/SVG)                                | Routed (board) |
+| `get_board_2d_view` | Render 2D board view (PNG/JPG/SVG); pass `cropToRegion {x1,y1,x2,y2}` to render a board sub-region instead of the full board (#237) | Routed (board) |
 | `import_svg_logo`   | Import SVG file as polygons on silkscreen layer                   | Additional     |
 
 ---
@@ -69,7 +69,7 @@ _Source: `src/tools/component.ts`_
 | `replace_component`        | Replace component with different footprint                    | Routed (component) |
 | `get_component_pads`       | Get all pad information for a component                       | Additional         |
 | `get_component_list`       | List all components with optional filters                     | Additional         |
-| `get_pad_position`         | Get precise position of a specific pad                        | Additional         |
+| `get_pad_position`         | Get precise position of a specific pad; also returns `escapeVector` / `escapeAngleDeg` / `escapeMagnitudeMm` pointing from the IC body centroid out through the pad — handy for sizing pin-escape stubs (#235) | Additional         |
 | `place_component_array`    | Place array of components (rows x columns)                    | Additional         |
 | `align_components`         | Align components (horizontal, vertical, grid)                 | Additional         |
 | `duplicate_component`      | Duplicate component with offset                               | Additional         |
@@ -87,7 +87,7 @@ _Source: `src/tools/routing.ts`_
 | `add_via`                 | Add via (through/blind/buried); pre-checks clearance + hole-to-hole (#222) | Routed (routing) |
 | `add_copper_pour`         | Add copper pour / ground plane                       | Routed (routing) |
 | `delete_trace`            | Delete traces by UUID, position, or bulk by net; returns `deleted` list with each removed item's details; position-mode accepts `kind`/`layer`/`net` scope filters (#223) | Additional       |
-| `query_traces`            | Query/filter traces by net, layer, or bounding box   | Additional       |
+| `query_traces`            | Query/filter traces by net, layer, or bounding box; pass `summarize=true` for counts-only / `limit`+`offset` to page through (#237) | Additional       |
 | `get_nets_list`           | List all nets with statistics                        | Additional       |
 | `modify_trace`            | Modify existing trace (width, layer, net)            | Additional       |
 | `create_netclass`         | Create net class with design rules                   | Additional       |
@@ -104,6 +104,7 @@ _Source: `src/tools/routing.ts`_
 | `widen_return_paths`      | Widen GND/return stubs near high-current components to netclass width | Additional |
 | `find_redundant_vias`     | Detect vias whose drill is within m_HoleToHoleMin of another via or PTH pad; optionally delete (#224) | Additional |
 | `audit_plane_connectivity`| Diagnose disconnected islands within same-net pours — pads/vias per island + outOfFill list (#236) | Additional |
+| `get_ratsnest`            | Inspect the unrouted ratsnest (#182); pass `refreshIfStale=true` to rebuild before reading when the connectivity cache is stale (#225) | Additional |
 | `verify_netclass_patterns`| Detect / restore netclass_patterns stripped by KiCAD GUI saves (reads expected set from Schematic_Metadata singleton) | Additional |
 | `get_schematic_metadata`  | Read project-wide MCP metadata from the Schematic_Metadata singleton (#230) | Additional |
 | `set_schematic_metadata`  | Write a project-wide MCP metadata key on the Schematic_Metadata singleton; creates on first call (#230, #232) | Additional |
@@ -125,7 +126,7 @@ _Source: `src/tools/design-rules.ts`_
 | `assign_net_to_class`   | Assign net to a net class                                   | Routed (drc) |
 | `set_layer_constraints` | Set layer-specific constraints                              | Routed (drc) |
 | `check_clearance`       | Check clearance between two items                           | Routed (drc) |
-| `get_drc_violations`    | Get DRC violation list (filter by severity)                 | Routed (drc) |
+| `get_drc_violations`    | Get DRC violation list (filter by severity / type / net); pass `summaryOnly=true` for counts only, or `limit`+`offset` to page through large reports (#237) | Routed (drc) |
 
 ---
 
@@ -339,9 +340,9 @@ _Source: `src/tools/freerouting.ts`_
 
 | Tool                | Description                                                | Access             |
 | ------------------- | ---------------------------------------------------------- | ------------------ |
-| `autoroute`         | Run Freerouting autorouter (export DSN, route, import SES) | Routed (autoroute) |
-| `export_dsn`        | Export Specctra DSN file for manual routing                | Routed (autoroute) |
-| `import_ses`        | Import routed SES file back into PCB                       | Routed (autoroute) |
+| `autoroute`         | Run Freerouting autorouter (export DSN, route, import SES); auto-dedupes duplicate tracks/vias on import (`autoDedupe=true` by default) so re-routing the same nets no longer leaves doubled traces (#227) | Routed (autoroute) |
+| `export_dsn`        | Export Specctra DSN file for manual routing; plane layers tagged `(type power)` so the router won't add landing vias on them (#203) | Routed (autoroute) |
+| `import_ses`        | Import routed SES file back into PCB; auto-dedupes on import (`autoDedupe=true` by default) (#227) | Routed (autoroute) |
 | `check_freerouting` | Check Java and Freerouting JAR availability                | Routed (autoroute) |
 
 ---

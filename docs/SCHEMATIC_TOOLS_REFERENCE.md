@@ -102,6 +102,12 @@ BOM / sourcing field at a time. Creates the property if it does not yet exist.
 Newly created properties default to hidden — set `hide: false` plus an explicit
 `x`/`y` to display the value on the schematic canvas.
 
+**Hierarchical schematics:** pass the top-level `schematicPath` even when the
+target lives on a sub-sheet — the tool scans every `*.kicad_sch` in the project
+directory, picks the file actually containing the reference, and edits in
+place. Same behaviour applies to `get_schematic_component`,
+`delete_schematic_component`, and `edit_schematic_component` (#234).
+
 | Parameter     | Type    | Required | Description                                                                                          |
 | ------------- | ------- | -------- | ---------------------------------------------------------------------------------------------------- |
 | schematicPath | string  | Yes      | Path to the .kicad_sch file                                                                          |
