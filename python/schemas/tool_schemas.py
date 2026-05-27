@@ -60,11 +60,11 @@ PROJECT_TOOLS = [
         "name": "save_project",
         "title": "Save Current Project",
         "description": (
-            "Saves the PCB and/or schematic to disk. When a board is loaded the PCB is always saved; "
-            "the matching .kicad_sch is auto-detected and saved too. "
-            "Pass schematicPath explicitly when working schematic-only (no board loaded). "
-            "Note: schematic operations (add_schematic_component, connect_to_net, etc.) already "
-            "auto-save after each call, so this is mainly needed to flush the PCB."
+            "Saves the loaded PCB to disk. Schematic operations (add_schematic_component, "
+            "connect_to_net, etc.) already auto-save their .kicad_sch after each call, so this "
+            "tool's job is to flush the PCB — and ONLY the PCB by default. "
+            "The .kicad_sch is left untouched unless you pass schematicPath AND flushSchematic=true; "
+            "see #220 for why (kicad-skip's round-trip drops the lib_symbols cache)."
         ),
         "inputSchema": {
             "type": "object",
@@ -75,7 +75,19 @@ PROJECT_TOOLS = [
                 },
                 "schematicPath": {
                     "type": "string",
-                    "description": "Path to .kicad_sch to save. Auto-derived from board path when omitted.",
+                    "description": (
+                        "Path to .kicad_sch. Only used when flushSchematic=true. "
+                        "Ignored otherwise — schematic ops persist on each call."
+                    ),
+                },
+                "flushSchematic": {
+                    "type": "boolean",
+                    "description": (
+                        "Force a kicad-skip round-trip save of the schematic. Default false. "
+                        "NOT recommended: the round-trip strips the lib_symbols cache section "
+                        "from .kicad_sch (#220). Only enable if you have in-memory schematic "
+                        "state that isn't already persisted."
+                    ),
                 },
             },
         },

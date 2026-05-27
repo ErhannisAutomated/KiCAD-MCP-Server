@@ -50,11 +50,24 @@ export function registerProjectTools(server: McpServer, callKicadScript: Functio
   // Save project tool
   server.tool(
     "save_project",
-    "Save the current KiCAD project",
+    "Save the loaded PCB to disk. The .kicad_sch is left untouched by default — schematic ops already auto-save after each call. Pass schematicPath + flushSchematic=true only if you have unsaved in-memory schematic state (not recommended; see #220 — kicad-skip's round-trip drops the lib_symbols cache).",
     {
-      path: z.string().optional().describe("Optional new path to save to"),
+      filename: z
+        .string()
+        .optional()
+        .describe("Optional new path for the board file (renames board on save)"),
+      schematicPath: z
+        .string()
+        .optional()
+        .describe("Path to .kicad_sch. Only used when flushSchematic=true."),
+      flushSchematic: z
+        .boolean()
+        .optional()
+        .describe(
+          "Force a kicad-skip round-trip save of the schematic. Default false. NOT recommended (#220).",
+        ),
     },
-    async (args: { path?: string }) => {
+    async (args: { filename?: string; schematicPath?: string; flushSchematic?: boolean }) => {
       const result = await callKicadScript("save_project", args);
       return {
         content: [

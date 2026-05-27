@@ -4,6 +4,35 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### save_project no longer corrupts .kicad_sch (develop, 2026-05-27, #220)
+
+Long-running bug: every `save_project` call silently truncated the
+schematic. After a typical PCB-only edit session, `power_module.kicad_sch`
+would shrink from ~1449 lines to ~278 — losing the entire `(lib_symbols)`
+cache section. The workaround was a `git checkout HEAD -- *.kicad_sch`
+after every commit. (For weeks.)
+
+Root cause: `save_project` auto-derived `schematicPath` from the loaded
+board's path even when the caller had no interest in saving the schematic,
+then ran a kicad-skip round-trip on it. kicad-skip's serialiser does NOT
+preserve `(lib_symbols)`. The in-code comment even admitted this was a
+"round-trip confirmation rather than a flush of in-memory state" — i.e.
+pointless, except for the catastrophic side effect.
+
+Schematic-mutating MCP tools (`add_schematic_component`, `connect_to_net`,
+`set_schematic_component_property`, …) already write to disk on each call,
+so there is no in-memory schematic state for `save_project` to flush.
+
+New behaviour:
+- PCB save runs whenever a board is loaded (unchanged).
+- The `.kicad_sch` is left untouched unless the caller passes BOTH
+  `schematicPath` AND `flushSchematic=true`. The opt-in path still exists
+  for any future tool that legitimately needs the round-trip; it emits a
+  warning pointing at #220.
+
+Tests cover all three cases (PCB-only no-op, explicit-flush round-trip,
+schematicPath-without-flush no-op).
+
 ### Pagination + summarize for large-output tools (develop, 2026-05-28, #237)
 
 Three tools regularly overflowed the per-call result size budget,

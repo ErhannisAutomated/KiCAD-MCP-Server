@@ -205,10 +205,31 @@ class ProjectCommands:
             }
 
     def save_project(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Save the current KiCAD project (PCB and/or schematic)"""
+        """Save the current KiCAD project (PCB and/or schematic).
+
+        The PCB save always runs when a board is loaded.
+
+        Schematic save is OPT-IN as of #220. Schematic-mutating MCP
+        tools (set_schematic_component_property, add_schematic_wire,
+        etc.) already write to disk on each call, so there's no
+        in-memory schematic state to flush — save_project doesn't
+        need to touch the .kicad_sch. The previous behaviour
+        auto-derived a schematic path from the board path and ran a
+        kicad-skip round-trip "confirmation save", which DROPPED the
+        lib_symbols section because kicad-skip's serialiser doesn't
+        perfectly preserve it. The .kicad_sch went from ~1449 lines
+        to ~278 on a typical project — requiring a manual
+        ``git checkout HEAD -- *.kicad_sch`` after every save.
+
+        Pass ``schematicPath`` explicitly + ``flushSchematic=true``
+        to force the old round-trip behaviour (kept for the rare
+        case where some future tool actually does need it; not
+        recommended).
+        """
         try:
             filename = params.get("filename")
             schematic_path = params.get("schematicPath")
+            flush_schematic = bool(params.get("flushSchematic", False))
             saved = []
             warnings = []
 
@@ -220,18 +241,11 @@ class ProjectCommands:
                 pcbnew.SaveBoard(self.board.GetFileName(), self.board)
                 saved.append(self.board.GetFileName())
 
-                # Auto-derive schematic path if not explicitly given
-                if not schematic_path:
-                    board_file = self.board.GetFileName()
-                    candidate = os.path.splitext(board_file)[0] + ".kicad_sch"
-                    if os.path.exists(candidate):
-                        schematic_path = candidate
-
-            # --- Schematic save ---
-            # Schematic ops write to disk immediately, so this is a round-trip
-            # confirmation rather than a flush of in-memory state.  kicad-skip
-            # exposes write(fpath); the older sch.to_file() name does not exist.
-            if schematic_path:
+            # --- Schematic save (opt-in) ---
+            # Only round-trips the schematic when the caller
+            # explicitly asks. Otherwise leaves it alone — see the
+            # docstring for the history.
+            if schematic_path and flush_schematic:
                 schematic_path = os.path.abspath(os.path.expanduser(schematic_path))
                 if os.path.exists(schematic_path):
                     try:
@@ -240,6 +254,11 @@ class ProjectCommands:
                         sch = skip.Schematic(schematic_path)
                         sch.write(schematic_path)
                         saved.append(schematic_path)
+                        warnings.append(
+                            "flushSchematic=true ran a kicad-skip "
+                            "round-trip on the .kicad_sch; verify "
+                            "lib_symbols hasn't been stripped — see #220."
+                        )
                     except Exception as sch_err:
                         warnings.append(f"Schematic save failed: {sch_err}")
                 else:
