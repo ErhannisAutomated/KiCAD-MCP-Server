@@ -4,6 +4,39 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### delete_trace: report what was deleted + scoped position search (develop, 2026-05-27, #223)
+
+Position-based `delete_trace` was picking the geometrically-nearest
+track or via with no filtering — which could silently grab the wrong
+segment when several cross at one coordinate. In a real session, a
+position-delete intended for a BAT+ via took out an unrelated
+USB_VBUS track endpoint at the same coords.
+
+Two changes:
+  - Every success response now includes a `deleted` array describing
+    each removed item: `uuid`, `type` (`"track"` / `"via"`), `net`,
+    `position`, plus `layer`+`start`+`end`+`width` for tracks or
+    `fromLayer`+`toLayer` for vias. The caller can verify the right
+    thing was removed instead of trusting the heuristic blindly.
+  - Position-mode accepts new scope filters:
+    - `kind` (`"track"` / `"via"` / `"any"` default) — restrict the
+      nearest-search to one kind of item
+    - `layer` (existing param) — restrict to tracks on that layer
+      (vias touch all layers so layer is ignored for them)
+    - `net` — when paired with `position`, scopes the search to that
+      net rather than triggering bulk-by-net (the bulk-by-net mode
+      now requires `net` to be the *sole* selector — bulk mode
+      no longer accidentally fires when both `position` and `net`
+      are passed)
+
+When a scoped position-search finds nothing, the response's
+`errorDetails` lists the active filters so callers can tell whether
+to widen the search vs the spot truly being empty.
+
+Backwards-compatible: existing callers that only pass `traceUuid` or
+unscoped `position` just get the new `deleted` array added to the
+response.
+
 ### add_via pre-flight clearance check (develop, 2026-05-27, #222)
 
 `add_via` now defaults to `checkClearance=true` and refuses to commit

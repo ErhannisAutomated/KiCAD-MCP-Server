@@ -456,7 +456,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Delete trace tool
   server.tool(
     "delete_trace",
-    "Delete traces from the PCB. Can delete by UUID, position, or bulk-delete all traces on a net.",
+    "Delete traces from the PCB. Can delete by UUID, position, or bulk-delete all traces on a net. Every success response includes a `deleted` array describing each removed item (uuid, type 'track'|'via', net, layer, position) so the caller can verify exactly what was removed — important for position-based deletes, which pick the geometrically-nearest item and can silently grab the wrong segment in dense areas.",
     {
       traceUuid: z.string().optional().describe("UUID of a specific trace to delete"),
       position: z
@@ -471,9 +471,15 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         .string()
         .optional()
         .describe(
-          'Delete all traces on this net (bulk delete). Pass "*" to delete every track on the board.',
+          'Delete all traces on this net (bulk delete). Pass "*" to delete every track on the board. Also scopes the position-based search when a `position` is supplied.',
         ),
-      layer: z.string().optional().describe("Filter by layer when using net-based deletion"),
+      layer: z.string().optional().describe("Filter by layer. Used both in net-based bulk delete (only tracks on this layer) and in position-based delete (only tracks on this layer; vias touch all layers so the filter doesn't apply to them)."),
+      kind: z
+        .enum(["track", "via", "any"])
+        .optional()
+        .describe(
+          "For position-based delete: restrict the nearest-search to a kind of item. 'any' (default) picks the closest of either; 'track' or 'via' force one kind only. Use this when several segments converge at one coordinate and you need to disambiguate.",
+        ),
       includeVias: z
         .boolean()
         .optional()

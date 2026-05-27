@@ -515,24 +515,66 @@ Create a new net class with custom design rules.
 
 ### delete_trace
 
-Delete traces from the PCB. Can delete by UUID, position, or bulk-delete all traces on a net.
+Delete traces from the PCB. Can delete by UUID, position, or bulk-delete
+all traces on a net. Every success response includes a `deleted` array
+describing each removed item (uuid, type 'track'|'via', net, layer,
+position) so the caller can verify exactly what was removed — important
+for position-based deletes, which pick the geometrically-nearest item
+and can silently grab the wrong segment in dense areas.
 
 **Parameters:**
 
-| Parameter   | Type    | Required | Description                                                 |
-| ----------- | ------- | -------- | ----------------------------------------------------------- |
-| traceUuid   | string  | No       | UUID of a specific trace to delete                          |
-| position    | object  | No       | Delete trace nearest to this position (x, y, optional unit) |
-| net         | string  | No       | Delete all traces on this net (bulk delete)                 |
-| layer       | string  | No       | Filter by layer when using net-based deletion               |
-| includeVias | boolean | No       | Include vias in net-based deletion                          |
+| Parameter   | Type    | Required | Description                                                                                                                                                                                              |
+| ----------- | ------- | -------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| traceUuid   | string  | No       | UUID of a specific trace to delete                                                                                                                                                                       |
+| position    | object  | No       | Delete trace nearest to this position (x, y, optional unit)                                                                                                                                              |
+| net         | string  | No       | Bulk: delete all traces on this net (use "*" for all). With `position`: scope the nearest-search to this net.                                                                                            |
+| layer       | string  | No       | Filter by layer. Used in both bulk-by-net mode (tracks on this layer only) and position mode (tracks on this layer only — vias touch all layers so the filter does not apply to them).                   |
+| kind        | string  | No       | Position-mode only: `"track"`, `"via"`, or `"any"` (default). Restricts the nearest-search to one kind of item — use when several segments converge at a coordinate and you need to disambiguate (#223). |
+| includeVias | boolean | No       | Include vias in net-based bulk delete (use with net="*" to strip the whole board)                                                                                                                        |
+
+**Mode selection:**
+
+- `traceUuid` only → delete that exact item
+- `position` only → nearest-search across all tracks/vias on board
+- `position` + (`net`/`layer`/`kind`) → nearest-search scoped to filter
+- `net` alone (no `position`/`traceUuid`) → bulk delete by net
 
 **Usage Notes:**
 
-- Three deletion modes: by UUID (specific), by position (nearest), or by net (bulk)
-- Position-based deletion finds the closest trace to the specified coordinates
-- Net-based deletion can be filtered by layer
-- Vias are excluded from net-based deletion by default unless includeVias is true
+- Position-based search uses a 1mm pickup radius
+- When the position-search finds nothing matching the filter, the
+  `errorDetails` enumerates which filters were active so callers can
+  tell whether to widen the search
+
+**Example (scoped position delete):**
+
+```json
+{
+  "position": { "x": 67.4, "y": 19.8, "unit": "mm" },
+  "kind": "via",
+  "net": "GND"
+}
+```
+
+**Example response (success):**
+
+```json
+{
+  "success": true,
+  "message": "Deleted track at specified position",
+  "deleted": [
+    {
+      "uuid": "a0ea97a6-1556-4d0d-903c-6e4f0c1917bc",
+      "type": "via",
+      "net": "GND",
+      "position": { "x": 65.158699, "y": 19.7992, "unit": "mm" },
+      "fromLayer": "F.Cu",
+      "toLayer": "B.Cu"
+    }
+  ]
+}
+```
 
 **Example (bulk delete):**
 

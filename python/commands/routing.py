@@ -2410,8 +2410,50 @@ class RoutingCommands:
                 "errorDetails": str(e),
             }
 
+    def _describe_track(self, track) -> Dict[str, Any]:
+        """Build a JSON-friendly description of a track or via for the
+        `deleted` field of delete_trace responses. Lets callers verify
+        what was actually removed (#223)."""
+        is_via = track.Type() == pcbnew.PCB_VIA_T
+        pos = track.GetPosition()
+        out: Dict[str, Any] = {
+            "uuid": track.m_Uuid.AsString(),
+            "type": "via" if is_via else "track",
+            "net": track.GetNetname() or "",
+            "position": {
+                "x": pos.x / 1e6,
+                "y": pos.y / 1e6,
+                "unit": "mm",
+            },
+        }
+        if is_via:
+            try:
+                out["fromLayer"] = self.board.GetLayerName(track.TopLayer())
+                out["toLayer"] = self.board.GetLayerName(track.BottomLayer())
+            except Exception:
+                pass
+        else:
+            out["layer"] = self.board.GetLayerName(track.GetLayer())
+            try:
+                s, e = track.GetStart(), track.GetEnd()
+                out["start"] = {"x": s.x / 1e6, "y": s.y / 1e6, "unit": "mm"}
+                out["end"] = {"x": e.x / 1e6, "y": e.y / 1e6, "unit": "mm"}
+                out["width"] = track.GetWidth() / 1e6
+            except Exception:
+                pass
+        return out
+
     def delete_trace(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Delete a trace from the PCB"""
+        """Delete a trace from the PCB.
+
+        Position-based delete supports optional `layer`, `net`, and
+        `kind` filters to scope the nearest-search — without filters,
+        the call grabs the geometrically-nearest track or via of any
+        net, which can silently delete the wrong segment when several
+        cross at one point. Every success path returns a `deleted`
+        list with each removed item's uuid, type, net, layer and
+        position so the caller can verify (#223).
+        """
         try:
             if not self.board:
                 return {
@@ -2425,6 +2467,15 @@ class RoutingCommands:
             net_name = params.get("net")
             layer = params.get("layer")
             include_vias = params.get("includeVias", False)
+            kind = (params.get("kind") or "any").lower()  # "track"|"via"|"any"
+            if kind not in ("track", "via", "any"):
+                return {
+                    "success": False,
+                    "message": "Invalid kind",
+                    "errorDetails": (
+                        "kind must be one of: 'track', 'via', 'any'"
+                    ),
+                }
 
             if not trace_uuid and not position and not net_name:
                 return {
@@ -2433,8 +2484,11 @@ class RoutingCommands:
                     "errorDetails": "One of traceUuid, position, or net must be provided",
                 }
 
-            # Delete by net name (bulk delete), use "*" to delete all tracks
-            if net_name:
+            # When BOTH position and net are passed, the net is a scope
+            # filter for the position-based nearest-search (not a bulk
+            # trigger). Bulk-by-net only fires when net is the sole
+            # selector.
+            if net_name and not trace_uuid and not position:
                 tracks_to_remove = []
                 for track in list(self.board.Tracks()):
                     if net_name != "*" and track.GetNetname() != net_name:
@@ -2453,7 +2507,7 @@ class RoutingCommands:
 
                     tracks_to_remove.append(track)
 
-                deleted_count = len(tracks_to_remove)
+                deleted_descs = [self._describe_track(t) for t in tracks_to_remove]
                 for track in tracks_to_remove:
                     # RemoveNative — see module-level note: BOARD.Remove()
                     # corrupts SWIG state after a few hundred mass-removals.
@@ -2463,8 +2517,9 @@ class RoutingCommands:
 
                 return {
                     "success": True,
-                    "message": f"Deleted {deleted_count} traces on net '{net_name}'",
-                    "deletedCount": deleted_count,
+                    "message": f"Deleted {len(deleted_descs)} traces on net '{net_name}'",
+                    "deletedCount": len(deleted_descs),
+                    "deleted": deleted_descs,
                 }
 
             # Find track by UUID
@@ -2482,10 +2537,15 @@ class RoutingCommands:
                         "errorDetails": f"Could not find track with UUID: {trace_uuid}",
                     }
 
+                desc = self._describe_track(track)
                 self.board.RemoveNative(track)
                 track = None
                 self.board.SetModified()
-                return {"success": True, "message": f"Deleted track: {trace_uuid}"}
+                return {
+                    "success": True,
+                    "message": f"Deleted track: {trace_uuid}",
+                    "deleted": [desc],
+                }
 
             # No valid parameters provided
             if not position:
@@ -2495,35 +2555,61 @@ class RoutingCommands:
                     "errorDetails": "Provide traceUuid, position, or net parameter",
                 }
 
-            # Find track by position
+            # Find track by position, optionally scoped by layer/net/kind
             if position:
                 scale = 1000000 if position["unit"] == "mm" else 25400000  # mm or inch to nm
                 x_nm = int(position["x"] * scale)
                 y_nm = int(position["y"] * scale)
                 point = pcbnew.VECTOR2I(x_nm, y_nm)
 
-                # Find closest track
+                layer_id = (
+                    self.board.GetLayerID(layer) if layer else None
+                )
+
+                # Find closest track that matches the filter
                 closest_track = None
                 min_distance = float("inf")
                 for track in list(self.board.Tracks()):
+                    is_via = track.Type() == pcbnew.PCB_VIA_T
+                    if kind == "via" and not is_via:
+                        continue
+                    if kind == "track" and is_via:
+                        continue
+                    if net_name and track.GetNetname() != net_name:
+                        continue
+                    # Layer filter: vias touch all layers so layer scope
+                    # only constrains regular tracks.
+                    if layer_id is not None and not is_via:
+                        if track.GetLayer() != layer_id:
+                            continue
                     dist = self._point_to_track_distance(point, track)
                     if dist < min_distance:
                         min_distance = dist
                         closest_track = track
 
                 if closest_track and min_distance < 1000000:  # Within 1mm
+                    desc = self._describe_track(closest_track)
                     self.board.RemoveNative(closest_track)
                     closest_track = None
                     self.board.SetModified()
                     return {
                         "success": True,
                         "message": "Deleted track at specified position",
+                        "deleted": [desc],
                     }
                 else:
                     return {
                         "success": False,
                         "message": "No track found",
-                        "errorDetails": "No track found near specified position",
+                        "errorDetails": (
+                            "No track found near specified position"
+                            + (
+                                f" matching kind='{kind}'"
+                                if kind != "any" else ""
+                            )
+                            + (f", layer='{layer}'" if layer else "")
+                            + (f", net='{net_name}'" if net_name else "")
+                        ),
                     }
 
         except Exception as e:

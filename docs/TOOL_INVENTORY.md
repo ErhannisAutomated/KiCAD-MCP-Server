@@ -86,7 +86,7 @@ _Source: `src/tools/routing.ts`_
 | `route_trace`             | Route trace segment between XY points (single layer) | Direct           |
 | `add_via`                 | Add via (through/blind/buried); pre-checks clearance + hole-to-hole (#222) | Routed (routing) |
 | `add_copper_pour`         | Add copper pour / ground plane                       | Routed (routing) |
-| `delete_trace`            | Delete traces by UUID, position, or bulk by net      | Additional       |
+| `delete_trace`            | Delete traces by UUID, position, or bulk by net; returns `deleted` list with each removed item's details; position-mode accepts `kind`/`layer`/`net` scope filters (#223) | Additional       |
 | `query_traces`            | Query/filter traces by net, layer, or bounding box   | Additional       |
 | `get_nets_list`           | List all nets with statistics                        | Additional       |
 | `modify_trace`            | Modify existing trace (width, layer, net)            | Additional       |
