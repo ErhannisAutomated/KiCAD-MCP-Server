@@ -11,7 +11,7 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
   // Full autoroute: export DSN -> run Freerouting -> import SES
   server.tool(
     "autoroute",
-    "Run Freerouting autorouter on the current PCB. Exports to Specctra DSN, runs Freerouting CLI, and imports the routed SES result. Requires Java 11+ and freerouting.jar (see check_freerouting). On 4-layer boards, layers are reordered in the DSN so freerouting prefers outer layers and uses GND last — see layerOrder.",
+    "Run Freerouting autorouter on the current PCB. Exports to Specctra DSN, runs Freerouting CLI, and imports the routed SES result. Requires Java 11+ and freerouting.jar (see check_freerouting). On 4-layer boards, layers are reordered in the DSN so freerouting prefers outer layers and uses GND last — see layerOrder. Auto-dedupes after import (pcbnew.ImportSpecctraSES appends rather than replaces, so re-running autoroute would otherwise leave exact-duplicate tracks on every routed net — #227).",
     {
       boardPath: z.string().optional().describe("Path to .kicad_pcb file (default: current board)"),
       freeroutingJar: z
@@ -27,6 +27,12 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
         .optional()
         .describe(
           'Layer-priority order to write into the DSN; freerouting iterates layers in this order and prefers earlier ones. Must be a permutation of the board\'s copper layers. Default on 4-layer boards: ["F.Cu","B.Cu","In2.Cu","In1.Cu"] (outer first, GND-on-In1.Cu last) — set explicitly only to override.',
+        ),
+      autoDedupe: z
+        .boolean()
+        .optional()
+        .describe(
+          "After importing SES, remove exact-duplicate tracks/vias left over by ImportSpecctraSES's append-not-replace behaviour (default: true). Pass false to keep the raw post-import state for debugging. Reported as `autoDedupeRemovedCount` in the result.",
         ),
     },
     async (args: any) => {
@@ -75,10 +81,16 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
   // Import SES
   server.tool(
     "import_ses",
-    "Import a Specctra SES (session) file into the current PCB. Use after running Freerouting externally.",
+    "Import a Specctra SES (session) file into the current PCB. Use after running Freerouting externally. Auto-dedupes after import (pcbnew.ImportSpecctraSES appends rather than replaces; calling import_ses twice without dedupe doubles every track — #227).",
     {
       sesPath: z.string().describe("Path to the .ses file to import"),
       boardPath: z.string().optional().describe("Path to .kicad_pcb file (default: current board)"),
+      autoDedupe: z
+        .boolean()
+        .optional()
+        .describe(
+          "After importing, remove exact-duplicate tracks/vias left over by ImportSpecctraSES's append-not-replace behaviour (default: true). Pass false to keep the raw post-import state for debugging. Reported as `autoDedupeRemovedCount` in the result.",
+        ),
     },
     async (args: any) => {
       const result = await callKicadScript("import_ses", args);

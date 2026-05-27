@@ -4,6 +4,26 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### autoroute / import_ses: auto-dedupe to prevent doubled traces (develop, 2026-05-28, #227)
+
+`pcbnew.ImportSpecctraSES` *appends* tracks to the board rather than
+replacing them. So calling `autoroute` twice (or `autoroute` →
+`import_ses` → `autoroute` again) leaves exact-duplicate tracks on
+every routed net. User saw 201 such duplicates after a stop-and-go
+routing session.
+
+Fix: both `autoroute` and `import_ses` now call `dedupe_traces(apply
+=true, includeVias=true)` immediately after the SES import, before
+the board save. Two tracks only match when (layer, width, net) AND
+endpoints coincide, so dropping one of each pair preserves
+connectivity exactly — user pre-routes survive untouched as long as
+they're geometrically unique.
+
+The dedupe-removed count is reported as `autoDedupeRemovedCount` in
+the result so callers can see when it kicked in. Pass `autoDedupe:
+false` on either tool to skip (useful for debugging the raw
+post-import state).
+
 ### via_orphan_pads: extended-offset retry (develop, 2026-05-27, #226)
 
 When the 4 cardinal positions at the base `viaOffset` are blocked,
