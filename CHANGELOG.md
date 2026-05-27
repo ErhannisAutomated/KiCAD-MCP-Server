@@ -4,6 +4,39 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### get_pad_position returns escape vector (develop, 2026-05-28, #235)
+
+When routing a pin-escape stub from an IC pin, the agent needs to
+know which way to push the trace AWAY from the IC body. Previously
+it had to infer the outward direction by querying neighbour pads
+and reasoning about which side of the IC the pad sits on.
+
+`get_pad_position` now returns three new fields:
+- `escapeVector` — unit vector `{x, y}` from the footprint's
+  bounding-box centre to the pad centre. For SOIC/QFN/HTSSOP
+  pins this points perpendicular to the IC body in the direction
+  the pin physically extends.
+- `escapeAngleDeg` — same direction expressed as degrees,
+  range `[-180, 180]`, `atan2(y, x)` convention.
+- `escapeMagnitudeMm` — distance from body centre to pad centre.
+  Useful for telling "edge pin" (large magnitude) from
+  "near-centre pad" (small magnitude — thermal pads, mid-sized
+  pad arrays).
+
+All three are `null` when the pad sits within 10 µm of the body
+centre (single-pad components, perfectly-symmetric thermal pads —
+the direction wouldn't be meaningful anyway).
+
+Uses `GetBoundingBox(False, False)` to exclude silk-layer
+reference text from the centre calculation, so the vector tracks
+the actual copper body, not silk overhang.
+
+Tests: `tests/test_pad_escape_vector.py` (6 integration tests
+against power_module — left/right QFN pins, two-pad cap pads
+oppose, magnitude > 0, angle in range, angle-vector
+consistency). Smoke-tested against real pcbnew on power_module's
+U3/C29/U4.
+
 ### Schematic property tools resolve across sub-sheets (develop, 2026-05-28, #234)
 
 `set_schematic_component_property`, `edit_schematic_component`,

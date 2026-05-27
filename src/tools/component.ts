@@ -423,7 +423,7 @@ export function registerComponentTools(server: McpServer, callKicadScript: Comma
   // ------------------------------------------------------
   server.tool(
     "get_pad_position",
-    "Return the exact XY position of a specific pad on a PCB component. Use this before routing to get accurate start/end coordinates.",
+    "Return the exact XY position of a specific pad on a PCB component. Use this before routing to get accurate start/end coordinates. Response also includes an `escapeVector` (unit vector from the footprint body centre to the pad) and `escapeAngleDeg`/`escapeMagnitudeMm` — for SOIC/QFN/HTSSOP pins this is the direction the pin physically extends, i.e. the direction a pin-escape stub should be routed in. Null for pads at the body centre (single-pad components, near-symmetric thermal pads). #235",
     {
       reference: z.string().describe("Component reference designator (e.g., 'U1')"),
       pad: z.string().describe("Pad number or name (e.g., '1', 'A1')"),

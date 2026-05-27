@@ -698,6 +698,50 @@ class ComponentCommands:
             pos = pad.GetPosition()
             size = pad.GetSize()
 
+            # Escape vector: unit vector from the footprint's body
+            # centre to the pad centre. For SOIC/QFN/HTSSOP pins this
+            # points perpendicular to the IC body in the direction
+            # the pin physically extends, which is the direction a
+            # pin-escape stub should be routed in. For pads at the
+            # body centre (single-pad components, thermal pads) the
+            # vector degenerates and we return null (#235).
+            escape_vector = None
+            escape_angle_deg = None
+            escape_magnitude_mm = None
+            try:
+                # GetBoundingBox(False) excludes silk-layer reference
+                # text so the centre tracks the actual copper body,
+                # not the silk overhang.
+                bbox = module.GetBoundingBox(False, False)
+            except TypeError:
+                # Older pcbnew signature.
+                try:
+                    bbox = module.GetBoundingBox(False)
+                except Exception:
+                    bbox = None
+            if bbox is not None:
+                centre = bbox.Centre() if hasattr(bbox, "Centre") else None
+                if centre is None:
+                    try:
+                        centre = bbox.GetCenter()
+                    except Exception:
+                        centre = None
+                if centre is not None:
+                    dx = pos.x - centre.x
+                    dy = pos.y - centre.y
+                    mag = (dx * dx + dy * dy) ** 0.5
+                    # 0.01mm threshold — below this the pad is
+                    # effectively centred on the body and the
+                    # direction isn't meaningful.
+                    if mag > 10_000:  # 10 µm in IU (1 IU = 1nm)
+                        ux, uy = dx / mag, dy / mag
+                        escape_vector = {"x": round(ux, 6), "y": round(uy, 6)}
+                        escape_magnitude_mm = round(mag / 1_000_000, 4)
+                        import math
+                        escape_angle_deg = round(
+                            math.degrees(math.atan2(uy, ux)), 2,
+                        )
+
             return {
                 "success": True,
                 "reference": reference,
@@ -706,6 +750,9 @@ class ComponentCommands:
                 "net": pad.GetNetname(),
                 "netCode": pad.GetNetCode(),
                 "size": {"x": size.x / 1000000, "y": size.y / 1000000, "unit": "mm"},
+                "escapeVector": escape_vector,
+                "escapeAngleDeg": escape_angle_deg,
+                "escapeMagnitudeMm": escape_magnitude_mm,
             }
 
         except Exception as e:
