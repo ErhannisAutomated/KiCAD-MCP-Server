@@ -6602,6 +6602,12 @@ print("ok")
         or run_drc first; this handler auto-discovers the default
         cache file in the project dir).
 
+        Detects staleness by comparing the .kicad_pcb mtime to the
+        DRC JSON's mtime: if the board has been mutated since the
+        last DRC, returns the cached data with `stale: true` plus a
+        message hint. Pass `refresh=true` to auto-run DRC first and
+        always get fresh data (#225).
+
         Optional:
           - ``netFilter``: list of net names to restrict to.
           - ``refFilter``: list of refs to restrict to (segments whose
@@ -6613,6 +6619,9 @@ print("ok")
           - ``topNCrossingsPerRef``: cap top-contributors list (default 10).
           - ``drcViolationsPath``: explicit DRC JSON path; default the
             project-dir cache file.
+          - ``refresh``: when true, run DRC before reading the cache
+            (default false). Use to guarantee fresh data after
+            mutating commands like route_trace or add_via.
         """
         logger.info("Running get_ratsnest")
         try:
@@ -6637,7 +6646,45 @@ print("ok")
                 if candidate.exists():
                     drc_path = str(candidate)
 
-            return get_ratsnest(
+            # Optional auto-refresh: re-run DRC so the cache is fresh.
+            refresh = bool(params.get("refresh", False))
+            if refresh:
+                logger.info("get_ratsnest refresh=true → running DRC first")
+                drc_result = self.design_rule_commands.run_drc({})
+                if not drc_result.get("success", False):
+                    logger.warning(
+                        f"get_ratsnest refresh: DRC run failed: "
+                        f"{drc_result.get('message', '?')}"
+                    )
+                else:
+                    # run_drc may have changed the violations file
+                    # location; refresh our handle.
+                    fresh = drc_result.get("violationsFile")
+                    if fresh:
+                        drc_path = fresh
+
+            # Staleness detection: board newer than DRC cache?
+            stale = False
+            stale_reason = None
+            if drc_path:
+                try:
+                    drc_mtime = Path(drc_path).stat().st_mtime
+                    pcb_path = Path(board.GetFileName())
+                    if pcb_path.exists():
+                        pcb_mtime = pcb_path.stat().st_mtime
+                        if pcb_mtime > drc_mtime + 0.5:  # 0.5s slack
+                            stale = True
+                            stale_reason = (
+                                f"board mtime newer than DRC cache by "
+                                f"{pcb_mtime - drc_mtime:.1f}s; the "
+                                f"reported ratsnest may not reflect "
+                                f"recent edits. Re-run with "
+                                f"refresh=true or call run_drc first."
+                            )
+                except Exception:
+                    pass
+
+            result = get_ratsnest(
                 board,
                 drc_violations_path=drc_path,
                 net_filter=params.get("netFilter"),
@@ -6647,6 +6694,11 @@ print("ok")
                 max_segments=int(params.get("maxSegments", 1000)),
                 top_n_crossings_per_ref=int(params.get("topNCrossingsPerRef", 10)),
             )
+            if isinstance(result, dict):
+                result["stale"] = stale
+                if stale:
+                    result["staleReason"] = stale_reason
+            return result
         except Exception as e:
             logger.error(f"Error in get_ratsnest: {e}", exc_info=True)
             return {"success": False, "message": str(e)}

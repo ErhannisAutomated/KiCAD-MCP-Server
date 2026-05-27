@@ -95,7 +95,7 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
   // get_ratsnest
   server.tool(
     "get_ratsnest",
-    "Read-only inspection of the ratsnest (the list of pad-pair connections still needing routes — what KiCAD draws as thin lines). Returns per-segment endpoints (with parsed component refs and pad numbers), net, length, plus pairwise geometric crossing detection on different nets. Use this to evaluate \"is this layout routable?\" and to debug placement decisions. Pairs with analyze_congestion (which shows dense regions): ratsnest shows which lines have to thread through those regions. Source: DRC unconnected_items cache from a prior get_drc_violations/run_drc call.",
+    "Read-only inspection of the ratsnest (the list of pad-pair connections still needing routes — what KiCAD draws as thin lines). Returns per-segment endpoints (with parsed component refs and pad numbers), net, length, plus pairwise geometric crossing detection on different nets. Use this to evaluate \"is this layout routable?\" and to debug placement decisions. Pairs with analyze_congestion (which shows dense regions): ratsnest shows which lines have to thread through those regions. Source: DRC unconnected_items cache from a prior get_drc_violations/run_drc call. Detects staleness automatically (returns `stale: true` + `staleReason` when the board file is newer than the DRC cache); pass `refresh: true` to auto-run DRC first.",
     {
       netFilter: z.array(z.string()).optional().describe("Restrict to these nets (e.g. [\"BAT+\",\"V12_OUT\"])."),
       refFilter: z.array(z.string()).optional().describe("Restrict to segments touching these component refs (e.g. [\"U1\",\"U3\"])."),
@@ -105,6 +105,7 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
       topNCrossingsPerRef: z.number().optional().describe("Cap on the per-ref crossing-contributors list (default 10)."),
       drcViolationsPath: z.string().optional().describe("Explicit path to a DRC violations JSON. Defaults to the project-dir cache from a prior get_drc_violations/run_drc call."),
       boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to currently-loaded board."),
+      refresh: z.boolean().optional().describe("Run DRC before reading the cache (default false). Use to guarantee fresh data after mutating commands like route_trace, add_via, or delete_trace."),
     },
     async (args: any) => {
       const result = await callKicadScript("get_ratsnest", args);

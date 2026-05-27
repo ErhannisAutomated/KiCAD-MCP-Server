@@ -4,6 +4,29 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### get_ratsnest: staleness detection + optional auto-refresh (develop, 2026-05-27, #225)
+
+`get_ratsnest` reads from `{project}_drc_violations.json`, which is
+only regenerated when `run_drc` runs. If the board has been mutated
+since the last DRC, the ratsnest data is stale — the failure mode is
+silent and easy to miss (in a real session, a freshly-routed BAT-
+trace was missing because the DRC hadn't been re-run yet).
+
+Two changes:
+  - **Staleness detection** — compare `.kicad_pcb` mtime to the DRC
+    JSON's mtime. If the board is newer (with 0.5s slack to absorb
+    filesystem timestamp jitter), the response includes `stale:
+    true` and a `staleReason` string explaining the gap. The cached
+    data is still returned so callers don't lose it; they just
+    learn that a refresh is needed.
+  - **Optional `refresh: true`** — runs DRC before reading the
+    cache. Adds one DRC round-trip cost but guarantees fresh data
+    after mutating commands like `route_trace`, `add_via`,
+    `delete_trace`, or `find_redundant_vias` with `delete=true`.
+
+Backwards-compatible: existing callers see the new `stale` field
+added (always `false` when the cache is fresh).
+
 ### find_redundant_vias MCP tool (develop, 2026-05-27, #224)
 
 Scans the board for vias whose drill edge is within
