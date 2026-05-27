@@ -362,7 +362,7 @@ export function registerBoardTools(server: McpServer, callKicadScript: CommandFu
   // ------------------------------------------------------
   server.tool(
     "get_board_2d_view",
-    "Render a 2D image of the current PCB board and return it as PNG, JPG or SVG. By default the image is cropped to the board outline (+5% margin) with per-layer colors (F.Cu red, B.Cu blue, Edge.Cuts tan, F.SilkS white) for legibility. Pass cropToBoard=false and colored=false for the legacy whole-page monochrome plot.",
+    "Render a 2D image of the current PCB board and return it as PNG, JPG or SVG. By default the image is cropped to the board outline (+5% margin) with per-layer colors (F.Cu red, B.Cu blue, Edge.Cuts tan, F.SilkS white) for legibility. Pass cropToBoard=false and colored=false for the legacy whole-page monochrome plot. Use `cropToRegion: {x1, y1, x2, y2}` (mm) to focus on a specific area — full-board renders can exceed 100KB; an ROI crop keeps the response small while preserving detail in the area of interest.",
     {
       layers: z
         .array(z.string())
@@ -389,8 +389,19 @@ export function registerBoardTools(server: McpServer, callKicadScript: CommandFu
         .describe(
           "Bbox margin as a fraction of the long axis when cropping (default 0.05 = 5%).",
         ),
+      cropToRegion: z
+        .object({
+          x1: z.number(),
+          y1: z.number(),
+          x2: z.number(),
+          y2: z.number(),
+        })
+        .optional()
+        .describe(
+          "Region-of-interest crop in mm. Overrides cropToBoard with the caller's bbox. Use to focus the render on a specific area (e.g. one IC and its surrounding decoupling caps) so the response stays small while detail in the ROI is preserved.",
+        ),
     },
-    async ({ layers, width, height, format, cropToBoard, colored, margin }) => {
+    async ({ layers, width, height, format, cropToBoard, colored, margin, cropToRegion }) => {
       logger.debug("Getting 2D board view");
       const result = await callKicadScript("get_board_2d_view", {
         layers,
@@ -400,6 +411,7 @@ export function registerBoardTools(server: McpServer, callKicadScript: CommandFu
         cropToBoard,
         colored,
         margin,
+        cropToRegion,
       });
 
       return {

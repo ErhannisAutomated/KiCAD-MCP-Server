@@ -534,7 +534,7 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
   // Query traces tool
   server.tool(
     "query_traces",
-    "Query traces on the board with optional filters by net, layer, or bounding box.",
+    "Query traces on the board with optional filters by net, layer, or bounding box. For populated boards the full trace list can exceed 250KB; use `summarize: true` for counts + per-net length only (~30× compression), or `limit`/`offset` to page through individual traces. Always reports `traceTotal` / `viaTotal` so callers can keep paging.",
     {
       net: z.string().optional().describe("Filter by net name"),
       layer: z.string().optional().describe("Filter by layer name"),
@@ -555,6 +555,22 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
         .describe(
           "Also return vias (with their UUIDs) in a separate 'vias' array. Needed to get via UUIDs for reliable delete_trace by UUID.",
         ),
+      summarize: z
+        .boolean()
+        .optional()
+        .describe(
+          "Return counts + total length per net (with layer breakdown) instead of individual trace records. Compresses the response ~30× — use whenever you only need to know 'how much routing is on each net' rather than the per-segment geometry.",
+        ),
+      limit: z
+        .number()
+        .optional()
+        .describe(
+          "Maximum number of traces (and vias when includeVias=true) to emit (default unlimited). Use with `offset` to page through large boards without overflowing the response budget.",
+        ),
+      offset: z
+        .number()
+        .optional()
+        .describe("Number of traces to skip before emitting `limit` items (default 0)."),
     },
     async (args: any) => {
       const result = await callKicadScript("query_traces", args);

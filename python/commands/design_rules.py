@@ -468,6 +468,13 @@ class DesignRuleCommands:
                "Track [BAT+] on F.Cu").
           summaryOnly: bool — return counts only, no individual items.
                        Default false.
+          limit: int — return at most this many violations in the
+                 ``violations`` array (default unlimited). Use with
+                 ``offset`` to page through large reports without
+                 overflowing the tool result size budget. The full
+                 ``total`` count is returned regardless.
+          offset: int — skip this many violations before emitting
+                  ``limit`` items (default 0).
           useCachedReport: bool — skip the kicad-cli re-run; read the
                            previous violations file if it exists.
                            Default false (always re-runs for freshness).
@@ -487,6 +494,16 @@ class DesignRuleCommands:
             net_filter = params.get("net")
             summary_only = bool(params.get("summaryOnly", False))
             use_cached = bool(params.get("useCachedReport", False))
+            limit_param = params.get("limit")
+            offset_param = params.get("offset", 0)
+            try:
+                limit = int(limit_param) if limit_param is not None else None
+            except (TypeError, ValueError):
+                limit = None
+            try:
+                offset = max(0, int(offset_param))
+            except (TypeError, ValueError):
+                offset = 0
 
             if isinstance(type_filter, str):
                 type_set = {type_filter}
@@ -557,7 +574,17 @@ class DesignRuleCommands:
                 },
             }
             if not summary_only:
-                response["violations"] = filtered
+                # Pagination: if limit is set, emit a window of
+                # `limit` violations starting at `offset`. Always
+                # report total so callers can keep paging until done.
+                if limit is not None:
+                    page = filtered[offset:offset + limit]
+                    response["violations"] = page
+                    response["offset"] = offset
+                    response["limit"] = limit
+                    response["hasMore"] = (offset + len(page)) < len(filtered)
+                else:
+                    response["violations"] = filtered
             return response
 
         except Exception as e:

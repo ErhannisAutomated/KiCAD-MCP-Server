@@ -118,9 +118,16 @@ class BoardViewCommands:
             crop_to_board = params.get("cropToBoard", True)
             colored = params.get("colored", True)
             margin_frac = params.get("margin", 0.05)
+            # Optional region-of-interest crop. {x1, y1, x2, y2} in mm.
+            # When set, overrides cropToBoard — the view crops to the
+            # caller's region instead of the whole board, which lets
+            # callers inspect a specific area without 100KB+ of
+            # full-board image. Margin and aspect-correct sizing still
+            # apply.
+            crop_to_region = params.get("cropToRegion")
 
             # Legacy path: single-SVG monochrome whole-page plot.
-            if not crop_to_board and not colored:
+            if not crop_to_board and not colored and not crop_to_region:
                 return self._legacy_plot(layers, width, height, format)
 
             # New path: per-layer plot, optional crop + recolor + composite.
@@ -132,6 +139,7 @@ class BoardViewCommands:
                 crop_to_board=crop_to_board,
                 colored=colored,
                 margin_frac=margin_frac,
+                crop_to_region=crop_to_region,
             )
 
         except Exception as e:
@@ -181,6 +189,7 @@ class BoardViewCommands:
         crop_to_board: bool,
         colored: bool,
         margin_frac: float,
+        crop_to_region: Optional[Dict[str, float]] = None,
     ) -> Dict[str, Any]:
         """Plot each layer to its own SVG, optionally crop to board bbox and
         recolor, then composite into one image."""
@@ -202,6 +211,25 @@ class BoardViewCommands:
 
         # Compute board bbox once.
         bbox_mm = self._board_bbox_mm()
+
+        # cropToRegion overrides the board bbox with a caller-supplied
+        # region. Forces crop_to_board on so the downstream SVG
+        # viewBox is set.
+        if crop_to_region:
+            try:
+                x1 = float(crop_to_region["x1"])
+                y1 = float(crop_to_region["y1"])
+                x2 = float(crop_to_region["x2"])
+                y2 = float(crop_to_region["y2"])
+                if x2 < x1: x1, x2 = x2, x1
+                if y2 < y1: y1, y2 = y2, y1
+                bbox_mm = (x1, y1, x2 - x1, y2 - y1)
+                crop_to_board = True
+            except (KeyError, TypeError, ValueError) as e:
+                logger.warning(
+                    f"cropToRegion ignored ({e}); falling back to "
+                    f"cropToBoard={crop_to_board}"
+                )
 
         # Output dimensions: aspect-correct when cropping to board.
         if crop_to_board:

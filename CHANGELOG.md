@@ -4,6 +4,33 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Pagination + summarize for large-output tools (develop, 2026-05-28, #237)
+
+Three tools regularly overflowed the per-call result size budget,
+forcing fall-through to "result saved to file, read it yourself"
+workarounds. Adding consistent filter/limit/offset/summarize
+controls so callers can ask for what they actually need:
+
+- **get_drc_violations**: new `limit` / `offset` parameters page
+  through the filtered violations array. `total` always reflects
+  the full filtered count; `hasMore` flags whether to keep
+  paging. `summaryOnly` already existed and is the lightest mode.
+- **query_traces**: new `summarize: true` mode emits counts +
+  total length + layer breakdown per net, no per-trace records
+  (~30× smaller in measured cases — 142KB → 4.7KB on a populated
+  board). `limit` / `offset` paginate the per-trace list when
+  per-segment detail is needed. `traceTotal` / `viaTotal` always
+  emitted so callers can keep paging.
+- **get_board_2d_view**: new `cropToRegion: {x1, y1, x2, y2}`
+  (mm) renders just an area-of-interest instead of the full
+  board. Same resolution budget as before, so a ROI render
+  delivers more detail per mm² — useful for "show me what's
+  going on around U4" without 100KB+ of full-board image.
+
+All three tools keep their existing default behaviour — adding a
+limit / summarize / cropToRegion is opt-in. CHANGELOG and TS
+schemas updated.
+
 ### audit_plane_connectivity MCP tool (develop, 2026-05-28, #236)
 
 When a same-net ratsnest gap shows up as "Zone X / Zone Y" (two

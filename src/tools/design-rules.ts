@@ -300,7 +300,7 @@ export function registerDesignRuleTools(server: McpServer, callKicadScript: Comm
   // ------------------------------------------------------
   server.tool(
     "get_drc_violations",
-    "Return the consolidated list of DRC findings (violations + unconnected items) with optional filtering. Each finding includes per-item details (position, uuid, parsed net/layer/length/component-ref). Use `summaryOnly` for counts-only, or `useCachedReport` to skip the kicad-cli re-run.",
+    "Return the consolidated list of DRC findings (violations + unconnected items) with optional filtering. Each finding includes per-item details (position, uuid, parsed net/layer/length/component-ref). Use `summaryOnly` for counts-only, `limit`/`offset` to page through large reports without overflowing the tool result budget, or `useCachedReport` to skip the kicad-cli re-run.",
     {
       severity: z
         .enum(["error", "warning", "info", "all"])
@@ -318,6 +318,14 @@ export function registerDesignRuleTools(server: McpServer, callKicadScript: Comm
         .boolean()
         .optional()
         .describe("Return counts only, no individual items. Default false."),
+      limit: z
+        .number()
+        .optional()
+        .describe("Maximum number of violations in the response (default unlimited). Combine with `offset` to page through reports too large for a single response. `total` always reflects the full filtered count so the caller can keep paging."),
+      offset: z
+        .number()
+        .optional()
+        .describe("Number of violations to skip before emitting `limit` items (default 0)."),
       useCachedReport: z
         .boolean()
         .optional()

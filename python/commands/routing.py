@@ -3150,7 +3150,21 @@ class RoutingCommands:
             }
 
     def query_traces(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Query traces by net, layer, or bounding box"""
+        """Query traces by net, layer, or bounding box.
+
+        Params:
+          net, layer, boundingBox, includeVias — filters (existing).
+          summarize: bool — return counts + per-net length only, no
+                     individual trace records. Default false. Use
+                     this when the full list would overflow the tool
+                     result budget (a populated board's full dump
+                     can exceed 250KB).
+          limit, offset: int — page through the filtered trace list.
+                         Default unlimited. `traceTotal` /
+                         `viaTotal` always reflect the full
+                         filtered counts so callers can keep
+                         paging until done.
+        """
         try:
             if not self.board:
                 return {
@@ -3164,6 +3178,17 @@ class RoutingCommands:
             layer = params.get("layer")
             bbox = params.get("boundingBox")  # {x1, y1, x2, y2, unit}
             include_vias = params.get("includeVias", False)
+            summarize = bool(params.get("summarize", False))
+            limit_param = params.get("limit")
+            offset_param = params.get("offset", 0)
+            try:
+                limit = int(limit_param) if limit_param is not None else None
+            except (TypeError, ValueError):
+                limit = None
+            try:
+                offset = max(0, int(offset_param))
+            except (TypeError, ValueError):
+                offset = 0
 
             scale = 1000000  # nm to mm conversion factor
             traces = []
@@ -3253,11 +3278,72 @@ class RoutingCommands:
                     logger.warning(f"Skipping invalid track object: {track_err}")
                     continue
 
-            result = {"success": True, "traceCount": len(traces), "traces": traces}
+            # Always report the full filtered totals so the caller
+            # knows the universe size, even when paginating.
+            trace_total = len(traces)
+            via_total = len(vias)
+
+            result = {
+                "success": True,
+                "traceCount": trace_total,
+                "traceTotal": trace_total,
+            }
+
+            if summarize:
+                # Counts + length per (net, layer) instead of every
+                # individual trace record. Keeps the response under
+                # a few KB even for a populated board.
+                by_net: Dict[str, Dict[str, Any]] = {}
+                for t in traces:
+                    n = t["net"] or "<no net>"
+                    bucket = by_net.setdefault(n, {
+                        "traceCount": 0, "totalLengthMm": 0.0,
+                        "layers": {},
+                    })
+                    bucket["traceCount"] += 1
+                    bucket["totalLengthMm"] += t["length"]
+                    lay = t["layer"]
+                    bucket["layers"][lay] = bucket["layers"].get(lay, 0) + 1
+                if include_vias:
+                    for v in vias:
+                        n = v["net"] or "<no net>"
+                        bucket = by_net.setdefault(n, {
+                            "traceCount": 0, "totalLengthMm": 0.0,
+                            "layers": {},
+                        })
+                        bucket["viaCount"] = bucket.get("viaCount", 0) + 1
+                # Round lengths for compactness.
+                for n, bucket in by_net.items():
+                    bucket["totalLengthMm"] = round(
+                        bucket["totalLengthMm"], 3,
+                    )
+                result["summary"] = {
+                    "byNet": by_net,
+                    "netCount": len(by_net),
+                }
+                if include_vias:
+                    result["viaCount"] = via_total
+                    result["viaTotal"] = via_total
+                return result
+
+            # Paginate the per-trace list if requested.
+            if limit is not None:
+                page = traces[offset:offset + limit]
+                result["traces"] = page
+                result["offset"] = offset
+                result["limit"] = limit
+                result["hasMore"] = (offset + len(page)) < trace_total
+            else:
+                result["traces"] = traces
 
             if include_vias:
-                result["viaCount"] = len(vias)
-                result["vias"] = vias
+                result["viaCount"] = via_total
+                result["viaTotal"] = via_total
+                if limit is not None:
+                    via_page = vias[offset:offset + limit]
+                    result["vias"] = via_page
+                else:
+                    result["vias"] = vias
 
             return result
 
