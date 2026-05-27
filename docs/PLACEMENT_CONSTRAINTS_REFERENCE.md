@@ -12,13 +12,11 @@ their IC pin, long-distance signals that should pull only weakly, etc.
 
 ## Where constraints live
 
-`Pin_Spring_Class:<padNum>` is read as a property on the **PCB
-footprint** (after `sync_schematic_to_board`). The intent lives on
-the schematic component first — but KiCad's schematic→PCB sync does
-not propagate arbitrary custom properties through by default, so for
-the moment you set the property on the footprint after sync. Task
-#228 tracks teaching `sync_schematic_to_board` to copy
-`Pin_Spring_Class:*` (and `Placement_Anchor`) across.
+`Pin_Spring_Class:<padNum>` is a property authored on the **schematic
+symbol**. The auto-placer reads from the schematic at session-load
+time (matching PCB footprints by Reference), so the schematic is
+the single source of truth — no PCB-side sync needed, no drift
+risk (#228).
 
 The property name carries the *pad number* as a suffix, not the pad
 *name*: `Pin_Spring_Class:1`, `Pin_Spring_Class:2`, etc. This
@@ -77,7 +75,8 @@ the auto-placer pulling components together along the GND net.
 
 1. **First pass — annotate the obvious**: every bypass / decoupling
    cap. The schematic's comment text usually flags them ("100nF bypass
-   for U3", "1 µF VCC decoupling near Q2", etc.).
+   for U3", "1 µF VCC decoupling near Q2", etc.). Set the property
+   on the schematic component (not the PCB footprint):
 
    ```
    Set Pin_Spring_Class:1 on C29 to DECOUPLING.
@@ -94,7 +93,8 @@ the auto-placer pulling components together along the GND net.
    Set Pin_Spring_Class:1 on J3 to INTER_GROUP.
    ```
 
-3. **Run `relax_placement`** and visually inspect. The engine reports
+3. **Run `relax_placement`** and visually inspect. The engine reads
+   the schematic at load time, picks up your annotations, and reports
    per-class kinetic energy in its result; high `DECOUPLING` energy
    means a cap couldn't reach its target pin (usually a missing or
    wrong-numbered annotation, or a body-repulsion collision blocking

@@ -363,6 +363,20 @@ def load_pcb_session(
             sch_path = candidate
     classes, net_class_assignments = _load_spring_classes_from_project(sch_path)
 
+    # Per-pin Pin_Spring_Class:N intent — read from the schematic so
+    # the schematic is the single source of truth (no PCB-side sync
+    # needed). Components match by Reference; multi-sheet schematics
+    # are handled by iter_components. #228.
+    pin_class_lookup: Dict[str, Dict[str, str]] = {}
+    if sch_path is not None:
+        try:
+            from commands.placement_constraints import collect_pin_spring_classes
+            pin_class_lookup = collect_pin_spring_classes(sch_path)
+        except Exception as e:
+            logger.warning(
+                "collect_pin_spring_classes failed for %s: %s", sch_path, e,
+            )
+
     sess = Session(
         schematic_path=Path("pcb://" + (board.GetFileName() or "<unsaved>")),
         spring_classes=classes,
@@ -437,8 +451,10 @@ def load_pcb_session(
                 )
 
         # Pad → Pin records.  Use the pcbnew pad name for the pin number.
-        # Also read per-pad Pin_Spring_Class:N properties (bare-string =
-        # pad-general; JSON dict = per-target overrides).
+        # Per-pad Pin_Spring_Class:N intent is read from the schematic
+        # (matched to this footprint by ref); bare-string = pad-
+        # general, JSON dict = per-target overrides.
+        ref_pin_classes = pin_class_lookup.get(ref, {})
         for pad in fp.Pads():
             pad_num = pad.GetPadName() or pad.GetNumber()
             if not pad_num:
@@ -452,7 +468,7 @@ def load_pcb_session(
                 local_y=ly,
                 lib_angle=0.0,   # PCB pads don't have a meaningful outward angle
             )
-            pin_cls_val = _safe_get_property(fp, f"Pin_Spring_Class:{pad_num}")
+            pin_cls_val = ref_pin_classes.get(pad_num)
             if pin_cls_val:
                 parsed = _parse_pin_spring_class(pin_cls_val)
                 if parsed is not None:

@@ -138,8 +138,9 @@ but two cases benefit from explicit intent:
    these `INTER_GROUP` so the engine pulls weakly and lets the local
    layout breathe.
 
-Tag the pad with `Pin_Spring_Class:<padNum>` on the **PCB footprint**
-(see also #228 for in-progress schematic-side authoring):
+Tag the pad with `Pin_Spring_Class:<padNum>` on the **schematic
+symbol** (the auto-placer reads from the schematic at load time —
+no PCB-side sync needed; #228):
 
 ```
 Set Pin_Spring_Class:1 on C29 to DECOUPLING.
@@ -147,6 +148,10 @@ Set Pin_Spring_Class:1 on C30 to DECOUPLING.
 Set Pin_Spring_Class:1 on C3 to DECOUPLING.
 Set Pin_Spring_Class:1 on C4 to DECOUPLING.
 ```
+
+(The `set_schematic_component_property` MCP tool writes a single
+property on a placed symbol; `edit_schematic_component` does
+multiple at once.)
 
 The accepted class names are `DECOUPLING` (strong, spring_k≈5.0),
 `LOCAL_SIGNAL` (default, spring_k≈1.0), `INTER_GROUP` (weak,

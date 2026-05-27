@@ -4,6 +4,44 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### pcb_autoplacer reads Pin_Spring_Class from schematic (no sync) (develop, 2026-05-28, #228)
+
+Original plan was to teach `sync_schematic_to_board` to copy
+`Pin_Spring_Class:*` properties from schematic symbols to PCB
+footprints. User pointed out (correctly) that that creates two
+sources of truth that have to stay in sync — sync gap = stale
+intent = wrong placement.
+
+Better approach: read from the schematic at session-load time.
+Components match PCB ↔ schematic by Reference; the schematic path
+is already plumbed through for the Schematic_Metadata singleton
+(#230). Same pattern `decoupling_audit` already uses for
+`Placement_Anchor`.
+
+New helper `placement_constraints.collect_pin_spring_classes` walks
+the schematic via sexpdata (deliberately not kicad-skip, so a
+minimal schematic without full eeschema scaffolding still parses)
+and returns `{ref → {pin_num → raw_value}}`. Multi-sheet via the
+existing `_all_sheet_paths`.
+
+`pcb_autoplacer.load_pcb_session` calls it once at the top, then
+the per-pin loop reads from the lookup instead of
+`fp.GetProperty(f"Pin_Spring_Class:{pad}")`. The PCB-side property
+path is gone — schematic is the single source of truth.
+
+Behavior change for legacy projects: PCB footprints carrying
+Pin_Spring_Class:N properties that aren't ALSO on the schematic
+are now ignored. (power_module is the only project that ever used
+Pin_Spring_Class and it had none authored anywhere, so no
+migration needed.)
+
+Docs updated: PCB_DESIGN_WORKFLOW + PLACEMENT_CONSTRAINTS_REFERENCE
+now describe schematic-side authoring as the workflow.
+
+Tests: `tests/test_pin_spring_class_from_sch.py` covers bare-string
++ JSON-dict values, multiple components, and round-trip with the
+existing `_parse_pin_spring_class` parser. 4/4 pass.
+
 ### Schematic_Metadata singleton — phase 3: drop .kicad_pro fallback (develop, 2026-05-28, #233)
 
 power_module was the only project ever using the .kicad_pro mcp_*

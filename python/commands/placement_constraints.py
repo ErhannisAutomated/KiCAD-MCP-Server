@@ -299,6 +299,78 @@ def iter_components(top_sch: str | Path) -> Iterable[ComponentRecord]:
             )
 
 
+def collect_pin_spring_classes(
+    top_sch: str | Path,
+) -> Dict[str, Dict[str, str]]:
+    """Walk the schematic and return ``{ref → {pin_num → raw_value}}``
+    for every ``Pin_Spring_Class:<pin>`` property authored on a
+    schematic symbol.
+
+    Values are returned as raw strings — callers parse them via
+    ``pcb_autoplacer._parse_pin_spring_class`` (bare-string = pad-
+    general; JSON dict = per-target overrides). Lookup matches PCB
+    footprints by Reference.
+
+    Uses sexpdata directly (not kicad-skip) so a minimal schematic
+    without the full eeschema scaffolding still parses. Multi-sheet
+    traversal walks ``_all_sheet_paths``.
+    """
+    import sexpdata
+
+    def _name(node: Any) -> Optional[str]:
+        if isinstance(node, list) and node and isinstance(node[0], sexpdata.Symbol):
+            return node[0].value()
+        return None
+
+    def _str_arg(node: list, idx: int) -> Optional[str]:
+        if not isinstance(node, list) or len(node) <= idx:
+            return None
+        v = node[idx]
+        if isinstance(v, sexpdata.Symbol):
+            return v.value()
+        return str(v)
+
+    PREFIX = "Pin_Spring_Class:"
+    out: Dict[str, Dict[str, str]] = {}
+
+    sheet_paths: List[Path] = []
+    try:
+        sheet_paths = _all_sheet_paths(top_sch)
+    except Exception:
+        sheet_paths = [Path(top_sch)]
+
+    for sheet_path in sheet_paths:
+        try:
+            text = Path(sheet_path).read_text(encoding="utf-8")
+            sch = sexpdata.loads(text)
+        except Exception as e:
+            logger.debug(f"collect_pin_spring_classes: skip {sheet_path}: {e}")
+            continue
+        if not isinstance(sch, list):
+            continue
+        for child in sch[1:]:
+            if _name(child) != "symbol":
+                continue
+            ref: Optional[str] = None
+            per_pin: Dict[str, str] = {}
+            for prop in child[1:] if isinstance(child, list) else []:
+                if _name(prop) != "property":
+                    continue
+                pname = _str_arg(prop, 1)
+                pval = _str_arg(prop, 2)
+                if pname is None or pval is None:
+                    continue
+                if pname == "Reference":
+                    ref = pval
+                elif pname.startswith(PREFIX):
+                    pin_num = pname[len(PREFIX):]
+                    if pin_num and pval:
+                        per_pin[pin_num] = pval
+            if ref and per_pin and not ref.startswith("_TEMPLATE"):
+                out.setdefault(ref, {}).update(per_pin)
+    return out
+
+
 # ---------------------------------------------------------------------------
 # Rename propagation
 # ---------------------------------------------------------------------------
