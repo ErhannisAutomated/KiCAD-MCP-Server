@@ -8,9 +8,11 @@ the ``CELL1_TOP`` / ``CELL2_TOP`` -> ``POWER_4A`` patterns). Once
 gone, those nets fall back to the Default netclass and routing tools
 silently pick the wrong width.
 
-This module stores the "expected" pattern list in a namespaced
-``mcp_expected_netclass_patterns`` section that KiCAD will leave
-alone, and exposes a verify-and-optionally-restore entry point.
+The "expected" pattern list is stored as ``mcp_expected_netclass_patterns``.
+As of #230, the preferred home is the schematic's Schematic_Metadata
+singleton — pass ``sch_path`` to read and write there. Legacy projects
+that still keep the key in ``.kicad_pro`` are supported via fallback
+(read) and via the ``migrate_metadata_to_singleton`` MCP tool (move).
 """
 
 from __future__ import annotations

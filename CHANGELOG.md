@@ -4,6 +4,59 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Schematic_Metadata singleton (phase 1) (develop, 2026-05-28, #230)
+
+User asked for project-wide MCP metadata
+(`mcp_constraint_version`, `mcp_spring_classes`,
+`mcp_expected_netclass_patterns`) to be **human-visible in the
+schematic UI** rather than buried as `.kicad_pro` keys. Convention:
+a DNP symbol on the schematic identified by a
+`Schematic_Metadata_Marker = mcp/v1` property, carrying the
+metadata as additional properties readable through eeschema's
+standard symbol-properties dialog.
+
+Phase 1 ships:
+
+- **`python/commands/schematic_metadata.py`** — helper module
+  with `find_singletons`, `read_metadata`, `write_metadata_key`,
+  `read_metadata_with_pro_fallback`, `migrate_from_pro`. All
+  writes go through targeted text-based s-expr edits so KiCad's
+  parser accepts the round-tripped file (sexpdata.dumps
+  reformatting breaks kicad-cli).
+- **`migrate_metadata_to_singleton`** MCP tool — one-shot copy of
+  every `mcp_*` key from `.kicad_pro` to the singleton.
+  Idempotent. Removes the migrated keys from `.kicad_pro` by
+  default; pass `removeFromPro: false` to keep both during a
+  staged rollout.
+- **`docs/SCHEMATIC_METADATA.md`** — design + behaviour + 0/1/>1
+  singleton rules + migration guide.
+
+Behaviour for 0/1/>1 singletons:
+  - 0 → tools fall back to `.kicad_pro` (legacy support), then
+    to built-in defaults.
+  - 1 → read normally.
+  - >1 → merge alphabetically by Reference, last-wins for
+    duplicate keys, log a warning naming the references.
+
+Bug to know about: `_set_property_in_text` had an off-by-one in
+the backwards-paren-scan that found the enclosing `(symbol …)`
+block. The scan started AT the uuid's opening paren and
+immediately matched it, so new properties got injected inside
+`(uuid …)` and corrupted the symbol. Fixed by starting the scan
+one position earlier. Caught by the round-trip pytest before
+landing.
+
+**Phase 2 (#231)** wires the existing consumers
+(`verify_netclass_patterns`, `pcb_autoplacer._load_spring_classes_from_pro`)
+to prefer the singleton, then retire the `.kicad_pro` fallback.
+Until phase 2 lands, callers continue reading from `.kicad_pro` —
+projects can migrate at their leisure with no behaviour change.
+
+Tests: `tests/test_schematic_metadata.py` (12 tests; pure
+schematic I/O, no pcbnew). Round-trip verified against
+`kicad-cli sch export netlist` — the modified schematic loads
+cleanly and produces a valid netlist.
+
 ### Doc: placement-constraint annotation step (develop, 2026-05-28, #229)
 
 User flagged that bypass caps on the power_module schematic
