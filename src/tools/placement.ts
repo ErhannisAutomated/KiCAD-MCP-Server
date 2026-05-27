@@ -73,23 +73,6 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
-  // migrate_metadata_to_singleton
-  server.tool(
-    "migrate_metadata_to_singleton",
-    "Move every `mcp_*` key from the project's `.kicad_pro` into a Schematic_Metadata singleton symbol on the schematic (#230). The singleton is a DNP symbol (`in_bom no`, `on_board no`) carrying a `Schematic_Metadata_Marker = mcp/v1` property as its identifier plus one property per migrated key. Users can inspect and edit the metadata via eeschema's symbol properties dialog instead of editing JSON. Creates the singleton on first call; subsequent calls are idempotent (update properties in place). Migrated keys: `mcp_constraint_version`, `mcp_spring_classes`, `mcp_expected_netclass_patterns`, and anything else starting with `mcp_`.",
-    {
-      schematicPath: z.string().describe("Path to the .kicad_sch."),
-      projectPath: z.string().optional().describe("Path to the .kicad_pro. Defaults to the schematic's sibling .kicad_pro."),
-      removeFromPro: z.boolean().optional().describe("Delete the migrated keys from .kicad_pro after writing them to the singleton (default true). Pass false to keep both sources during a staged rollout."),
-    },
-    async (args: any) => {
-      const result = await callKicadScript("migrate_metadata_to_singleton", args);
-      return {
-        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
-      };
-    },
-  );
-
   // decoupling_audit
   server.tool(
     "decoupling_audit",

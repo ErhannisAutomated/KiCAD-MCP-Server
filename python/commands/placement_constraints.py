@@ -145,48 +145,69 @@ def rewrite_anchor_value(value: str, mapping: Dict[str, str]) -> Tuple[str, List
 
 
 # ---------------------------------------------------------------------------
-# .kicad_pro version marker
+# Schematic_Metadata singleton version marker
 # ---------------------------------------------------------------------------
 
 
-def get_constraint_version(project_path: str | Path) -> Optional[int]:
-    """Return ``mcp_constraint_version`` from the ``.kicad_pro`` file, or None."""
-    p = Path(project_path)
+def get_constraint_version(schematic_path: str | Path) -> Optional[int]:
+    """Return ``mcp_constraint_version`` from the schematic's
+    Schematic_Metadata singleton, or None if the singleton doesn't
+    carry the key.
+
+    Accepts either a ``.kicad_sch`` or a ``.kicad_pro`` path (the
+    latter is mapped to its sibling .kicad_sch for backward
+    compatibility with callers that still pass the project path).
+    """
+    p = Path(schematic_path)
+    if p.suffix == ".kicad_pro":
+        p = p.with_suffix(".kicad_sch")
     if not p.exists():
         return None
     try:
-        with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning(f"Could not read {project_path} for constraint version: {e}")
+        from commands.schematic_metadata import read_metadata_json
+        val = read_metadata_json(p, "mcp_constraint_version")
+    except Exception as e:
+        logger.warning(
+            f"Could not read singleton for constraint version: {e}"
+        )
         return None
-    val = data.get("mcp_constraint_version")
     if isinstance(val, int):
         return val
+    if isinstance(val, str):
+        try:
+            return int(val)
+        except ValueError:
+            return None
     return None
 
 
-def ensure_constraint_version(project_path: str | Path, version: int = CONSTRAINT_VERSION) -> bool:
-    """Write ``mcp_constraint_version`` to the ``.kicad_pro`` if not present.
+def ensure_constraint_version(
+    schematic_path: str | Path,
+    version: int = CONSTRAINT_VERSION,
+) -> bool:
+    """Write ``mcp_constraint_version`` to the schematic's
+    Schematic_Metadata singleton if not already at ``version``.
+    Creates the singleton if absent. Returns True if anything was
+    written.
 
-    Returns True if the file was modified.
+    Accepts either a ``.kicad_sch`` or ``.kicad_pro`` path.
     """
-    p = Path(project_path)
+    p = Path(schematic_path)
+    if p.suffix == ".kicad_pro":
+        p = p.with_suffix(".kicad_sch")
     if not p.exists():
         return False
+    if get_constraint_version(p) == version:
+        return False
     try:
-        with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
-    except (OSError, json.JSONDecodeError) as e:
-        logger.warning(f"Could not read {project_path} for constraint version: {e}")
+        from commands.schematic_metadata import write_metadata_key
+        r = write_metadata_key(p, "mcp_constraint_version", version)
+        return bool(r.get("success"))
+    except Exception as e:
+        logger.warning(
+            f"Could not write singleton constraint version: {e}"
+        )
         return False
-    if data.get("mcp_constraint_version") == version:
-        return False
-    data["mcp_constraint_version"] = version
-    with open(p, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
-        f.write("\n")
-    return True
 
 
 # ---------------------------------------------------------------------------

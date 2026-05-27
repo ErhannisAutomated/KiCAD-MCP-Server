@@ -4,6 +4,43 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Schematic_Metadata singleton — phase 3: drop .kicad_pro fallback (develop, 2026-05-28, #233)
+
+power_module was the only project ever using the .kicad_pro mcp_*
+keys, and it's now on the singleton. With no real-world projects
+depending on the legacy paths, the dual-source code is just
+maintenance burden — strip it.
+
+Removed:
+- `migrate_metadata_to_singleton` MCP tool + handler + TS schema
+- `schematic_metadata.migrate_from_pro` + `KNOWN_MIGRATABLE_KEYS`
+- `schematic_metadata.read_metadata_with_pro_fallback`
+- `.kicad_pro` source from `netclass_patterns._read_expected_patterns`
+- `.kicad_pro` source from `pcb_autoplacer._load_spring_classes_from_project`
+- `pcb_autoplacer._bootstrap_spring_classes_in_project` (users
+  author custom classes via `set_schematic_metadata` when needed)
+- `pcb_autoplacer._serialize_default_spring_classes` (no longer
+  referenced)
+- `load_pcb_session(bootstrap_kicad_pro=...)` parameter
+
+Behaviour changes:
+- `verify_netclass_patterns` now requires a schematic (uses the
+  pro_path's sibling .kicad_sch when sch_path isn't passed). Errors
+  out clearly if no schematic is found.
+- `_load_spring_classes_from_project` takes only `sch_path` (no
+  `pro_path` arg). Returns defaults when sch_path is None or the
+  singleton lacks the key.
+- `placement_constraints.get_constraint_version` /
+  `ensure_constraint_version` now read/write the singleton.
+  Backward-compatible: still accept `.kicad_pro` paths (mapped to
+  the sibling `.kicad_sch` automatically).
+- `verify_netclass_patterns` response no longer carries the
+  `expectedSource` field — there's only one source now.
+
+Tests updated: `test_schematic_metadata_consumers.py` and
+`test_schematic_metadata.py` had their pro-fallback / migration
+sections rewritten. 18 metadata tests pass.
+
 ### get_schematic_metadata + set_schematic_metadata MCP tools (develop, 2026-05-28, #232)
 
 `migrate_metadata_to_singleton` handles legacy `.kicad_pro` →

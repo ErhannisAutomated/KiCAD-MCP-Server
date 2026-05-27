@@ -40,14 +40,6 @@ Zero singletons
 defaults). `write_metadata_key` will create a singleton on first call
 — see `_ensure_singleton`.
 
-Backwards compatibility
------------------------
-
-Callers that previously read keys from `.kicad_pro` should use
-`read_metadata_with_pro_fallback(sch_path, pro_path)` — this prefers
-the singleton but falls back to `.kicad_pro` keys when the singleton
-is absent. The `migrate_metadata_to_singleton` MCP tool does a
-one-shot copy from `.kicad_pro` to the singleton.
 """
 from __future__ import annotations
 
@@ -220,28 +212,6 @@ def read_metadata_json(sch_path: Path, key: str) -> Optional[Any]:
             "ignoring.", key, e,
         )
         return None
-
-
-def read_metadata_with_pro_fallback(
-    sch_path: Path, pro_path: Path, key: str,
-) -> Optional[Any]:
-    """Backwards-compatibility helper: prefer the singleton, fall back
-    to the same-named key in `.kicad_pro` if the singleton doesn't
-    have it. Returns parsed JSON for object/array values, raw string/
-    int for primitives, or None if neither source has the key."""
-    sch_meta = read_metadata(sch_path)
-    if key in sch_meta:
-        raw = sch_meta[key]
-        try:
-            return json.loads(raw)
-        except (json.JSONDecodeError, ValueError):
-            return raw  # primitive
-    # Fall back to .kicad_pro
-    try:
-        pro_data = json.loads(Path(pro_path).read_text(encoding="utf-8"))
-    except Exception:
-        return None
-    return pro_data.get(key)
 
 
 # ---------------------------------------------------------------------------
@@ -636,67 +606,3 @@ def write_metadata_key(
     }
 
 
-# ---------------------------------------------------------------------------
-# Migration from .kicad_pro
-# ---------------------------------------------------------------------------
-
-
-# Keys we know how to migrate. Anything starting with `mcp_` is fair
-# game; this list documents the ones we expect to see.
-KNOWN_MIGRATABLE_KEYS = (
-    "mcp_constraint_version",
-    "mcp_spring_classes",
-    "mcp_expected_netclass_patterns",
-)
-
-
-def migrate_from_pro(
-    sch_path: Path, pro_path: Path, remove_from_pro: bool = True,
-) -> Dict[str, Any]:
-    """Copy every `mcp_*` key from `.kicad_pro` into the schematic
-    singleton. Returns a summary describing what moved.
-
-    If `remove_from_pro` is True (default), the migrated keys are also
-    deleted from `.kicad_pro` so the singleton becomes the only
-    source of truth.
-    """
-    sch_path = Path(sch_path)
-    pro_path = Path(pro_path)
-    if not pro_path.exists():
-        return {"success": False, "message": f".kicad_pro not found: {pro_path}"}
-    pro_data = json.loads(pro_path.read_text(encoding="utf-8"))
-    keys_to_move = [k for k in pro_data.keys() if k.startswith("mcp_")]
-    if not keys_to_move:
-        return {
-            "success": True,
-            "migrated": [],
-            "message": "no mcp_* keys in .kicad_pro to migrate",
-        }
-    migrated: List[Dict[str, Any]] = []
-    for key in keys_to_move:
-        value = pro_data[key]
-        wm = write_metadata_key(sch_path, key, value)
-        if not wm.get("success"):
-            return {
-                "success": False,
-                "message": f"failed to write {key} to singleton",
-                "errorDetails": wm.get("errorDetails"),
-                "migrated": migrated,
-            }
-        migrated.append({"key": key, "reference": wm.get("reference")})
-    if remove_from_pro:
-        for key in keys_to_move:
-            pro_data.pop(key, None)
-        pro_path.write_text(
-            json.dumps(pro_data, indent=2) + "\n", encoding="utf-8",
-        )
-    return {
-        "success": True,
-        "migrated": migrated,
-        "removedFromPro": remove_from_pro,
-        "message": (
-            f"migrated {len(migrated)} key(s) from .kicad_pro to "
-            f"Schematic_Metadata singleton"
-            + (" (and removed from .kicad_pro)" if remove_from_pro else "")
-        ),
-    }

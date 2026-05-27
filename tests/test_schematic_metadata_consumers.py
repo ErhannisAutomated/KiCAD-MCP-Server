@@ -65,61 +65,20 @@ def _make_project(tmp_path: Path, pro_data: dict) -> tuple[Path, Path]:
 
 
 class TestNetclassPatternsConsumer:
-    def test_expected_source_pro_when_only_pro_has_it(self, tmp_path):
+    def test_reads_expected_from_singleton(self, tmp_path):
         sch, pro = _make_project(tmp_path, {
             "net_settings": {
                 "netclass_patterns": [
                     {"netclass": "POWER_4A", "pattern": "BAT+"},
                 ],
             },
-            "mcp_expected_netclass_patterns": [
-                {"netclass": "POWER_4A", "pattern": "BAT+"},
-            ],
         })
+        sm.write_metadata_key(sch, "mcp_expected_netclass_patterns", [
+            {"netclass": "POWER_4A", "pattern": "BAT+"},
+        ])
         r = verify_netclass_patterns(pro, sch_path=sch)
         assert r["success"], r
-        assert r["expectedSource"] == "pro"
         assert not r["drifted"]
-
-    def test_expected_source_singleton_when_present(self, tmp_path):
-        sch, pro = _make_project(tmp_path, {
-            "net_settings": {
-                "netclass_patterns": [
-                    {"netclass": "POWER_4A", "pattern": "BAT+"},
-                ],
-            },
-        })
-        sm.write_metadata_key(sch, "mcp_expected_netclass_patterns", [
-            {"netclass": "POWER_4A", "pattern": "BAT+"},
-        ])
-        r = verify_netclass_patterns(pro, sch_path=sch)
-        assert r["expectedSource"] == "singleton"
-        assert not r["drifted"]
-
-    def test_singleton_wins_over_pro(self, tmp_path):
-        """When BOTH sources have the key, singleton wins."""
-        sch, pro = _make_project(tmp_path, {
-            "net_settings": {
-                "netclass_patterns": [
-                    {"netclass": "POWER_4A", "pattern": "BAT+"},
-                    {"netclass": "POWER_4A", "pattern": "BAT-"},
-                ],
-            },
-            # .kicad_pro says only BAT+ is expected
-            "mcp_expected_netclass_patterns": [
-                {"netclass": "POWER_4A", "pattern": "BAT+"},
-            ],
-        })
-        # Singleton says both BAT+ AND BAT- are expected
-        sm.write_metadata_key(sch, "mcp_expected_netclass_patterns", [
-            {"netclass": "POWER_4A", "pattern": "BAT+"},
-            {"netclass": "POWER_4A", "pattern": "BAT-"},
-        ])
-        r = verify_netclass_patterns(pro, sch_path=sch)
-        assert r["expectedSource"] == "singleton"
-        # Both expected, both present → no drift
-        assert not r["drifted"]
-        assert r["missing"] == []
 
     def test_drift_detected_against_singleton(self, tmp_path):
         sch, pro = _make_project(tmp_path, {
@@ -136,10 +95,9 @@ class TestNetclassPatternsConsumer:
         ])
         r = verify_netclass_patterns(pro, sch_path=sch)
         assert r["drifted"]
-        assert r["expectedSource"] == "singleton"
         assert {"netclass": "POWER_4A", "pattern": "BAT-"} in r["missing"]
 
-    def test_bootstrap_writes_to_singleton_when_sch_given(self, tmp_path):
+    def test_bootstrap_writes_to_singleton(self, tmp_path):
         sch, pro = _make_project(tmp_path, {
             "net_settings": {
                 "netclass_patterns": [
@@ -149,7 +107,6 @@ class TestNetclassPatternsConsumer:
         })
         r = verify_netclass_patterns(pro, sch_path=sch)
         assert r["bootstrapped"]
-        assert r["expectedSource"] == "singleton"
         # And the singleton now carries the key.
         md = sm.read_metadata_json(sch, "mcp_expected_netclass_patterns")
         assert md == [{"netclass": "POWER_4A", "pattern": "BAT+"}]
@@ -157,73 +114,71 @@ class TestNetclassPatternsConsumer:
         after = json.loads(pro.read_text())
         assert "mcp_expected_netclass_patterns" not in after
 
-    def test_bootstrap_writes_to_pro_when_sch_missing(self, tmp_path):
+    def test_pro_mcp_expected_is_ignored(self, tmp_path):
+        """Phase 3: .kicad_pro mcp_expected_netclass_patterns no longer read."""
         sch, pro = _make_project(tmp_path, {
             "net_settings": {
                 "netclass_patterns": [
                     {"netclass": "POWER_4A", "pattern": "BAT+"},
                 ],
             },
+            "mcp_expected_netclass_patterns": [
+                {"netclass": "POWER_4A", "pattern": "BAT-"},  # would drift
+            ],
         })
-        # Don't pass sch_path
-        r = verify_netclass_patterns(pro)
+        # The singleton has no key — verify bootstraps it from current
+        # patterns (the .kicad_pro key is ignored entirely).
+        r = verify_netclass_patterns(pro, sch_path=sch)
         assert r["bootstrapped"]
-        assert r["expectedSource"] == "pro"
-        after = json.loads(pro.read_text())
-        assert "mcp_expected_netclass_patterns" in after
+        md = sm.read_metadata_json(sch, "mcp_expected_netclass_patterns")
+        assert md == [{"netclass": "POWER_4A", "pattern": "BAT+"}]
+
+    def test_missing_sch_errors_clearly(self, tmp_path):
+        _, pro = _make_project(tmp_path, {
+            "net_settings": {"netclass_patterns": []},
+        })
+        # Delete the sch
+        (tmp_path / "test.kicad_sch").unlink()
+        r = verify_netclass_patterns(pro)  # no sch_path
+        assert not r["success"]
+        assert "schematic" in r["message"].lower()
 
 
 class TestSpringClassesConsumer:
-    def test_loads_from_pro_when_only_pro_has_it(self, tmp_path):
-        sch, pro = _make_project(tmp_path, {
-            "mcp_spring_classes": {
-                "classes": {
-                    "CUSTOM_HARD": {"spring_k": 10.0},
-                },
-                "nets": {"BAT+": "PLANE"},
-            },
+    def test_loads_from_singleton(self, tmp_path):
+        sch, _ = _make_project(tmp_path, {})
+        sm.write_metadata_key(sch, "mcp_spring_classes", {
+            "classes": {"CUSTOM_HARD": {"spring_k": 10.0}},
+            "nets": {"BAT+": "PLANE"},
         })
-        classes, nets = _load_spring_classes_from_project(pro, sch_path=sch)
+        classes, nets = _load_spring_classes_from_project(sch)
         assert "CUSTOM_HARD" in classes
         assert classes["CUSTOM_HARD"].spring_k == 10.0
         assert nets.get("BAT+") == "PLANE"
 
-    def test_singleton_wins_over_pro(self, tmp_path):
-        sch, pro = _make_project(tmp_path, {
-            # .kicad_pro defines a CUSTOM_PRO class at strength 99
-            "mcp_spring_classes": {
-                "classes": {"CUSTOM_PRO": {"spring_k": 99.0}},
-                "nets": {"BAT+": "PLANE"},
-            },
-        })
-        # Singleton defines CUSTOM_SINGLETON at strength 7
-        sm.write_metadata_key(sch, "mcp_spring_classes", {
-            "classes": {"CUSTOM_SINGLETON": {"spring_k": 7.0}},
-            "nets": {"GND": "PLANE"},
-        })
-        classes, nets = _load_spring_classes_from_project(pro, sch_path=sch)
-        # Singleton's CUSTOM_SINGLETON is present; the pro's
-        # CUSTOM_PRO is NOT (singleton replaces, not merges).
-        assert "CUSTOM_SINGLETON" in classes
-        assert "CUSTOM_PRO" not in classes
-        assert nets == {"GND": "PLANE"}
-
-    def test_falls_back_to_defaults_when_neither_has_section(
+    def test_falls_back_to_defaults_when_singleton_missing(
         self, tmp_path,
     ):
-        sch, pro = _make_project(tmp_path, {})
-        classes, nets = _load_spring_classes_from_project(pro, sch_path=sch)
+        sch, _ = _make_project(tmp_path, {})
+        classes, nets = _load_spring_classes_from_project(sch)
         # Default classes are present
         assert "DECOUPLING" in classes
         assert "LOCAL_SIGNAL" in classes
         assert nets == {}
 
-    def test_no_sch_path_still_works_with_pro(self, tmp_path):
+    def test_no_sch_path_returns_defaults(self, tmp_path):
+        classes, nets = _load_spring_classes_from_project(None)
+        assert "DECOUPLING" in classes
+        assert nets == {}
+
+    def test_pro_keys_are_ignored(self, tmp_path):
+        """Phase 3: .kicad_pro mcp_spring_classes are no longer read."""
         sch, pro = _make_project(tmp_path, {
             "mcp_spring_classes": {
-                "classes": {"CUSTOM": {"spring_k": 3.0}},
-                "nets": {},
+                "classes": {"FROM_PRO": {"spring_k": 99.0}},
+                "nets": {"BAT+": "PLANE"},
             },
         })
-        classes, _ = _load_spring_classes_from_project(pro, sch_path=None)
-        assert classes["CUSTOM"].spring_k == 3.0
+        classes, nets = _load_spring_classes_from_project(sch)
+        assert "FROM_PRO" not in classes
+        assert nets == {}

@@ -114,74 +114,16 @@ class TestSingletonReadWrite:
             assert "reserved" in r["errorDetails"]
 
 
-class TestProFallback:
-    def test_pro_fallback_when_singleton_missing(
-        self, sch_path, pro_path,
-    ):
-        pro_data = json.loads(pro_path.read_text())
-        pro_data["mcp_constraint_version"] = 1
-        pro_path.write_text(json.dumps(pro_data))
-        val = sm.read_metadata_with_pro_fallback(
-            sch_path, pro_path, "mcp_constraint_version",
-        )
-        assert val == 1
-
-    def test_singleton_wins_over_pro(self, sch_path, pro_path):
-        pro_data = json.loads(pro_path.read_text())
-        pro_data["mcp_constraint_version"] = 1
-        pro_path.write_text(json.dumps(pro_data))
-        sm.write_metadata_key(sch_path, "mcp_constraint_version", 3)
-        val = sm.read_metadata_with_pro_fallback(
-            sch_path, pro_path, "mcp_constraint_version",
-        )
-        assert val in (3, "3")  # int via JSON, or raw string
-
-    def test_missing_key_returns_none(self, sch_path, pro_path):
-        val = sm.read_metadata_with_pro_fallback(
-            sch_path, pro_path, "mcp_nonexistent",
-        )
-        assert val is None
-
-
-class TestMigration:
-    def test_migrate_from_pro_moves_all_mcp_keys(
-        self, sch_path, pro_path,
-    ):
-        pro_data = json.loads(pro_path.read_text())
-        pro_data["mcp_constraint_version"] = 2
-        pro_data["mcp_expected_netclass_patterns"] = {
-            "POWER_4A": ["BAT+", "BAT-"]
-        }
-        pro_data["unrelated_key"] = "should_stay"
-        pro_path.write_text(json.dumps(pro_data))
-
-        r = sm.migrate_from_pro(sch_path, pro_path)
-        assert r["success"], r
-        assert len(r["migrated"]) == 2
-
+class TestPrimitiveAndJsonValues:
+    def test_primitive_value_returned_as_string(self, sch_path):
+        sm.write_metadata_key(sch_path, "mcp_constraint_version", 7)
         md = sm.read_metadata(sch_path)
-        assert "mcp_constraint_version" in md
-        assert "mcp_expected_netclass_patterns" in md
+        assert md["mcp_constraint_version"] == "7"
 
-        after = json.loads(pro_path.read_text())
-        assert "mcp_constraint_version" not in after
-        assert "mcp_expected_netclass_patterns" not in after
-        assert "unrelated_key" in after
+    def test_json_value_parsed_with_read_metadata_json(self, sch_path):
+        payload = {"k": [1, 2, 3]}
+        sm.write_metadata_key(sch_path, "mcp_test", payload)
+        assert sm.read_metadata_json(sch_path, "mcp_test") == payload
 
-    def test_migrate_preserves_pro_when_remove_false(
-        self, sch_path, pro_path,
-    ):
-        pro_data = json.loads(pro_path.read_text())
-        pro_data["mcp_constraint_version"] = 2
-        pro_path.write_text(json.dumps(pro_data))
-
-        sm.migrate_from_pro(sch_path, pro_path, remove_from_pro=False)
-        after = json.loads(pro_path.read_text())
-        assert after.get("mcp_constraint_version") == 2
-
-    def test_migrate_with_no_mcp_keys_is_noop(
-        self, sch_path, pro_path,
-    ):
-        r = sm.migrate_from_pro(sch_path, pro_path)
-        assert r["success"]
-        assert r["migrated"] == []
+    def test_read_metadata_json_returns_none_for_missing(self, sch_path):
+        assert sm.read_metadata_json(sch_path, "mcp_missing") is None

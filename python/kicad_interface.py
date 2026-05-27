@@ -356,7 +356,6 @@ class KiCADInterface:
             "audit_plane_cuts": self.routing_commands.audit_plane_cuts,
             "decoupling_audit": self._handle_decoupling_audit,
             "verify_netclass_patterns": self._handle_verify_netclass_patterns,
-            "migrate_metadata_to_singleton": self._handle_migrate_metadata_to_singleton,
             "get_schematic_metadata": self._handle_get_schematic_metadata,
             "set_schematic_metadata": self._handle_set_schematic_metadata,
             "place_near": self._handle_place_near,
@@ -6833,41 +6832,6 @@ print("ok")
             logger.error(f"Error in verify_netclass_patterns: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
-    def _handle_migrate_metadata_to_singleton(
-        self, params: Dict[str, Any],
-    ) -> Dict[str, Any]:
-        """Copy every `mcp_*` key from the project's `.kicad_pro` into
-        a Schematic_Metadata singleton on the schematic, and (by
-        default) remove the migrated keys from `.kicad_pro`. #230.
-
-        Creates the singleton symbol on first call. Subsequent calls
-        update properties on the existing singleton — re-running is
-        idempotent. Pass `removeFromPro=false` to keep `.kicad_pro`
-        keys alongside the singleton (useful for staged rollout).
-        """
-        logger.info("Running migrate_metadata_to_singleton")
-        try:
-            from commands.schematic_metadata import migrate_from_pro
-            sch_path = params.get("schematicPath")
-            pro_path = params.get("projectPath")
-            if not sch_path:
-                return {
-                    "success": False,
-                    "message": "schematicPath is required",
-                }
-            if not pro_path:
-                # Derive from schematic path.
-                pro_path = str(Path(sch_path).with_suffix(".kicad_pro"))
-            remove = bool(params.get("removeFromPro", True))
-            return migrate_from_pro(
-                Path(sch_path), Path(pro_path), remove_from_pro=remove,
-            )
-        except Exception as e:
-            logger.error(
-                f"Error in migrate_metadata_to_singleton: {e}", exc_info=True,
-            )
-            return {"success": False, "message": str(e)}
-
     def _handle_get_schematic_metadata(
         self, params: Dict[str, Any],
     ) -> Dict[str, Any]:
@@ -6991,10 +6955,10 @@ print("ok")
                     "errorDetails": "Pass boardPath= or call open_project first",
                 }
 
-            # Project file (sibling to .kicad_sch by convention) — version check.
+            # Read constraint version from the Schematic_Metadata
+            # singleton on the schematic (#230 phase 3).
             from pathlib import Path
-            proj = Path(schematic_path).with_suffix(".kicad_pro")
-            constraint_version = get_constraint_version(proj)
+            constraint_version = get_constraint_version(schematic_path)
 
             pairs: List[DecouplingPair] = []
             parse_errors: List[Dict[str, str]] = []

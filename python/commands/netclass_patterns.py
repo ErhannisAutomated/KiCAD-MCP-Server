@@ -8,11 +8,12 @@ the ``CELL1_TOP`` / ``CELL2_TOP`` -> ``POWER_4A`` patterns). Once
 gone, those nets fall back to the Default netclass and routing tools
 silently pick the wrong width.
 
-The "expected" pattern list is stored as ``mcp_expected_netclass_patterns``.
-As of #230, the preferred home is the schematic's Schematic_Metadata
-singleton — pass ``sch_path`` to read and write there. Legacy projects
-that still keep the key in ``.kicad_pro`` are supported via fallback
-(read) and via the ``migrate_metadata_to_singleton`` MCP tool (move).
+The "expected" pattern list lives on the schematic's
+Schematic_Metadata singleton under ``mcp_expected_netclass_patterns``
+(#230). This module reads it from there and compares against the
+live ``net_settings.netclass_patterns`` in ``.kicad_pro``; restore
+writes back to ``.kicad_pro`` because that's what KiCad actually
+consumes.
 """
 
 from __future__ import annotations
@@ -62,92 +63,63 @@ def _normalise_patterns(
 
 
 def _read_expected_patterns(
-    pro_path: Path, sch_path: Optional[Path] = None,
-) -> Tuple[Optional[List[Any]], str]:
-    """Return the expected-patterns list and the source it came from.
-
-    Source precedence (#230 phase 2):
-      1. Schematic_Metadata singleton's ``mcp_expected_netclass_patterns``
-         property — if ``sch_path`` is given and the singleton has the
-         key.
-      2. The ``.kicad_pro``'s top-level ``mcp_expected_netclass_patterns``
-         key — legacy storage for projects that haven't migrated.
-
-    Returns ``(patterns, source)`` where source is "singleton",
-    "pro", or "missing". Patterns is ``None`` only when missing.
+    sch_path: Path,
+) -> Optional[List[Any]]:
+    """Return the expected-patterns list from the schematic's
+    Schematic_Metadata singleton, or None if the singleton doesn't
+    carry the key (or doesn't exist yet).
     """
-    if sch_path is not None and Path(sch_path).exists():
-        try:
-            from commands.schematic_metadata import read_metadata_json
-            from_sch = read_metadata_json(Path(sch_path), MCP_EXPECTED_KEY)
-            if from_sch is not None:
-                return from_sch, "singleton"
-        except Exception as e:
-            logger.debug(
-                f"singleton read failed for {sch_path}: {e}; "
-                f"falling back to .kicad_pro"
-            )
-    data = _read_kicad_pro(pro_path)
-    if data and MCP_EXPECTED_KEY in data:
-        return data[MCP_EXPECTED_KEY], "pro"
-    return None, "missing"
+    if not Path(sch_path).exists():
+        return None
+    try:
+        from commands.schematic_metadata import read_metadata_json
+        return read_metadata_json(Path(sch_path), MCP_EXPECTED_KEY)
+    except Exception as e:
+        logger.warning(
+            f"singleton read failed for {sch_path}: {e}"
+        )
+        return None
 
 
 def _write_expected_patterns(
-    pro_path: Path,
-    sch_path: Optional[Path],
-    patterns: List[Any],
-    prefer_singleton: bool = True,
-) -> str:
-    """Write the expected-patterns list. Returns where it was stored:
-    "singleton" or "pro".
-
-    If a schematic path is given AND the singleton is the preferred
-    sink (default), writes to the singleton. Otherwise updates
-    ``.kicad_pro``.
+    sch_path: Path, patterns: List[Any],
+) -> bool:
+    """Write the expected-patterns list to the schematic singleton.
+    Returns True on success.
     """
-    if prefer_singleton and sch_path is not None and Path(sch_path).exists():
-        try:
-            from commands.schematic_metadata import write_metadata_key
-            r = write_metadata_key(Path(sch_path), MCP_EXPECTED_KEY, patterns)
-            if r.get("success"):
-                return "singleton"
-            logger.warning(
-                f"singleton write failed ({r.get('errorDetails')}); "
-                f"falling back to .kicad_pro"
-            )
-        except Exception as e:
-            logger.warning(
-                f"singleton write raised {e}; falling back to .kicad_pro"
-            )
-    data = _read_kicad_pro(pro_path) or {}
-    data[MCP_EXPECTED_KEY] = patterns
-    _write_kicad_pro(pro_path, data)
-    return "pro"
+    try:
+        from commands.schematic_metadata import write_metadata_key
+        r = write_metadata_key(Path(sch_path), MCP_EXPECTED_KEY, patterns)
+        return bool(r.get("success"))
+    except Exception as e:
+        logger.warning(
+            f"singleton write raised {e} for {sch_path}"
+        )
+        return False
 
 
 def bootstrap_expected_patterns(
-    pro_path: Path, sch_path: Optional[Path] = None,
+    pro_path: Path, sch_path: Path,
 ) -> bool:
-    """If neither the schematic singleton nor ``.kicad_pro`` carries
+    """If the schematic singleton doesn't carry
     ``mcp_expected_netclass_patterns``, seed it from the current
-    ``net_settings.netclass_patterns`` and write to whichever source
-    the project prefers (singleton when ``sch_path`` is given).
-    Returns True if something was written.
+    ``net_settings.netclass_patterns`` in ``.kicad_pro``. Returns True
+    if something was written.
     """
-    existing, source = _read_expected_patterns(pro_path, sch_path)
+    existing = _read_expected_patterns(sch_path)
     if existing is not None:
         return False
     data = _read_kicad_pro(pro_path)
     if data is None:
         return False
     current = _current_patterns(data)
-    sink = _write_expected_patterns(pro_path, sch_path, list(current))
-    logger.info(
-        f"Bootstrapped {MCP_EXPECTED_KEY} in {sink} "
-        f"with {len(current)} entries"
-    )
-    return True
+    wrote = _write_expected_patterns(sch_path, list(current))
+    if wrote:
+        logger.info(
+            f"Bootstrapped {MCP_EXPECTED_KEY} on schematic singleton "
+            f"with {len(current)} entries"
+        )
+    return wrote
 
 
 def verify_netclass_patterns(
@@ -155,22 +127,25 @@ def verify_netclass_patterns(
     restore: bool = False,
     sch_path: Optional[Path] = None,
 ) -> Dict[str, Any]:
-    """Compare the live ``netclass_patterns`` against the expected set
-    stored in the schematic's Schematic_Metadata singleton (preferred)
-    or in ``.kicad_pro`` (legacy). Optionally restore missing entries.
+    """Compare the live ``netclass_patterns`` in ``.kicad_pro`` against
+    the expected set stored on the schematic's Schematic_Metadata
+    singleton. Optionally restore missing entries.
+
+    ``sch_path`` is required — the singleton is the only canonical
+    source. If omitted, it's derived from ``pro_path``'s sibling
+    ``.kicad_sch``.
 
     Returns a dict with:
       success (bool)
-      bootstrapped (bool) — true if the expected section was just
-        initialised on this call (nothing to verify yet, no drift).
+      bootstrapped (bool) — true if the expected set was just
+        initialised on this call by seeding the singleton from the
+        current state (nothing to verify yet, no drift).
       drifted (bool) — true if any pattern is missing or unexpectedly
         extra.
       missing (list) — patterns in expected but not in current.
       extra (list) — patterns in current but not in expected.
       restored (list) — only present when restore=True; the entries
         that were added back to net_settings.netclass_patterns.
-      expectedSource (str) — "singleton", "pro", or "missing"; tells
-        the caller which source supplied the expected set.
     """
     data = _read_kicad_pro(pro_path)
     if data is None:
@@ -179,24 +154,38 @@ def verify_netclass_patterns(
             "message": f"Could not read {pro_path}",
         }
 
-    expected_raw, expected_source = _read_expected_patterns(pro_path, sch_path)
+    if sch_path is None:
+        sch_path = pro_path.with_suffix(".kicad_sch")
+    if not sch_path.exists():
+        return {
+            "success": False,
+            "message": (
+                f"Could not find sibling schematic {sch_path}; the "
+                f"Schematic_Metadata singleton lives on it. Pass "
+                f"sch_path= explicitly if the schematic is elsewhere."
+            ),
+        }
+
+    expected_raw = _read_expected_patterns(sch_path)
 
     if expected_raw is None:
-        # First-time encounter — seed it from the current state and
-        # write to the preferred source (singleton when sch given).
+        # First-time encounter — seed the singleton from the current
+        # net_settings.netclass_patterns.
         current = list(_current_patterns(data))
-        sink = _write_expected_patterns(pro_path, sch_path, current)
+        wrote = _write_expected_patterns(sch_path, current)
         return {
-            "success": True,
-            "bootstrapped": True,
+            "success": wrote,
+            "bootstrapped": wrote,
             "drifted": False,
             "missing": [],
             "extra": [],
-            "expectedSource": sink,
             "message": (
-                f"No {MCP_EXPECTED_KEY} on schematic or in .kicad_pro; "
-                f"seeded {sink} from current "
-                f"net_settings.netclass_patterns ({len(current)} entries)."
+                f"Seeded Schematic_Metadata singleton with "
+                f"{len(current)} pattern(s) from current "
+                f"net_settings.netclass_patterns."
+                if wrote else
+                f"Could not write expected patterns to schematic "
+                f"singleton at {sch_path}."
             ),
         }
 
@@ -214,15 +203,14 @@ def verify_netclass_patterns(
         "drifted": drifted,
         "missing": [{"netclass": nc, "pattern": p} for nc, p in missing],
         "extra": [{"netclass": nc, "pattern": p} for nc, p in extra],
-        "expectedSource": expected_source,
     }
 
     if restore and missing:
         # Append the missing entries back to net_settings.netclass_patterns.
         # We do not touch `extra` — those may be intentional new additions
         # the user wants to keep. Restoring just rebuilds the floor.
-        # Restoration always writes to .kicad_pro since that's where
-        # KiCad reads the live netclass_patterns from.
+        # Restoration writes to .kicad_pro since that's where KiCad
+        # reads the live netclass_patterns from.
         current_list.extend(
             {"netclass": nc, "pattern": p} for nc, p in missing
         )
@@ -231,19 +219,16 @@ def verify_netclass_patterns(
         result["restored"] = result["missing"]
         result["message"] = (
             f"Restored {len(missing)} missing pattern(s) to "
-            f"net_settings.netclass_patterns "
-            f"(expected source: {expected_source})."
+            f"net_settings.netclass_patterns."
         )
     elif drifted:
         result["message"] = (
             f"Netclass-pattern drift: {len(missing)} missing, "
-            f"{len(extra)} extra (expected source: {expected_source}). "
-            f"Pass restore=true to re-add missing."
+            f"{len(extra)} extra. Pass restore=true to re-add missing."
         )
     else:
         result["message"] = (
-            f"All {len(expected_tuples)} expected pattern(s) present "
-            f"(source: {expected_source})."
+            f"All {len(expected_tuples)} expected pattern(s) present."
         )
 
     return result
