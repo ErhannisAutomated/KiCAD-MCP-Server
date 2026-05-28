@@ -38,7 +38,13 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
         .boolean()
         .optional()
         .describe(
-          "Incremental route (default: false). When true, every already-routed wire/via in the DSN is marked (type fix) so freerouting leaves it bit-identical and only fills the open ratsnest — use this to route a newly-placed sub-circuit without disturbing hand-routed nets. Without it, freerouting's optimiser can rework existing nets and the append-style SES import would leave old + new copper rather than a clean swap. Count reported as `existingTracesFixed`; keep autoDedupe on so the echoed-back fixed wires collapse cleanly.",
+          "Incremental route (default: false). When true, every already-routed wire/via in the DSN is marked (type fix) so freerouting leaves it bit-identical and only fills the open ratsnest — use this to route a newly-placed sub-circuit without disturbing hand-routed nets. Count reported as `existingTracesFixed`. Note the SES import is replace-like, so this only yields a usable board if freerouting echoes the fixed wires into its output; if it doesn't, the import guard aborts (see forceImport) rather than wiping the board.",
+        ),
+      forceImport: z
+        .boolean()
+        .optional()
+        .describe(
+          "Bypass the SES import safety guard (default: false). The guard aborts the import when the routed session has 0 wires, or far fewer than the board already has, because ImportSpecctraSES is replace-like and would wipe/decimate existing routing (#241 — a prior empty-SES import wiped 599 traces). Only set true when you genuinely intend to replace the board's routing with the session.",
         ),
     },
     async (args: any) => {
@@ -102,6 +108,12 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
         .optional()
         .describe(
           "After importing, remove exact-duplicate tracks/vias left over by ImportSpecctraSES's append-not-replace behaviour (default: true). Pass false to keep the raw post-import state for debugging. Reported as `autoDedupeRemovedCount` in the result.",
+        ),
+      forceImport: z
+        .boolean()
+        .optional()
+        .describe(
+          "Bypass the SES import safety guard (default: false). The guard aborts when the session has 0 wires or far fewer than the board already has, since the import is replace-like and would wipe/decimate existing routing (#241). Only set true to intentionally replace the routing.",
         ),
     },
     async (args: any) => {

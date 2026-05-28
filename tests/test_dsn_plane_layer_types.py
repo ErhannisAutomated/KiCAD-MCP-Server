@@ -143,3 +143,25 @@ def test_only_layer_hosting_a_plane_is_flipped():
     assert layers == ["In1.Cu"]
     assert re.search(r"\(layer In1.Cu\n\s+\(type power\)", out)
     assert re.search(r"\(layer In2.Cu\n\s+\(type signal\)", out)
+
+
+def test_outer_layers_never_flipped():
+    """A GND pour on F.Cu / B.Cu must NOT flip them to power — they're the
+    primary routing layers. (#241: flipping all copper layers left
+    freerouting nothing to route on and wiped the board.)"""
+    from commands.freerouting import _rewrite_dsn_plane_layer_types
+
+    # Add GND pours on both outer layers in addition to the inner planes.
+    with_outer = SAMPLE_DSN.replace(
+        "    (plane GND (polygon In1.Cu 0  0 0  100 0  100 -100  0 -100  0 0))\n",
+        "    (plane GND (polygon In1.Cu 0  0 0  100 0  100 -100  0 -100  0 0))\n"
+        "    (plane GND (polygon F.Cu 0  0 0  100 0  100 -100  0 -100  0 0))\n"
+        "    (plane GND (polygon B.Cu 0  0 0  100 0  100 -100  0 -100  0 0))\n",
+    )
+    out, layers = _rewrite_dsn_plane_layer_types(with_outer)
+    # Only the inner planes flip; outer layers stay routable.
+    assert sorted(layers) == ["In1.Cu", "In2.Cu"]
+    assert re.search(r"\(layer F.Cu\n\s+\(type signal\)", out)
+    assert re.search(r"\(layer B.Cu\n\s+\(type signal\)", out)
+    assert re.search(r"\(layer In1.Cu\n\s+\(type power\)", out)
+    assert re.search(r"\(layer In2.Cu\n\s+\(type power\)", out)

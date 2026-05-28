@@ -222,7 +222,11 @@ class TestImportSes:
 
     def test_import_success(self, cmds: Any, tmp_path: Any) -> None:
         ses_file = tmp_path / "test.ses"
-        ses_file.write_text("(session test)")
+        # SES must carry routes or the #241 import guard aborts it.
+        ses_file.write_text(
+            "(session test (routes (network_out "
+            "(net N (wire (path F.Cu 250 0 0 10 0))))))"
+        )
 
         pcbnew_mock.ImportSpecctraSES.return_value = True
         cmds.board.GetTracks.return_value = []
@@ -232,7 +236,10 @@ class TestImportSes:
 
     def test_import_failure(self, cmds: Any, tmp_path: Any) -> None:
         ses_file = tmp_path / "test.ses"
-        ses_file.write_text("(session test)")
+        ses_file.write_text(
+            "(session test (routes (network_out "
+            "(net N (wire (path F.Cu 250 0 0 10 0))))))"
+        )
 
         pcbnew_mock.ImportSpecctraSES.side_effect = Exception("SES error")
         result = cmds.import_ses({"sesPath": str(ses_file)})
@@ -318,7 +325,10 @@ class TestAutoroute:
             True,
         )[1]
         mock_run.return_value = MagicMock(returncode=0, stdout="Routing completed", stderr="")
-        ses_file.write_text("(session)")
+        ses_file.write_text(
+            "(session (routes (network_out "
+            "(net N (wire (path F.Cu 250 0 0 10 0))))))"
+        )
         pcbnew_mock.ImportSpecctraSES.return_value = True
 
         track = MagicMock()
@@ -354,7 +364,10 @@ class TestAutoroute:
             True,
         )[1]
         mock_run.return_value = MagicMock(returncode=0, stdout="Routing completed", stderr="")
-        ses_file.write_text("(session)")
+        ses_file.write_text(
+            "(session (routes (network_out "
+            "(net N (wire (path F.Cu 250 0 0 10 0))))))"
+        )
         pcbnew_mock.ImportSpecctraSES.return_value = True
 
         cmds.board.GetTracks.return_value = [MagicMock()]

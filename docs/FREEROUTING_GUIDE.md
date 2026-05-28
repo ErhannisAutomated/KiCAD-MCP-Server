@@ -103,7 +103,8 @@ Run the full autorouting workflow (export DSN, route, import SES).
 | `maxPasses` | number | No | 20 | Maximum routing passes |
 | `timeout` | number | No | 300 | Timeout in seconds |
 | `autoDedupe` | boolean | No | true | After importing the SES result, run `dedupe_traces(apply=true, includeVias=true)` to drop duplicates. `pcbnew.ImportSpecctraSES` **appends** tracks rather than replacing them, so re-routing the same nets used to silently leave doubled traces — sometimes hundreds of them on iterative re-routes. Set false only when chaining `import_ses` calls and dedupe is intentionally deferred. Response carries `autoDedupeRemovedCount` so callers can spot leakage (#227). |
-| `preserveExistingTraces` | boolean | No | false | **Incremental route.** When true, every already-routed wire/via in the exported DSN is marked `(type fix)` so freerouting leaves it bit-identical and only fills the open ratsnest. Use it to route a newly-placed sub-circuit *without disturbing hand-routed nets*. Without it, freerouting's optimiser can rework existing nets and — because the SES import appends — you'd get old + new copper on the reworked net rather than a clean swap. Keep `autoDedupe` on so the echoed-back fixed wires collapse cleanly. Count reported as `existingTracesFixed` (#240). |
+| `preserveExistingTraces` | boolean | No | false | **Incremental route.** When true, every already-routed wire/via in the exported DSN is marked `(type fix)` so freerouting leaves it bit-identical and only fills the open ratsnest — to route a newly-placed sub-circuit without reworking hand-routed nets. Count reported as `existingTracesFixed`. **Caveat:** the SES import is replace-like (see the import guard below), so this only yields a usable board if freerouting echoes the fixed wires back into its session output. If it doesn't, the guard aborts rather than wiping the board (#240/#241). |
+| `forceImport` | boolean | No | false | Bypass the SES import safety guard. The guard aborts the import when the routed session has 0 wires, or fewer than half the board's current track count, because the import is replace-like and would wipe/decimate existing routing. Only set true when you genuinely intend to replace the routing (e.g. routing a freshly-stripped board where a low count is expected). (#241) |
 
 **Example:**
 
@@ -126,6 +127,16 @@ the open ratsnest. Check `existingTracesFixed` in the response to confirm
 how many wires/vias were protected. (The older "strip everything, then
 autoroute from clean" flow is still valid when you *want* a full reroute.)
 
+**Import safety guard (#241).** `pcbnew.ImportSpecctraSES` is replace-like —
+the board ends up with whatever the session contains. So autoroute and
+`import_ses` refuse to import a session with **0 routes**, or with **fewer
+than half** the board's current track count, and leave the board untouched
+(reported via `sesWireCount` / `boardTracksBefore`). This prevents the
+board-wipe that occurs when freerouting fails to route (e.g. no routable
+layer) and returns an empty/degenerate SES. Pass `forceImport=true` only
+when a low route count is intended (routing a stripped board, or a
+deliberate full clear).
+
 ### `export_dsn`
 
 Export the PCB to Specctra DSN format for manual routing workflows.
@@ -147,6 +158,7 @@ Import a routed Specctra SES file back into the PCB.
 | `sesPath` | string | Yes | Path to the .ses file to import |
 | `boardPath` | string | No | Path to .kicad_pcb file (default: current board) |
 | `autoDedupe` | boolean | No | Default true. Same behaviour as `autoroute.autoDedupe` (#227) — drops the duplicate tracks/vias `ImportSpecctraSES` appends. |
+| `forceImport` | boolean | No | Bypass the SES import safety guard (default false). The guard aborts when the session has 0 wires or fewer than half the board's current track count, since the replace-like import would wipe/decimate existing routing (#241). Only set true to intentionally replace the routing. |
 
 ---
 

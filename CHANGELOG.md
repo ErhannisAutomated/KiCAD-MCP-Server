@@ -4,6 +4,36 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Autoroute board-wipe safeguards (develop, 2026-05-28, #241)
+
+Two fixes after a live `autoroute(preserveExistingTraces=true)` pass **wiped
+all 599 traces** off a board. Root cause, in order:
+
+1. The `(type power)` plane-rewrite (#203) flipped *every* pour-hosting copper
+   layer — including the outer F.Cu/B.Cu, which carry GND pours but remain the
+   primary routing layers. With all four layers marked power, freerouting had
+   **no routable layer**.
+2. Freerouting returned an empty SES (0 wires).
+3. `pcbnew.ImportSpecctraSES` is **replace-like**, so importing the empty
+   session replaced all routing with nothing.
+
+Fixes:
+- **Plane-rewrite never flips outer layers.** `_rewrite_dsn_plane_layer_types`
+  now skips F.Cu/B.Cu (`_OUTER_COPPER_LAYERS`); only dedicated inner planes
+  (In1.Cu, In2.Cu, …) become `(type power)`, so there's always a routable
+  layer.
+- **SES import guard** (`_ses_import_guard`) on both `autoroute` and
+  `import_ses`: aborts the import — leaving the board untouched — when the
+  session has 0 wires, or fewer than half the board's current track count.
+  New `forceImport=true` overrides it (e.g. routing a freshly-stripped board).
+  Response carries `sesWireCount` / `boardTracksBefore`.
+
+Note: this also revises the #240 understanding — the SES import is replace-
+not append-like, so `preserveExistingTraces` only produces a usable board if
+freerouting echoes the fixed wires into its output; if it doesn't, the guard
+now safely aborts instead of wiping. Tests in `tests/test_ses_import_guard.py`
+and `tests/test_dsn_plane_layer_types.py`.
+
 ### Incremental autoroute: preserveExistingTraces (develop, 2026-05-28, #240)
 
 `autoroute` and `export_dsn` gained a `preserveExistingTraces` flag (default

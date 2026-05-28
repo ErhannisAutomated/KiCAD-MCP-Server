@@ -186,9 +186,12 @@ def _maybe_apply_layer_order(
         return None
 
 
+_OUTER_COPPER_LAYERS = {"F.Cu", "B.Cu"}
+
+
 def _rewrite_dsn_plane_layer_types(dsn_text: str) -> Tuple[str, List[str]]:
-    """Mark every copper layer that hosts a (plane …) declaration as
-    ``(type power)`` instead of ``(type signal)``.
+    """Mark every *inner* copper layer that hosts a (plane …) declaration
+    as ``(type power)`` instead of ``(type signal)``.
 
     pcbnew's `ExportSpecctraDSN` always emits ``(type signal)`` for
     every copper layer, even when the layer is a continuous GND / PWR
@@ -201,7 +204,15 @@ def _rewrite_dsn_plane_layer_types(dsn_text: str) -> Tuple[str, List[str]]:
     which layers carry a plane, and flips those layers' ``type signal``
     line to ``type power``. Freerouting then leaves those layers alone.
 
-    Returns (rewritten_text, list_of_plane_layer_names).
+    **Outer layers (F.Cu / B.Cu) are never flipped**, even when they
+    host a GND pour: they remain the board's primary routing layers
+    (signals run *around* the pour). Flipping them caused a board-wipe
+    incident (#240/#241) — when every copper layer was marked power,
+    freerouting had no routable layer, produced an empty SES, and the
+    replace-style import wiped all routing. Only dedicated inner planes
+    (In1.Cu, In2.Cu, …) should become ``(type power)``.
+
+    Returns (rewritten_text, list_of_flipped_layer_names).
     """
     import re
 
@@ -209,7 +220,10 @@ def _rewrite_dsn_plane_layer_types(dsn_text: str) -> Tuple[str, List[str]]:
         r"\(plane\s+\S+\s*\(polygon\s+(\S+)\s",
         re.MULTILINE,
     )
-    plane_layers = sorted({m.group(1) for m in plane_re.finditer(dsn_text)})
+    plane_layers = sorted(
+        l for l in {m.group(1) for m in plane_re.finditer(dsn_text)}
+        if l not in _OUTER_COPPER_LAYERS
+    )
     if not plane_layers:
         return dsn_text, []
 
@@ -252,13 +266,15 @@ def _rewrite_dsn_fix_wiring(dsn_text: str) -> Tuple[str, int]:
     autorouter to rip up and reroute. For an *incremental* pass (route a
     newly-placed sub-circuit, leave the rest of the board alone) that's
     the opposite of what we want: freerouting's optimiser can rework
-    hand-routed nets, and because ``ImportSpecctraSES`` *appends* rather
-    than replaces, a reworked net lands on the board as old + new copper
-    instead of a clean swap.
+    hand-routed nets.
 
-    Flipping the existing wiring to ``fix`` makes freerouting preserve it
-    bit-identically; the routed result then only adds the open nets, and
-    the post-import dedupe collapses the echoed-back fixed wires.
+    Flipping the existing wiring to ``fix`` tells freerouting to preserve
+    it. NOTE the SES import is replace-like (#241): the board ends up
+    with whatever the SES contains, so this feature only yields a usable
+    board if freerouting echoes the fixed wires back into the session
+    output. If it does not, the import guard (``_ses_import_guard``)
+    refuses the import rather than wiping the existing routing — so the
+    worst case is a safe abort, never a board wipe.
 
     ``(type route)`` only ever appears on wires/vias (copper layers are
     ``signal``/``power``, clearances are ``smd_smd``/…), so the token
@@ -288,6 +304,76 @@ def _maybe_fix_existing_wiring(dsn_path: str, enabled: bool) -> int:
     except Exception as e:
         logger.warning(f"Skipping DSN fix-existing-wiring rewrite: {e}")
         return 0
+
+
+_SES_MIN_RETENTION = 0.5
+_SES_GUARD_FLOOR = 20
+
+
+def _count_ses_wires(ses_path: str) -> int:
+    """Count routed wires in a Specctra SES file. 0 means freerouting
+    produced no routing — a failure indicator. Returns -1 if the file
+    can't be read (caller should not block on a read error)."""
+    try:
+        with open(ses_path, "r") as f:
+            return f.read().count("(wire ")
+    except Exception:
+        return -1
+
+
+def _ses_import_guard(
+    ses_wires: int, board_tracks_before: int, force_import: bool,
+) -> Optional[Dict[str, Any]]:
+    """Decide whether importing an SES is safe (#241).
+
+    ``pcbnew.ImportSpecctraSES`` is replace-like: the board ends up with
+    whatever the session contains. A degenerate session (no routes, or
+    far fewer than the board already has) therefore *destroys* existing
+    routing on import — the #240 incident wiped 599 traces when every
+    copper layer got marked ``(type power)`` and freerouting returned an
+    empty SES.
+
+    Returns an abort response dict when the import should be refused, or
+    None when it's safe to proceed. ``force_import`` bypasses the guard.
+    A read error (ses_wires < 0) does NOT block — that's a separate
+    failure surfaced elsewhere.
+    """
+    if force_import or ses_wires < 0:
+        return None
+    if ses_wires == 0:
+        return {
+            "success": False,
+            "message": "Aborted SES import: session contains 0 routes",
+            "errorDetails": (
+                "ImportSpecctraSES is replace-like, so importing an empty "
+                "session would wipe all board routing. Freerouting likely "
+                "had no routable layer (check planeLayersFlippedToPower — "
+                "if every copper layer is (type power) there's nothing to "
+                "route on) or otherwise failed. The board was left "
+                "untouched. Pass forceImport=true only if you intend to "
+                "clear the routing."
+            ),
+        }
+    if (
+        board_tracks_before >= _SES_GUARD_FLOOR
+        and ses_wires < board_tracks_before * _SES_MIN_RETENTION
+    ):
+        return {
+            "success": False,
+            "message": (
+                f"Aborted SES import: session has far fewer routes "
+                f"({ses_wires}) than the board already has "
+                f"({board_tracks_before})"
+            ),
+            "errorDetails": (
+                "The replace-like import would discard most existing "
+                "routing. This usually means freerouting failed to route, "
+                "or (with preserveExistingTraces) it did not echo the "
+                "fixed wires back into the session. Board left untouched. "
+                "Pass forceImport=true to override."
+            ),
+        }
+    return None
 
 
 def _build_freerouting_cmd(
@@ -586,6 +672,28 @@ class FreeroutingCommands:
         ses_size = os.path.getsize(ses_path)
         logger.info(f"SES produced: {ses_size} bytes in {elapsed}s")
 
+        # Step 2b: Import safety guard (#241). The SES import is
+        # replace-like; a degenerate session would wipe existing routing.
+        ses_wires = _count_ses_wires(ses_path)
+        tracks_before = sum(
+            1 for t in self.board.GetTracks() if t.GetClass() != "PCB_VIA"
+        )
+        guard = _ses_import_guard(
+            ses_wires, tracks_before, bool(params.get("forceImport", False))
+        )
+        if guard is not None:
+            logger.warning(guard["message"])
+            guard.update({
+                "elapsed_seconds": elapsed,
+                "sesWireCount": ses_wires,
+                "boardTracksBefore": tracks_before,
+                "planeLayersFlippedToPower": plane_layers,
+                "existingTracesFixed": existing_fixed,
+                "dsn_path": dsn_path,
+                "ses_path": ses_path,
+            })
+            return guard
+
         # Step 3: Import SES
         logger.info(f"Importing SES from {ses_path}")
         try:
@@ -765,6 +873,24 @@ class FreeroutingCommands:
                 "message": "SES file not found",
                 "errorDetails": f"File not found: {ses_path}",
             }
+
+        # Import safety guard (#241): refuse a degenerate session that
+        # would wipe existing routing (the import is replace-like).
+        ses_wires = _count_ses_wires(ses_path)
+        tracks_before = sum(
+            1 for t in self.board.GetTracks() if t.GetClass() != "PCB_VIA"
+        )
+        guard = _ses_import_guard(
+            ses_wires, tracks_before, bool(params.get("forceImport", False))
+        )
+        if guard is not None:
+            logger.warning(guard["message"])
+            guard.update({
+                "sesWireCount": ses_wires,
+                "boardTracksBefore": tracks_before,
+                "sesPath": ses_path,
+            })
+            return guard
 
         try:
             result = pcbnew.ImportSpecctraSES(self.board, ses_path)
