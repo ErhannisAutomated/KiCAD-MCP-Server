@@ -15,6 +15,8 @@ from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock, patch
 
+sys.path.insert(0, str(Path(__file__).parent.parent / "python"))
+
 import pytest
 from commands.freerouting import (
     FreeroutingCommands,

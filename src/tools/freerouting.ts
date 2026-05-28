@@ -11,9 +11,15 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
   // Full autoroute: export DSN -> run Freerouting -> import SES
   server.tool(
     "autoroute",
-    "Run Freerouting autorouter on the current PCB. Exports to Specctra DSN, runs Freerouting CLI, and imports the routed SES result. Requires Java 11+ and freerouting.jar (see check_freerouting). On 4-layer boards, layers are reordered in the DSN so freerouting prefers outer layers and uses GND last — see layerOrder. Auto-dedupes after import (pcbnew.ImportSpecctraSES appends rather than replaces, so re-running autoroute would otherwise leave exact-duplicate tracks on every routed net — #227).",
+    "Run Freerouting autorouter on the current PCB. Exports to Specctra DSN, runs Freerouting CLI, and imports the routed SES result. Requires Java 11+ and freerouting.jar (see check_freerouting). On 4-layer boards, layers are reordered in the DSN so freerouting prefers outer layers and uses GND last — see layerOrder. Auto-dedupes after import (pcbnew.ImportSpecctraSES appends rather than replaces, so re-running autoroute would otherwise leave exact-duplicate tracks on every routed net — #227). Pass `nets` to route INCREMENTALLY — only those nets are (re)routed and copied onto the board; all other existing copper is left untouched (#242). Without `nets`, the whole board is routed replace-style.",
     {
       boardPath: z.string().optional().describe("Path to .kicad_pcb file (default: current board)"),
+      nets: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Incremental mode (#242): route ONLY these nets and copy their tracks/vias onto the board, leaving all existing copper untouched. Each named net is cleared and cleanly re-routed; other nets are never modified (no replace-like wipe). Use this to route a freshly-placed sub-circuit without disturbing hand-routed work. Result reports routedNets / unroutedNets / perNetCounts / removedExistingCount. Omit for a whole-board route. Unknown net names are reported in unknownNets and skipped.",
+        ),
       freeroutingJar: z
         .string()
         .optional()

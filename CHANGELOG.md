@@ -4,6 +4,35 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Incremental autoroute via `nets` parameter (develop, 2026-05-28, #242)
+
+`autoroute` now accepts an optional `nets` array. When given, only those nets
+are routed and copied onto the board — **all other existing copper is left
+untouched** — so a freshly-placed sub-circuit can be routed without disturbing
+hand-routed work. This is the automated incremental path that #240's
+`preserveExistingTraces` failed to deliver.
+
+Mechanism: freerouting runs on the full DSN as usual (already-routed nets come
+in as existing wiring, so only the open ratsnest needs routing). The
+replace-like `ImportSpecctraSES` is then applied to a **scratch copy** of the
+board, never the live one; only the target nets' tracks/vias are lifted off
+the scratch and reconstructed on the live board (native coordinates, re-bound
+to live nets by name). The named nets are cleared on the live board first for a
+clean replacement. Because the live board is never the import target, the
+board-wipe failure mode can't reach it; the SES guard's "far fewer routes"
+fraction check is skipped in incremental mode (only the 0-wire abort applies).
+
+Result reports `routedNets`, `unroutedNets`, `perNetCounts`,
+`removedExistingCount`, `addedTracks`/`addedVias`, and `unknownNets`.
+
+**Caveat:** freerouting optimizes the scratch board's whole layout, so it may
+nudge an existing net; since only target nets are copied back, that can leave a
+clash on the live board. Run `run_drc` after and resolve new violations; keep
+`maxPasses` modest. New helpers `_remove_net_routing` / `_clone_net_routing`;
+tests in `tests/test_incremental_autoroute.py` and incremental cases in
+`tests/test_ses_import_guard.py`. Also added the missing `sys.path` shim to
+`tests/test_freerouting.py` so it runs standalone.
+
 ### Autoroute board-wipe safeguards (develop, 2026-05-28, #241)
 
 Two fixes after a live `autoroute(preserveExistingTraces=true)` pass **wiped

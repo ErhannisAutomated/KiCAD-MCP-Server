@@ -79,6 +79,33 @@ def test_read_error_does_not_block():
     assert _ses_import_guard(-1, 599, force_import=False) is None
 
 
+def test_incremental_skips_fraction_check():
+    """Incremental mode (#242) copies only the target nets onto the live
+    board — the import isn't replace-like against it, so a session with
+    far fewer routes than the board has must NOT be blocked."""
+    from commands.freerouting import _ses_import_guard
+
+    # Whole-board would block this; incremental must allow it.
+    assert _ses_import_guard(30, 599, force_import=False) is not None
+    assert _ses_import_guard(30, 599, force_import=False, incremental=True) is None
+
+
+def test_incremental_still_blocks_empty_session():
+    """An empty SES means freerouting routed nothing — even in
+    incremental mode there's nothing to copy, so still abort."""
+    from commands.freerouting import _ses_import_guard
+
+    guard = _ses_import_guard(0, 599, force_import=False, incremental=True)
+    assert guard is not None
+    assert "0 routes" in guard["message"]
+
+
+def test_incremental_force_import_bypasses():
+    from commands.freerouting import _ses_import_guard
+
+    assert _ses_import_guard(0, 599, force_import=True, incremental=True) is None
+
+
 def test_count_ses_wires(tmp_path):
     from commands.freerouting import _count_ses_wires
 

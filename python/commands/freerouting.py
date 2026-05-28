@@ -272,7 +272,10 @@ def _count_ses_wires(ses_path: str) -> int:
 
 
 def _ses_import_guard(
-    ses_wires: int, board_tracks_before: int, force_import: bool,
+    ses_wires: int,
+    board_tracks_before: int,
+    force_import: bool,
+    incremental: bool = False,
 ) -> Optional[Dict[str, Any]]:
     """Decide whether importing an SES is safe (#241).
 
@@ -287,6 +290,13 @@ def _ses_import_guard(
     None when it's safe to proceed. ``force_import`` bypasses the guard.
     A read error (ses_wires < 0) does NOT block — that's a separate
     failure surfaced elsewhere.
+
+    ``incremental`` mode (#242) routes a scratch copy and copies only the
+    target nets onto the real board, so the import is *not* replace-like
+    against the real board — the "far fewer routes" fraction check would
+    false-positive (the SES has only the few open nets) and is skipped.
+    The empty-SES check still applies: 0 wires means freerouting routed
+    nothing, so there's nothing to copy.
     """
     if force_import or ses_wires < 0:
         return None
@@ -304,6 +314,8 @@ def _ses_import_guard(
                 "clear the routing."
             ),
         }
+    if incremental:
+        return None
     if (
         board_tracks_before >= _SES_GUARD_FLOOR
         and ses_wires < board_tracks_before * _SES_MIN_RETENTION
@@ -322,6 +334,85 @@ def _ses_import_guard(
             ),
         }
     return None
+
+
+def _remove_net_routing(board: Any, net_names: set) -> int:
+    """Delete every track/via on `board` whose net is in `net_names`.
+
+    Used before an incremental re-route so the named nets get a clean
+    replacement. RemoveNative is the SWIG-safe removal (see routing.py).
+    Returns the number of items removed.
+    """
+    to_remove = [t for t in board.GetTracks() if t.GetNetname() in net_names]
+    for t in to_remove:
+        board.RemoveNative(t)
+    return len(to_remove)
+
+
+def _clone_net_routing(
+    src_board: Any, dest_board: Any, net_names: set, pcbnew: Any,
+) -> Tuple[Dict[str, Dict[str, int]], int, int]:
+    """Copy tracks/vias for `net_names` from `src_board` to `dest_board`.
+
+    The two boards share footprints/nets (dest is the live board, src is a
+    scratch copy that was routed via ImportSpecctraSES), so geometry is in
+    identical board coordinates and we just reconstruct each item on the
+    destination and re-bind it to the destination's net by name. This is
+    the additive alternative to ImportSpecctraSES: existing copper on
+    `dest_board` is never touched (#242).
+
+    Returns (per_net_counts, total_tracks, total_vias).
+    """
+    nets_map = dest_board.GetNetInfo().NetsByName()
+    per_net: Dict[str, Dict[str, int]] = {}
+    total_tracks = 0
+    total_vias = 0
+
+    for t in src_board.GetTracks():
+        name = t.GetNetname()
+        if name not in net_names:
+            continue
+        net_obj = nets_map[name] if nets_map.has_key(name) else None
+        counts = per_net.setdefault(name, {"tracks": 0, "vias": 0})
+        cls = t.GetClass()
+
+        if cls == "PCB_VIA":
+            nv = pcbnew.PCB_VIA(dest_board)
+            nv.SetPosition(t.GetPosition())
+            nv.SetWidth(t.GetWidth(pcbnew.F_Cu))
+            nv.SetDrill(t.GetDrillValue())
+            nv.SetViaType(t.GetViaType())
+            nv.SetLayerPair(t.TopLayer(), t.BottomLayer())
+            if net_obj is not None:
+                nv.SetNet(net_obj)
+            dest_board.Add(nv)
+            counts["vias"] += 1
+            total_vias += 1
+        elif cls == "PCB_ARC":
+            na = pcbnew.PCB_ARC(dest_board)
+            na.SetStart(t.GetStart())
+            na.SetMid(t.GetMid())
+            na.SetEnd(t.GetEnd())
+            na.SetWidth(t.GetWidth())
+            na.SetLayer(t.GetLayer())
+            if net_obj is not None:
+                na.SetNet(net_obj)
+            dest_board.Add(na)
+            counts["tracks"] += 1
+            total_tracks += 1
+        else:
+            nt = pcbnew.PCB_TRACK(dest_board)
+            nt.SetStart(t.GetStart())
+            nt.SetEnd(t.GetEnd())
+            nt.SetWidth(t.GetWidth())
+            nt.SetLayer(t.GetLayer())
+            if net_obj is not None:
+                nt.SetNet(net_obj)
+            dest_board.Add(nt)
+            counts["tracks"] += 1
+            total_tracks += 1
+
+    return per_net, total_tracks, total_vias
 
 
 def _build_freerouting_cmd(
@@ -449,6 +540,29 @@ class FreeroutingCommands:
         jar_path = params.get("freeroutingJar", DEFAULT_FREEROUTING_JAR)
         timeout = params.get("timeout", 300)
         passes = params.get("maxPasses", 20)
+
+        # Incremental mode (#242): route only the named nets and copy them
+        # onto the live board, leaving all existing copper untouched. We
+        # route a scratch copy through the (replace-like) ImportSpecctraSES
+        # and then lift just the target nets off it — so the wipe failure
+        # mode can't reach the real board. Validate the net names up front.
+        requested_nets = params.get("nets") or []
+        incremental = bool(requested_nets)
+        valid_nets: List[str] = []
+        unknown_nets: List[str] = []
+        if incremental:
+            nets_map = self.board.GetNetInfo().NetsByName()
+            for n in requested_nets:
+                (valid_nets if nets_map.has_key(n) else unknown_nets).append(n)
+            if not valid_nets:
+                return {
+                    "success": False,
+                    "message": "No valid nets to route incrementally",
+                    "errorDetails": (
+                        f"None of the requested nets exist on the board: "
+                        f"{unknown_nets}"
+                    ),
+                }
 
         # Validate Freerouting JAR
         if not os.path.isfile(jar_path):
@@ -615,7 +729,10 @@ class FreeroutingCommands:
             1 for t in self.board.GetTracks() if t.GetClass() != "PCB_VIA"
         )
         guard = _ses_import_guard(
-            ses_wires, tracks_before, bool(params.get("forceImport", False))
+            ses_wires,
+            tracks_before,
+            bool(params.get("forceImport", False)),
+            incremental=incremental,
         )
         if guard is not None:
             logger.warning(guard["message"])
@@ -629,7 +746,29 @@ class FreeroutingCommands:
             })
             return guard
 
-        # Step 3: Import SES
+        # Step 3 (incremental, #242): route a scratch copy and lift only
+        # the target nets onto the live board. The live board's existing
+        # copper is never replaced, so the replace-like wipe can't reach
+        # it. Returns early with its own result.
+        if incremental:
+            return self._import_ses_incremental(
+                pcbnew=pcbnew,
+                board_path=board_path,
+                board_dir=board_dir,
+                board_stem=board_stem,
+                ses_path=ses_path,
+                dsn_path=dsn_path,
+                target_nets=valid_nets,
+                unknown_nets=unknown_nets,
+                elapsed=elapsed,
+                mode_label=mode_label,
+                applied_layer_order=applied_layer_order,
+                plane_layers=plane_layers,
+                netclass_drift=netclass_drift,
+                proc_stdout=(proc.stdout or ""),
+            )
+
+        # Step 3: Import SES (whole-board, replace-like)
         logger.info(f"Importing SES from {ses_path}")
         try:
             result = pcbnew.ImportSpecctraSES(self.board, ses_path)
@@ -705,6 +844,114 @@ class FreeroutingCommands:
                 "vias": via_count,
             },
             "freerouting_stdout": (proc.stdout[:1000] if proc.stdout else ""),
+        }
+
+    def _import_ses_incremental(
+        self,
+        pcbnew: Any,
+        board_path: str,
+        board_dir: str,
+        board_stem: str,
+        ses_path: str,
+        dsn_path: str,
+        target_nets: List[str],
+        unknown_nets: List[str],
+        elapsed: float,
+        mode_label: str,
+        applied_layer_order: Optional[List[str]],
+        plane_layers: List[str],
+        netclass_drift: Optional[Dict[str, Any]],
+        proc_stdout: str,
+    ) -> Dict[str, Any]:
+        """Apply the routed SES to the live board for `target_nets` only.
+
+        Strategy (#242): freerouting already ran on a DSN exported from the
+        live board, so the SES matches it. We save the live board to a
+        scratch file, load that as an independent board, run the
+        replace-like ImportSpecctraSES on the *scratch*, then copy just the
+        target nets' tracks/vias back onto the live board (whose existing
+        copper we leave alone). The named nets are cleared on the live
+        board first so they get a clean replacement.
+        """
+        target_set = set(target_nets)
+        scratch_path = os.path.join(
+            board_dir, f"{board_stem}.scratch.kicad_pcb"
+        )
+        try:
+            # Snapshot the live board so the scratch matches the DSN/SES.
+            self.board.Save(scratch_path)
+            scratch = pcbnew.LoadBoard(scratch_path)
+            result = pcbnew.ImportSpecctraSES(scratch, ses_path)
+            if result is not True and result != 0:
+                return {
+                    "success": False,
+                    "message": "SES import into scratch board failed",
+                    "errorDetails": (f"ImportSpecctraSES returned: {result}"),
+                    "elapsed_seconds": elapsed,
+                }
+
+            removed = _remove_net_routing(self.board, target_set)
+            per_net, ntracks, nvias = _clone_net_routing(
+                scratch, self.board, target_set, pcbnew
+            )
+            try:
+                self.board.BuildConnectivity()
+            except Exception as e:
+                logger.warning(f"BuildConnectivity after incremental copy: {e}")
+        except Exception as e:
+            return {
+                "success": False,
+                "message": "Incremental SES import failed",
+                "errorDetails": str(e),
+                "elapsed_seconds": elapsed,
+            }
+        finally:
+            try:
+                os.remove(scratch_path)
+            except OSError:
+                pass
+
+        # Nets we asked for but freerouting produced no copper for — still
+        # open. Surface them so the caller knows what's left.
+        unrouted = sorted(n for n in target_set if n not in per_net)
+
+        try:
+            self.board.Save(board_path)
+        except Exception as e:
+            logger.warning(f"Board save after incremental autoroute failed: {e}")
+
+        tracks = self.board.GetTracks()
+        track_count = sum(1 for t in tracks if t.GetClass() != "PCB_VIA")
+        via_count = sum(1 for t in tracks if t.GetClass() == "PCB_VIA")
+
+        return {
+            "success": True,
+            "message": (
+                f"Incremental autoroute completed in {elapsed}s: "
+                f"{ntracks} tracks + {nvias} vias added across "
+                f"{len(per_net)} net(s); existing copper untouched"
+            ),
+            "mode": mode_label,
+            "incremental": True,
+            "requestedNets": target_nets,
+            "unknownNets": unknown_nets,
+            "routedNets": sorted(per_net.keys()),
+            "unroutedNets": unrouted,
+            "perNetCounts": per_net,
+            "removedExistingCount": removed,
+            "addedTracks": ntracks,
+            "addedVias": nvias,
+            "dsn_path": dsn_path,
+            "ses_path": ses_path,
+            "elapsed_seconds": elapsed,
+            "layerOrder": applied_layer_order,
+            "planeLayersFlippedToPower": plane_layers,
+            "netclassPatternDrift": netclass_drift,
+            "board_stats": {
+                "tracks": track_count,
+                "vias": via_count,
+            },
+            "freerouting_stdout": (proc_stdout[:1000] if proc_stdout else ""),
         }
 
     def export_dsn(self, params: Dict[str, Any]) -> Dict[str, Any]:
