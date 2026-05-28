@@ -917,10 +917,14 @@ class FreeroutingCommands:
                 "elapsed_seconds": elapsed,
             }
         finally:
-            try:
-                os.remove(scratch_path)
-            except OSError:
-                pass
+            # Save()/LoadBoard() drop .kicad_pro/.kicad_prl sidecars next to
+            # the scratch .kicad_pcb — clean up all of them.
+            scratch_stem = os.path.join(board_dir, f"{board_stem}.scratch")
+            for ext in (".kicad_pcb", ".kicad_pro", ".kicad_prl"):
+                try:
+                    os.remove(scratch_stem + ext)
+                except OSError:
+                    pass
 
         # Nets we asked for but freerouting produced no copper for — still
         # open. Surface them so the caller knows what's left.
