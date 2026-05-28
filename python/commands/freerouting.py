@@ -648,13 +648,15 @@ class FreeroutingCommands:
                 "elapsed_seconds": elapsed,
             }
 
-        # Step 3b: Auto-dedupe (#227). pcbnew.ImportSpecctraSES APPENDS
-        # tracks rather than replacing — so calling autoroute a second
-        # time (or autoroute after an earlier import_ses) leaves exact
-        # duplicate tracks on every routed net. Two tracks only match
-        # when (layer, width, net) AND endpoints coincide, so dropping
-        # one of each duplicate pair preserves connectivity; user
-        # pre-routes survive untouched. Pass autoDedupe=false to skip.
+        # Step 3b: Auto-dedupe (#227). pcbnew.ImportSpecctraSES does not
+        # cleanly merge: re-running autoroute (or autoroute after an
+        # earlier import_ses) leaves exact-duplicate tracks on routed
+        # nets, so we dedupe. (It's also replace-like — an empty session
+        # wipes the board, #241 — which the import guard above now
+        # blocks.) Two tracks only match when (layer, width, net) AND
+        # endpoints coincide, so dropping one of each duplicate pair
+        # preserves connectivity; user pre-routes survive untouched.
+        # Pass autoDedupe=false to skip.
         dedupe_removed = 0
         if params.get("autoDedupe", True):
             try:
@@ -836,11 +838,13 @@ class FreeroutingCommands:
                 "errorDetails": str(e),
             }
 
-        # Auto-dedupe (#227). ImportSpecctraSES APPENDS tracks; running
-        # import twice doubles them all. Two tracks only match on
-        # (layer, width, net) + endpoints, so dropping duplicates is
-        # connectivity-preserving and leaves any user pre-routes
-        # untouched. Pass autoDedupe=false to skip.
+        # Auto-dedupe (#227). ImportSpecctraSES doesn't cleanly merge —
+        # importing twice doubles tracks (so we dedupe), and it's
+        # replace-like so an empty session wipes the board (#241, blocked
+        # by the guard above). Two tracks only match on (layer, width,
+        # net) + endpoints, so dropping duplicates is connectivity-
+        # preserving and leaves any user pre-routes untouched. Pass
+        # autoDedupe=false to skip.
         dedupe_removed = 0
         if params.get("autoDedupe", True):
             try:
