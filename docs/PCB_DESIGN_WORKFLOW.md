@@ -129,10 +129,11 @@ medium-strength `LOCAL_SIGNAL` spring. For most circuits that's fine,
 but two cases benefit from explicit intent:
 
 1. **Bypass / decoupling capacitors** that must sit *right next to* their
-   IC pin (typically <2 mm). Mark these `DECOUPLING` and the engine will
-   pull the cap hard onto the pin. **Easy to miss — caps marked as
-   "bypass" in the schematic comment text get no special treatment from
-   the auto-placer unless you tag them explicitly.**
+   IC pin (typically <2 mm). Tag the cap's power pad with the target
+   pin — `{"U3.4": "DECOUPLING"}` — and the engine pulls the cap hard
+   onto *that* pin only. **Easy to miss — caps marked as "bypass" in
+   the schematic comment text get no special treatment from the
+   auto-placer unless you tag them explicitly.**
 2. **Long-distance / cross-group connections** (e.g. a status LED on the
    far side of the board, a connector pinout dictated by the case). Mark
    these `INTER_GROUP` so the engine pulls weakly and lets the local
@@ -140,14 +141,22 @@ but two cases benefit from explicit intent:
 
 Tag the pad with `Pin_Spring_Class:<padNum>` on the **schematic
 symbol** (the auto-placer reads from the schematic at load time —
-no PCB-side sync needed; #228):
+no PCB-side sync needed; #228). A spring class describes how hard a
+pad is pulled toward *a specific neighbour pin*, so name that pin in
+the value (`REF.PIN`, with a dot):
 
 ```
-Set Pin_Spring_Class:1 on C29 to DECOUPLING.
-Set Pin_Spring_Class:1 on C30 to DECOUPLING.
-Set Pin_Spring_Class:1 on C3 to DECOUPLING.
-Set Pin_Spring_Class:1 on C4 to DECOUPLING.
+Set Pin_Spring_Class:1 on C29 to {"U3.4": "DECOUPLING"}.
+Set Pin_Spring_Class:1 on C30 to {"U3.13": "DECOUPLING"}.
+Set Pin_Spring_Class:1 on C3 to {"Q2.3": "DECOUPLING"}.
 ```
+
+This keeps the strong pull on the IC pin the cap bypasses and leaves
+the cap's other connections (the shared rail, sibling caps) on their
+defaults. A *bare* `DECOUPLING` applies to every connection from the
+pad at once — correct only when the pad has a single neighbour, and it
+overrides the power-plane exclusion otherwise. Prefer the per-target
+form.
 
 (The `set_schematic_component_property` MCP tool writes a single
 property on a placed symbol; `edit_schematic_component` does
@@ -155,10 +164,9 @@ multiple at once.)
 
 The accepted class names are `DECOUPLING` (strong, spring_k≈5.0),
 `LOCAL_SIGNAL` (default, spring_k≈1.0), `INTER_GROUP` (weak,
-spring_k≈0.3), `PLANE` (zero — used automatically for power nets like
-GND/BAT+/V12_OUT). Per-target overrides are also supported via JSON,
-e.g. `{"*": "LOCAL_SIGNAL", "U1.4": "DECOUPLING"}` — see
-`PLACEMENT_CONSTRAINTS_REFERENCE.md` for the full grammar.
+spring_k≈0.3), `PLANE` (zero — the net-level default for power nets
+like GND/BAT+/V12_OUT). See `PLACEMENT_CONSTRAINTS_REFERENCE.md` for
+the full value grammar and resolution order.
 
 Without this annotation, the auto-placer will still find a *valid*
 layout, but bypass caps may sit 5+ mm from their target pin and you'll

@@ -4,6 +4,29 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Docs: spring-class per-target idiom + PLANE resolution correction (develop, 2026-05-28)
+
+Documentation-only clarification of `Pin_Spring_Class` annotation, prompted
+by finding decoupling caps tagged with the bare `DECOUPLING` form.
+
+- The per-target form `{"U3.4": "DECOUPLING"}` is now documented as the
+  recommended idiom for decoupling caps: it puts the strong pull on the one
+  IC pin the cap bypasses, leaving the pad's other connections (shared rail,
+  sibling caps) on their defaults. A *bare* `DECOUPLING` applies to every
+  connection from the pad at once — correct only when the pad has a single
+  neighbour.
+- Corrected a false claim in `PLACEMENT_CONSTRAINTS_REFERENCE.md`: power nets
+  are **not** forced to `PLANE` "regardless of any annotation." `PLANE` is a
+  *net-level* default (specificity 2); a pad-level annotation (specificity
+  3–4) still wins. A bare `DECOUPLING` on a cap sitting on a power rail
+  therefore overrides the plane exclusion — another reason to prefer the
+  per-target form. The resolver code (`resolve_pair_class`) was already
+  correct; only the docs were wrong.
+- Flagged that target keys are `REF.PIN` with a **dot** (`U3.4`), not a colon
+  (`U3:4`) — a colon key silently never matches.
+
+Touched `PLACEMENT_CONSTRAINTS_REFERENCE.md` and `PCB_DESIGN_WORKFLOW.md`.
+
 ### save_project no longer corrupts .kicad_sch (develop, 2026-05-27, #220)
 
 Long-running bug: every `save_project` call silently truncated the

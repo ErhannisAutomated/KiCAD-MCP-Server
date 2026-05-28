@@ -34,22 +34,48 @@ hold per-pin overrides.
 
 ## Value grammar
 
-**Bare class name** — applies to every connection from this pad:
+A spring class answers "how hard should this pad be pulled toward the
+thing it connects to?" — and *the thing it connects to* is usually one
+specific pin, not "everything on the net." So the per-target form is
+the normal way to express decoupling; the bare form is the special
+case.
+
+**Per-target JSON (recommended for decoupling)** — strength keyed by
+the neighbour pin:
 
 ```
-Pin_Spring_Class:1 = DECOUPLING
+Pin_Spring_Class:1 = {"U3.4": "DECOUPLING"}
 ```
 
-**Per-target JSON** — different springs to different neighbours:
+This pulls the pad hard toward **U3 pin 4 only**. Every other
+connection from the pad (to the bulk cap, the regulator, sibling
+bypass caps on the same rail…) falls through to its own default —
+exactly what you want, because a decoupling cap should sit on *its*
+IC pin, not get tugged toward everything else sharing the rail.
+
+Keys are `REF.PIN` with a **dot** (`U3.4`, not `U3:4`). A mistyped
+colon key silently never matches and the override is lost.
+
+Add a `"*"` key only when you want a non-default fallback for the
+pad's *other* connections — e.g. a pin that serves multiple roles:
 
 ```
 Pin_Spring_Class:4 = {"*": "LOCAL_SIGNAL", "U1.4": "DECOUPLING", "J1.3": "INTER_GROUP"}
 ```
 
-The `"*"` key is the pad-general fallback. `"REF.PIN"` keys override
-for a specific neighbouring pin. Useful when one pin serves multiple
-roles (e.g. a buck-boost's VCC pin connects both to a tightly-coupled
-bypass cap and to a remote enable line).
+**Bare class name** — applies to *every* connection from the pad:
+
+```
+Pin_Spring_Class:1 = DECOUPLING
+```
+
+Use this only when the pad genuinely has a single role — e.g. a
+two-pin cap whose power pad connects to exactly one IC pin and nothing
+else. On a shared rail, a bare `DECOUPLING` pulls the cap toward every
+neighbour on the net at once (a tug-of-war), and — because pad-level
+annotations outrank the net-level `PLANE` default (see Resolution
+order) — it even overrides the power-plane exclusion. Prefer the
+per-target form unless you're sure the pad has one neighbour.
 
 Malformed JSON or non-string values are logged and ignored — the
 engine continues with defaults rather than failing the run.
@@ -66,24 +92,34 @@ consults sources in this order:
 5. Component-level `Spring_Class` property (rare; pad-A's component, then pad-B's)
 6. Engine default: `LOCAL_SIGNAL`
 
-A separate rule overrides this whole chain: connections on **power
-nets** (anything matching `GND`, `BAT+`, `V12_*`, `PWR_*`, etc.) are
-forced to `PLANE` regardless of any annotation. You almost never want
-the auto-placer pulling components together along the GND net.
+Connections on **power nets** (anything matching `GND`, `BAT+`,
+`V12_*`, `PWR_*`, etc.) are auto-assigned `PLANE` — but as a
+*net-level* default (step 3 above), **not** an override of the whole
+chain. A pad-level annotation (steps 1–2) still wins. That matters in
+practice: a bare `DECOUPLING` on a cap pad that sits on a power rail
+will beat the rail's `PLANE` and pull the cap along the net — usually
+not what you want. The per-target form sidesteps this: only the named
+IC pin gets the strong pull, and the rest of the rail stays on
+`PLANE`. You almost never want the auto-placer pulling components
+together along the GND net.
 
 ## Suggested workflow
 
 1. **First pass — annotate the obvious**: every bypass / decoupling
    cap. The schematic's comment text usually flags them ("100nF bypass
-   for U3", "1 µF VCC decoupling near Q2", etc.). Set the property
-   on the schematic component (not the PCB footprint):
+   for U3 pin 4", "1 µF VCC decoupling near Q2", etc.) — and that
+   comment names the pin the cap is *for*. Encode that pin in the value
+   so the strong pull lands only on it. Set the property on the
+   schematic component (not the PCB footprint):
 
    ```
-   Set Pin_Spring_Class:1 on C29 to DECOUPLING.
-   Set Pin_Spring_Class:1 on C30 to DECOUPLING.
-   Set Pin_Spring_Class:1 on C3 to DECOUPLING.
-   Set Pin_Spring_Class:1 on C4 to DECOUPLING.
+   Set Pin_Spring_Class:1 on C29 to {"U3.4": "DECOUPLING"}.
+   Set Pin_Spring_Class:1 on C30 to {"U3.13": "DECOUPLING"}.
+   Set Pin_Spring_Class:1 on C3 to {"Q2.3": "DECOUPLING"}.
    ```
+
+   (Reach for the bare `Pin_Spring_Class:1 = DECOUPLING` form only when
+   the cap pad connects to exactly one pin and nothing else.)
 
 2. **Second pass — flag known stragglers**: cross-board signals that
    the auto-placer might otherwise pull awkwardly:
