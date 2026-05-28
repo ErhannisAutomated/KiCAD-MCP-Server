@@ -28,31 +28,15 @@ Fixes:
   New `forceImport=true` overrides it (e.g. routing a freshly-stripped board).
   Response carries `sesWireCount` / `boardTracksBefore`.
 
-Note: this also revises the #240 understanding — the SES import is replace-
-not append-like, so `preserveExistingTraces` only produces a usable board if
-freerouting echoes the fixed wires into its output; if it doesn't, the guard
-now safely aborts instead of wiping. Tests in `tests/test_ses_import_guard.py`
+Also **removed the experimental `preserveExistingTraces` flag** (briefly added
+under #240). It marked existing wiring `(type fix)` to try incremental
+routing, but a guarded live test settled it: with everything fixed,
+freerouting returns an *empty* SES — it neither routes the open ratsnest nor
+echoes the fixed wires — so combined with the replace-like import it can only
+wipe, never augment. Incremental routing should use the surgical per-net tools
+(`route_pad_to_pad` / `route_trace` / `find_via_lane`); `autoroute` is for the
+strip-then-route-from-clean cadence. Tests in `tests/test_ses_import_guard.py`
 and `tests/test_dsn_plane_layer_types.py`.
-
-### Incremental autoroute: preserveExistingTraces (develop, 2026-05-28, #240)
-
-`autoroute` and `export_dsn` gained a `preserveExistingTraces` flag (default
-false). When true, every already-routed wire/via in the exported DSN is
-rewritten from `(type route)` to `(type fix)` before freerouting runs, so the
-autorouter treats existing copper as immovable and only fills the open
-ratsnest.
-
-Why: the default flow round-trips the whole board through freerouting, whose
-optimiser can rework hand-routed nets — and because `ImportSpecctraSES`
-*appends* rather than replaces, a reworked net lands as old + new copper, not
-a clean swap. Until now the only safe cadence was "strip all traces, then
-autoroute from clean" (#161). This flag enables non-destructive incremental
-passes: route a newly-placed sub-circuit while leaving prior work bit-identical
-(the echoed-back fixed wires collapse via the existing `autoDedupe`).
-
-Implemented as a string rewrite (`_rewrite_dsn_fix_wiring`) — `(type route)`
-only ever appears on wires/vias, so the token replace is unambiguous. Count
-returned as `existingTracesFixed`. Unit tests in `tests/test_dsn_fix_wiring.py`.
 
 ### Docs: spring-class per-target idiom + PLANE resolution correction (develop, 2026-05-28)
 

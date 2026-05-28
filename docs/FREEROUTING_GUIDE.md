@@ -103,7 +103,6 @@ Run the full autorouting workflow (export DSN, route, import SES).
 | `maxPasses` | number | No | 20 | Maximum routing passes |
 | `timeout` | number | No | 300 | Timeout in seconds |
 | `autoDedupe` | boolean | No | true | After importing the SES result, run `dedupe_traces(apply=true, includeVias=true)` to drop duplicates. `pcbnew.ImportSpecctraSES` **appends** tracks rather than replacing them, so re-routing the same nets used to silently leave doubled traces — sometimes hundreds of them on iterative re-routes. Set false only when chaining `import_ses` calls and dedupe is intentionally deferred. Response carries `autoDedupeRemovedCount` so callers can spot leakage (#227). |
-| `preserveExistingTraces` | boolean | No | false | **Incremental route.** When true, every already-routed wire/via in the exported DSN is marked `(type fix)` so freerouting leaves it bit-identical and only fills the open ratsnest — to route a newly-placed sub-circuit without reworking hand-routed nets. Count reported as `existingTracesFixed`. **Caveat:** the SES import is replace-like (see the import guard below), so this only yields a usable board if freerouting echoes the fixed wires back into its session output. If it doesn't, the guard aborts rather than wiping the board (#240/#241). |
 | `forceImport` | boolean | No | false | Bypass the SES import safety guard. The guard aborts the import when the routed session has 0 wires, or fewer than half the board's current track count, because the import is replace-like and would wipe/decimate existing routing. Only set true when you genuinely intend to replace the routing (e.g. routing a freshly-stripped board where a low count is expected). (#241) |
 
 **Example:**
@@ -112,20 +111,20 @@ Run the full autorouting workflow (export DSN, route, import SES).
 Autoroute the current board using Freerouting with a 5-minute timeout.
 ```
 
-#### Incremental routing (preserve hand-routed work)
+#### Incremental routing is NOT supported via autoroute
 
-The default autoroute round-trips the *whole* board through freerouting,
-which can rework nets you've already routed by hand. To route only the
-newly-placed/unrouted parts and leave everything else exactly as-is:
+`autoroute` round-trips the *whole* board through freerouting, and the SES
+import is replace-like — so there is no way to route only a newly-placed
+sub-circuit while preserving hand-routed nets. (A `preserveExistingTraces`
+flag was tried in #240 and removed in #241: marking existing wiring
+`(type fix)` makes freerouting return an *empty* SES — it neither routes
+the open ratsnest nor echoes the fixed wires — so the round-trip can only
+wipe, never augment.)
 
-```
-Autoroute with preserveExistingTraces=true.
-```
-
-This fixes all existing copper in the DSN, so freerouting only completes
-the open ratsnest. Check `existingTracesFixed` in the response to confirm
-how many wires/vias were protected. (The older "strip everything, then
-autoroute from clean" flow is still valid when you *want* a full reroute.)
+For incremental routing, use the **surgical per-net tools**
+(`route_pad_to_pad`, `route_trace`, `find_via_lane`): they add only the
+trace you ask for and never touch other copper. Reserve `autoroute` for the
+**strip-everything-then-route-from-clean** workflow.
 
 **Import safety guard (#241).** `pcbnew.ImportSpecctraSES` is replace-like —
 the board ends up with whatever the session contains. So autoroute and
@@ -146,7 +145,6 @@ Export the PCB to Specctra DSN format for manual routing workflows.
 |-----------|------|----------|-------------|
 | `boardPath` | string | No | Path to .kicad_pcb file (default: current board) |
 | `outputPath` | string | No | Output DSN file path (default: same directory as board) |
-| `preserveExistingTraces` | boolean | No | When true, mark existing wires/vias as `(type fix)` so an external autorouter only fills the open ratsnest and leaves existing copper untouched (default false). Count reported as `existingTracesFixed` (#240). |
 
 ### `import_ses`
 
