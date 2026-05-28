@@ -242,6 +242,54 @@ def _maybe_apply_plane_layer_types(dsn_path: str) -> List[str]:
         return []
 
 
+def _rewrite_dsn_fix_wiring(dsn_text: str) -> Tuple[str, int]:
+    """Mark every already-routed wire/via in the DSN as ``(type fix)``
+    instead of ``(type route)`` so freerouting treats them as immovable
+    and only fills in the open ratsnest.
+
+    pcbnew's ``ExportSpecctraDSN`` emits every existing track and via in
+    the ``(wiring …)`` section as ``(type route)`` — fair game for the
+    autorouter to rip up and reroute. For an *incremental* pass (route a
+    newly-placed sub-circuit, leave the rest of the board alone) that's
+    the opposite of what we want: freerouting's optimiser can rework
+    hand-routed nets, and because ``ImportSpecctraSES`` *appends* rather
+    than replaces, a reworked net lands on the board as old + new copper
+    instead of a clean swap.
+
+    Flipping the existing wiring to ``fix`` makes freerouting preserve it
+    bit-identically; the routed result then only adds the open nets, and
+    the post-import dedupe collapses the echoed-back fixed wires.
+
+    ``(type route)`` only ever appears on wires/vias (copper layers are
+    ``signal``/``power``, clearances are ``smd_smd``/…), so the token
+    replace is unambiguous. Returns (rewritten_text, count_flipped).
+    """
+    count = dsn_text.count("(type route)")
+    if not count:
+        return dsn_text, 0
+    return dsn_text.replace("(type route)", "(type fix)"), count
+
+
+def _maybe_fix_existing_wiring(dsn_path: str, enabled: bool) -> int:
+    """When ``enabled``, rewrite existing wiring to ``(type fix)`` in the
+    DSN so freerouting preserves it and only routes the open ratsnest.
+    Returns the number of wires/vias flipped (0 when disabled or none
+    present)."""
+    if not enabled:
+        return 0
+    try:
+        with open(dsn_path, "r") as f:
+            txt = f.read()
+        new_txt, count = _rewrite_dsn_fix_wiring(txt)
+        if count and new_txt != txt:
+            with open(dsn_path, "w") as f:
+                f.write(new_txt)
+        return count
+    except Exception as e:
+        logger.warning(f"Skipping DSN fix-existing-wiring rewrite: {e}")
+        return 0
+
+
 def _build_freerouting_cmd(
     jar_path: str,
     dsn_path: str,
@@ -476,6 +524,18 @@ class FreeroutingCommands:
                 f"DSN plane layers marked (type power): {plane_layers}"
             )
 
+        # Step 1d: For an incremental pass, mark all already-routed
+        # wiring as (type fix) so freerouting preserves it bit-identically
+        # and only fills the open ratsnest — keeps hand-routed copper out
+        # of the optimiser's reach (#240).
+        preserve_existing = bool(params.get("preserveExistingTraces", False))
+        existing_fixed = _maybe_fix_existing_wiring(dsn_path, preserve_existing)
+        if existing_fixed:
+            logger.info(
+                f"Marked {existing_fixed} existing wire(s)/via(s) as "
+                f"(type fix) — incremental route preserves existing copper"
+            )
+
         # Step 2: Run Freerouting
         cmd = _build_freerouting_cmd(jar_path, dsn_path, ses_path, passes, use_docker)
 
@@ -593,6 +653,7 @@ class FreeroutingCommands:
             "elapsed_seconds": elapsed,
             "layerOrder": applied_layer_order,
             "planeLayersFlippedToPower": plane_layers,
+            "existingTracesFixed": existing_fixed,
             "netclassPatternDrift": netclass_drift,
             "autoDedupeRemovedCount": dedupe_removed,
             "board_stats": {
@@ -657,6 +718,10 @@ class FreeroutingCommands:
         # signals across them — see _rewrite_dsn_plane_layer_types.
         plane_layers = _maybe_apply_plane_layer_types(output_path)
 
+        # Mark existing wiring (type fix) for an incremental route (#240).
+        preserve_existing = bool(params.get("preserveExistingTraces", False))
+        existing_fixed = _maybe_fix_existing_wiring(output_path, preserve_existing)
+
         file_size = os.path.getsize(output_path) if os.path.isfile(output_path) else 0
         return {
             "success": True,
@@ -665,6 +730,7 @@ class FreeroutingCommands:
             "size_bytes": file_size,
             "layerOrder": applied_layer_order,
             "planeLayersFlippedToPower": plane_layers,
+            "existingTracesFixed": existing_fixed,
         }
 
     def import_ses(self, params: Dict[str, Any]) -> Dict[str, Any]:

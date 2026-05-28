@@ -34,6 +34,12 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
         .describe(
           "After importing SES, remove exact-duplicate tracks/vias left over by ImportSpecctraSES's append-not-replace behaviour (default: true). Pass false to keep the raw post-import state for debugging. Reported as `autoDedupeRemovedCount` in the result.",
         ),
+      preserveExistingTraces: z
+        .boolean()
+        .optional()
+        .describe(
+          "Incremental route (default: false). When true, every already-routed wire/via in the DSN is marked (type fix) so freerouting leaves it bit-identical and only fills the open ratsnest — use this to route a newly-placed sub-circuit without disturbing hand-routed nets. Without it, freerouting's optimiser can rework existing nets and the append-style SES import would leave old + new copper rather than a clean swap. Count reported as `existingTracesFixed`; keep autoDedupe on so the echoed-back fixed wires collapse cleanly.",
+        ),
     },
     async (args: any) => {
       const result = await callKicadScript("autoroute", args);
@@ -63,6 +69,12 @@ export function registerFreeroutingTools(server: McpServer, callKicadScript: Fun
         .optional()
         .describe(
           'Layer-priority order to write into the DSN. Must be a permutation of the board\'s copper layers. Default on 4-layer boards: ["F.Cu","B.Cu","In2.Cu","In1.Cu"] (outer first, GND-on-In1.Cu last).',
+        ),
+      preserveExistingTraces: z
+        .boolean()
+        .optional()
+        .describe(
+          "When true, mark every already-routed wire/via in the exported DSN as (type fix) so an external autorouter only fills the open ratsnest and leaves existing copper untouched (default: false). Count reported as `existingTracesFixed`.",
         ),
     },
     async (args: any) => {

@@ -4,6 +4,26 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Incremental autoroute: preserveExistingTraces (develop, 2026-05-28, #240)
+
+`autoroute` and `export_dsn` gained a `preserveExistingTraces` flag (default
+false). When true, every already-routed wire/via in the exported DSN is
+rewritten from `(type route)` to `(type fix)` before freerouting runs, so the
+autorouter treats existing copper as immovable and only fills the open
+ratsnest.
+
+Why: the default flow round-trips the whole board through freerouting, whose
+optimiser can rework hand-routed nets — and because `ImportSpecctraSES`
+*appends* rather than replaces, a reworked net lands as old + new copper, not
+a clean swap. Until now the only safe cadence was "strip all traces, then
+autoroute from clean" (#161). This flag enables non-destructive incremental
+passes: route a newly-placed sub-circuit while leaving prior work bit-identical
+(the echoed-back fixed wires collapse via the existing `autoDedupe`).
+
+Implemented as a string rewrite (`_rewrite_dsn_fix_wiring`) — `(type route)`
+only ever appears on wires/vias, so the token replace is unambiguous. Count
+returned as `existingTracesFixed`. Unit tests in `tests/test_dsn_fix_wiring.py`.
+
 ### Docs: spring-class per-target idiom + PLANE resolution correction (develop, 2026-05-28)
 
 Documentation-only clarification of `Pin_Spring_Class` annotation, prompted

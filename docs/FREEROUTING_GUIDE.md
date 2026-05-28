@@ -103,12 +103,28 @@ Run the full autorouting workflow (export DSN, route, import SES).
 | `maxPasses` | number | No | 20 | Maximum routing passes |
 | `timeout` | number | No | 300 | Timeout in seconds |
 | `autoDedupe` | boolean | No | true | After importing the SES result, run `dedupe_traces(apply=true, includeVias=true)` to drop duplicates. `pcbnew.ImportSpecctraSES` **appends** tracks rather than replacing them, so re-routing the same nets used to silently leave doubled traces — sometimes hundreds of them on iterative re-routes. Set false only when chaining `import_ses` calls and dedupe is intentionally deferred. Response carries `autoDedupeRemovedCount` so callers can spot leakage (#227). |
+| `preserveExistingTraces` | boolean | No | false | **Incremental route.** When true, every already-routed wire/via in the exported DSN is marked `(type fix)` so freerouting leaves it bit-identical and only fills the open ratsnest. Use it to route a newly-placed sub-circuit *without disturbing hand-routed nets*. Without it, freerouting's optimiser can rework existing nets and — because the SES import appends — you'd get old + new copper on the reworked net rather than a clean swap. Keep `autoDedupe` on so the echoed-back fixed wires collapse cleanly. Count reported as `existingTracesFixed` (#240). |
 
 **Example:**
 
 ```
 Autoroute the current board using Freerouting with a 5-minute timeout.
 ```
+
+#### Incremental routing (preserve hand-routed work)
+
+The default autoroute round-trips the *whole* board through freerouting,
+which can rework nets you've already routed by hand. To route only the
+newly-placed/unrouted parts and leave everything else exactly as-is:
+
+```
+Autoroute with preserveExistingTraces=true.
+```
+
+This fixes all existing copper in the DSN, so freerouting only completes
+the open ratsnest. Check `existingTracesFixed` in the response to confirm
+how many wires/vias were protected. (The older "strip everything, then
+autoroute from clean" flow is still valid when you *want* a full reroute.)
 
 ### `export_dsn`
 
@@ -119,6 +135,7 @@ Export the PCB to Specctra DSN format for manual routing workflows.
 |-----------|------|----------|-------------|
 | `boardPath` | string | No | Path to .kicad_pcb file (default: current board) |
 | `outputPath` | string | No | Output DSN file path (default: same directory as board) |
+| `preserveExistingTraces` | boolean | No | When true, mark existing wires/vias as `(type fix)` so an external autorouter only fills the open ratsnest and leaves existing copper untouched (default false). Count reported as `existingTracesFixed` (#240). |
 
 ### `import_ses`
 
