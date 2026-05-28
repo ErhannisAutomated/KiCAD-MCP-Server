@@ -263,10 +263,21 @@ _SES_GUARD_FLOOR = 20
 def _count_ses_wires(ses_path: str) -> int:
     """Count routed wires in a Specctra SES file. 0 means freerouting
     produced no routing — a failure indicator. Returns -1 if the file
-    can't be read (caller should not block on a read error)."""
+    can't be read (caller should not block on a read error).
+
+    The wire token may be followed by a space (``(wire (path …)``) or a
+    newline (freerouting v2 pretty-prints ``(wire\\n  (path …)``), so we
+    match ``(wire`` followed by any non-word char rather than a literal
+    space — counting ``"(wire "`` missed the newline form entirely and
+    made the #241 guard falsely abort every real (non-empty) session.
+    ``\\b`` won't match ``(wiring`` (DSN-only token) since 'e'→'i' is not
+    a word boundary.
+    """
+    import re
+
     try:
         with open(ses_path, "r") as f:
-            return f.read().count("(wire ")
+            return len(re.findall(r"\(wire\b", f.read()))
     except Exception:
         return -1
 

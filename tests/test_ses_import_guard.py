@@ -109,6 +109,7 @@ def test_incremental_force_import_bypasses():
 def test_count_ses_wires(tmp_path):
     from commands.freerouting import _count_ses_wires
 
+    # Space form: "(wire (path …)" — the inline style.
     ses = tmp_path / "x.ses"
     ses.write_text(
         "(session x\n  (routes\n    (network_out\n"
@@ -123,3 +124,26 @@ def test_count_ses_wires(tmp_path):
     assert _count_ses_wires(str(empty)) == 0
 
     assert _count_ses_wires(str(tmp_path / "nope.ses")) == -1
+
+
+def test_count_ses_wires_newline_form(tmp_path):
+    """Freerouting v2 pretty-prints `(wire\\n  (path …)` — the wire token
+    is followed by a newline, not a space. The counter must catch this;
+    counting the literal `"(wire "` returned 0 and made the guard falsely
+    abort every real session (caught live on power_module 2026-05-28)."""
+    from commands.freerouting import _count_ses_wires
+
+    ses = tmp_path / "nl.ses"
+    ses.write_text(
+        "(session x\n  (routes\n    (network_out\n"
+        "      (net GND\n"
+        "        (wire\n          (path F.Cu 250 0 0 10 0)\n        )\n"
+        "        (wire\n          (path B.Cu 250 0 0 5 5)\n        )\n"
+        "      )\n    )\n  )\n)\n"
+    )
+    assert _count_ses_wires(str(ses)) == 2
+
+    # `(wiring` (a DSN token) must NOT be counted as a wire.
+    dsn_ish = tmp_path / "w.ses"
+    dsn_ish.write_text("(wiring\n  (wire\n    (path F.Cu 250 0 0 1 1)\n  )\n)\n")
+    assert _count_ses_wires(str(dsn_ish)) == 1
