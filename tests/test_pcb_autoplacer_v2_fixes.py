@@ -748,13 +748,16 @@ class TestPCBScheduleDefaults:
         s = PCBSchedule()
         # Repulsion regime appropriate for the 1/r³ formula
         assert s.spring_k == 1.0
-        assert s.repulsion_k_start == pytest.approx(1e-4)
+        assert s.repulsion_k_start == pytest.approx(1e-6)   # #250: gentler early spread
         assert s.repulsion_k_peak == pytest.approx(0.1)
         assert s.rotation_snap_peak == 30.0
         assert s.pinwise_torque_k == 1.0
         assert s.force_step_damping == 0.3
         assert s.enforce_rotation_snap is True
         assert s.boundary_k == 1.0
+        # Harness-validated tuning (#249/#250)
+        assert s.cluster_iters == 50              # springs settle before repulsion
+        assert s.normalize_by_intent_group is True  # intent-group is the default norm
 
 
 @pytest.mark.unit

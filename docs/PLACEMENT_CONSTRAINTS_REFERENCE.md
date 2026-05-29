@@ -103,6 +103,32 @@ IC pin gets the strong pull, and the rest of the rail stays on
 `PLANE`. You almost never want the auto-placer pulling components
 together along the GND net.
 
+## Fan-out normalization
+
+The PCB autoplacer buckets a pad's connections into **intent groups** —
+each named `REF.PIN` target is its own group, the `"*"` fallback / net
+default share one catch-all group — then averages the spring force
+*within* each group, *across* the pad's groups, and *across* the
+component's pins (`normalize_by_intent_group`, default on). Two
+consequences worth knowing when you write annotations:
+
+- A named `DECOUPLING` target competes on **equal footing** with the
+  entire rest of the rail, no matter how many pads share the net: it
+  gets its own group's full share instead of being out-voted by the
+  aggregate of dozens of generic rail pulls. This is what reliably
+  orients a bypass cap at its IC pin even on a large power/IO rail (it
+  fixed a USB_VBUS bypass cap that kept facing away from its pin) — and
+  it's why you generally **don't** need to force a routed rail to
+  `PLANE` just to tame its pull.
+- A **bare** `DECOUPLING` on a shared rail is now *averaged* toward the
+  rail centroid rather than summed into a tug-of-war, so it's less
+  destructive than it used to be — but still less precise than the
+  per-target form, which aims at one specific pin. Prefer per-target
+  when orientation matters.
+
+Because the final step averages across pins, a component's total spring
+force is independent of its pin count, so a high-pin IC doesn't jitter.
+
 ## Suggested workflow
 
 1. **First pass — annotate the obvious**: every bypass / decoupling
