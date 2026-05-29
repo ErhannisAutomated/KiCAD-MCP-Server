@@ -237,6 +237,7 @@ try:
     from commands.library_symbol import SymbolLibraryCommands, SymbolLibraryManager
     from commands.project import ProjectCommands
     from commands.routing import RoutingCommands
+    from commands.scrub_region import ScrubRegionCommands
     from commands.schematic import SchematicManager
     from commands.symbol_creator import SymbolCreator
 
@@ -284,6 +285,7 @@ class KiCADInterface:
         self.component_commands = ComponentCommands(self.board, self.footprint_library)
         self.routing_commands = RoutingCommands(self.board)
         self.freerouting_commands = FreeroutingCommands(self.board)
+        self.scrub_region_commands = ScrubRegionCommands(self.board)
         self.design_rule_commands = DesignRuleCommands(self.board)
         self.export_commands = ExportCommands(self.board)
         self.library_commands = LibraryCommands(self.footprint_library)
@@ -493,6 +495,8 @@ class KiCADInterface:
             "export_dsn": self.freerouting_commands.export_dsn,
             "import_ses": self.freerouting_commands.import_ses,
             "check_freerouting": self.freerouting_commands.check_freerouting,
+            # Region-scoped copper cleanup
+            "scrub_region": self.scrub_region_commands.scrub_region,
         }
 
         logger.info(f"KiCAD interface initialized (backend: {'IPC' if self.use_ipc else 'SWIG'})")
@@ -688,6 +692,7 @@ class KiCADInterface:
         self.design_rule_commands.board = self.board
         self.export_commands.board = self.board
         self.freerouting_commands.board = self.board
+        self.scrub_region_commands.board = self.board
 
     # Schematic command handlers
     def _handle_create_schematic(self, params: Dict[str, Any]) -> Dict[str, Any]:

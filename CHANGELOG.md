@@ -4,6 +4,36 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### New tool: `scrub_region` — region-scoped copper cleanup (develop, 2026-05-30, #251)
+
+Geometric region cleanup for stale copper left after a re-placement or
+incremental re-route. Net-name stripping (`_remove_net_routing`) is
+all-or-nothing, so it can't remove "the charger's slice of USB_VBUS" without
+nuking the whole rail. `scrub_region` adds the missing geometric scope.
+
+- Given `targets` (component refs), computes a **per-layer convex hull** of
+  their footprints and deletes copper that is either (a) on a **target-only
+  net** (every pad belongs to a target) — anywhere, any layer; or (b) on a
+  **shared net** (touches a target and a non-target) — only inside the hull.
+- A recursive **dead-end prune** then sweeps dangling tracks /
+  single-connection vias on the involved nets (catches leaky inner-layer
+  remnants + old stubs). Pour/stitching connections are protected via a
+  same-net zone-bbox proxy.
+- **Dry-run by default**: returns an authoritative kill-list (each item tagged
+  `target-only-net` | `endpoint-in-hull` | `intersects-hull` | `in-hull` |
+  `dead-end-prune`), interlopers (non-targets inside the hull + their affected
+  nets), flagged-but-spared items, a debug viz PNG path, and `nowOpenNets`
+  (feed straight into `autoroute(nets=…)`). Pass `dryRun=false` to delete.
+- Margin is implemented as a point-to-hull *distance threshold* (no polygon
+  offset). Toggles: `layers` (default `["F.Cu","B.Cu"]`, which keeps inner
+  power pours out of scope), `marginMm`, `affectTracks/Vias/Zones`,
+  `intersectHull` (opt-in segment-crosses-hull), `pruneDeadEnds`.
+- Deletions go through `RemoveNative` (SWIG-corruption-safe). Engine
+  `python/commands/scrub_region.py` (pure geometry/classification/prune
+  helpers + board-driven command); tests `tests/test_scrub_region.py`;
+  design doc `docs/SCRUB_REGION_PLAN.md`. Pairs with the incremental-autoroute
+  pipeline in `docs/FREEROUTING_GUIDE.md`.
+
 ### Autoplacer: intent-group normalization + tuned defaults (develop, 2026-05-29, #249/#250)
 
 PCB autoplacer (`relax_placement`) force-law and default changes, validated in

@@ -127,7 +127,7 @@ export const toolCategories: ToolCategory[] = [
   {
     name: "autoroute",
     description: "Freerouting autorouter: automatic PCB routing via Specctra DSN/SES",
-    tools: ["autoroute", "export_dsn", "import_ses", "check_freerouting"],
+    tools: ["autoroute", "export_dsn", "import_ses", "check_freerouting", "scrub_region"],
   },
 ];
 

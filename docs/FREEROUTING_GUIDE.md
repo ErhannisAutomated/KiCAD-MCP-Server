@@ -158,6 +158,25 @@ The **surgical per-net tools** (`route_pad_to_pad`, `route_trace`,
 nets, but incremental `autoroute` is the preferred automated path — prefer
 it over hand-routing.
 
+**Cleaning stale copper before an incremental re-route.** Incremental
+`autoroute(nets=…)` strips its *named* nets cleanly, but it can't touch the
+moved region's slice of a *shared* rail (USB_VBUS / GND / BAT+) — net-name
+stripping is all-or-nothing. After a `relax_placement` moves a sub-circuit,
+run `scrub_region(targets=…)` first to geometrically clean that region
+(target-only nets anywhere + shared nets inside the hull + a dead-end prune),
+then feed its `nowOpenNets` straight into `autoroute(nets=…)`. Full pipeline:
+
+```
+relax_placement
+  → scrub_region(dryRun=true)      # inspect the kill-list + viz PNG
+  → snapshot_project / commit
+  → scrub_region(dryRun=false)     # delete
+  → autoroute(nets=<nowOpenNets>)  # incremental re-route
+  → refill_zones + stitch_pour_vias + run_drc
+```
+
+See [Scrub Region Plan](SCRUB_REGION_PLAN.md).
+
 **Import safety guard (#241).** `pcbnew.ImportSpecctraSES` is replace-like —
 the board ends up with whatever the session contains. So autoroute and
 `import_ses` refuse to import a session with **0 routes**, or with **fewer

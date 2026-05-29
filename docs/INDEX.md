@@ -53,6 +53,7 @@ KiCAD MCP Server -- AI-assisted PCB design via Model Context Protocol
 | [Router Guide](mcp-router-guide.md)           | Tool router pattern usage                 |
 | [Router Architecture](ROUTER_ARCHITECTURE.md) | Router pattern design                     |
 | [Router Quick Start](ROUTER_QUICK_START.md)   | Quick start for the router pattern        |
+| [Scrub Region Plan](SCRUB_REGION_PLAN.md)     | Region-scoped copper cleanup tool (design plan) |
 
 ---
 

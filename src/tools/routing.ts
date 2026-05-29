@@ -486,6 +486,62 @@ export function registerRoutingTools(server: McpServer, callKicadScript: Functio
     },
   );
 
+  // Scrub region tool — geometric region-scoped copper cleanup (#251)
+  server.tool(
+    "scrub_region",
+    "Region-scoped copper cleanup after a re-placement or incremental re-route. Given target components, computes a per-layer convex hull of their footprints and deletes copper that is either (a) on a TARGET-ONLY net (every pad belongs to a target) anywhere/any layer, or (b) on a SHARED net (touches a target AND a non-target) only inside the hull. A recursive dead-end prune then sweeps anything left dangling. This is the geometric scope net-name stripping lacks: it removes the charger's slice of USB_VBUS without nuking the whole rail. DRY-RUN BY DEFAULT — returns an authoritative kill-list (each item carries a reason code), interlopers, flagged spared items, a debug viz PNG path, and nowOpenNets (feed straight to autoroute(nets=...)). Pass dryRun=false to delete. Pipeline: relax_placement -> scrub_region(dryRun) -> snapshot/commit -> scrub_region(dryRun=false) -> autoroute(nets=nowOpenNets) -> refill_zones -> run_drc. See docs/SCRUB_REGION_PLAN.md.",
+    {
+      targets: z
+        .array(z.string())
+        .describe("Component references defining the region (e.g. the charger's U3, L1, decoupling caps). Required."),
+      layers: z
+        .array(z.string())
+        .optional()
+        .describe(
+          "Copper layers to scrub (default ['F.Cu','B.Cu']). The front/back default keeps inner-layer power pours out of scope. Pass inner layers to extend.",
+        ),
+      marginMm: z
+        .number()
+        .optional()
+        .describe("Slack around the hull, in mm (default 1.0). Implemented as a distance threshold, not a polygon offset."),
+      affectTracks: z.boolean().optional().describe("Delete matching tracks (default true)."),
+      affectVias: z.boolean().optional().describe("Delete matching vias (default true)."),
+      affectZones: z
+        .boolean()
+        .optional()
+        .describe("Delete matching zones — e.g. local same-net pin-join zones (default true)."),
+      intersectHull: z
+        .boolean()
+        .optional()
+        .describe(
+          "Opt-in: also delete shared-net tracks that merely CROSS the hull (both endpoints outside). Default false (endpoint-in-hull only — the conservative choice).",
+        ),
+      pruneDeadEnds: z
+        .boolean()
+        .optional()
+        .describe("Recursively remove dangling tracks / single-connection vias on involved nets after the main pass (default true)."),
+      dryRun: z
+        .boolean()
+        .optional()
+        .describe("Preview without deleting (default TRUE). Pass false to apply."),
+      viz: z
+        .boolean()
+        .optional()
+        .describe("Render a debug overlay PNG (target bboxes, hull, matched/unmatched copper) to /tmp/claude-1000 (default true)."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("scrub_region", args);
+      return {
+        content: [
+          {
+            type: "text",
+            text: JSON.stringify(result, null, 2),
+          },
+        ],
+      };
+    },
+  );
+
   // Delete trace tool
   server.tool(
     "delete_trace",
