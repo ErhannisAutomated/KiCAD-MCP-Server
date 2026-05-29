@@ -633,6 +633,18 @@ class FreeroutingCommands:
         except Exception as e:
             logger.debug(f"Netclass-pattern pre-flight failed (non-fatal): {e}")
 
+        # Step 0c (incremental, #248): strip the target nets BEFORE the DSN
+        # export so freerouting sees them as open ratsnest and routes them
+        # fresh.  Leaving stale/dangling target-net copper in the DSN (e.g.
+        # after a re-placement moved the pads) makes freerouting thrash — a
+        # 400s timeout was observed routing the charger this way.  The live
+        # board isn't saved until a successful import, so a freerouting
+        # failure leaves the on-disk board intact (re-open to recover the
+        # in-memory strip).
+        removed_existing = 0
+        if incremental:
+            removed_existing = _remove_net_routing(self.board, set(valid_nets))
+
         # Step 1: Export DSN
         logger.info(f"Exporting DSN to {dsn_path}")
         try:
@@ -771,6 +783,7 @@ class FreeroutingCommands:
                 dsn_path=dsn_path,
                 target_nets=valid_nets,
                 unknown_nets=unknown_nets,
+                removed_existing=removed_existing,
                 elapsed=elapsed,
                 mode_label=mode_label,
                 applied_layer_order=applied_layer_order,
@@ -867,6 +880,7 @@ class FreeroutingCommands:
         dsn_path: str,
         target_nets: List[str],
         unknown_nets: List[str],
+        removed_existing: int,
         elapsed: float,
         mode_label: str,
         applied_layer_order: Optional[List[str]],
@@ -881,8 +895,9 @@ class FreeroutingCommands:
         scratch file, load that as an independent board, run the
         replace-like ImportSpecctraSES on the *scratch*, then copy just the
         target nets' tracks/vias back onto the live board (whose existing
-        copper we leave alone). The named nets are cleared on the live
-        board first so they get a clean replacement.
+        copper we leave alone). The named nets were already cleared on the
+        live board before the DSN export (#248), so freerouting routed them
+        fresh and there's nothing left to remove here.
         """
         target_set = set(target_nets)
         scratch_path = os.path.join(
@@ -901,7 +916,9 @@ class FreeroutingCommands:
                     "elapsed_seconds": elapsed,
                 }
 
-            removed = _remove_net_routing(self.board, target_set)
+            # Target nets were stripped before the DSN export (#248), so
+            # the live board's target-net copper is already empty — just
+            # copy the freshly-routed nets in from the scratch.
             per_net, ntracks, nvias = _clone_net_routing(
                 scratch, self.board, target_set, pcbnew
             )
@@ -953,7 +970,7 @@ class FreeroutingCommands:
             "routedNets": sorted(per_net.keys()),
             "unroutedNets": unrouted,
             "perNetCounts": per_net,
-            "removedExistingCount": removed,
+            "removedExistingCount": removed_existing,
             "addedTracks": ntracks,
             "addedVias": nvias,
             "dsn_path": dsn_path,

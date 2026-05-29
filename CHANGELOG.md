@@ -4,6 +4,41 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Autoplacer: intent-group normalization + tuned defaults (develop, 2026-05-29, #249/#250)
+
+PCB autoplacer (`relax_placement`) force-law and default changes, validated in
+the Jupyter harness:
+
+- **`normalize_by_intent_group` (now default ON).** Replaces the per-component
+  degree normalization with a three-level average: within each *intent group*
+  (connections sharing a matched annotation target) → across a pin's groups →
+  across the component's pins. A named `REF:PIN` DECOUPLING target gets its own
+  group, so it competes on equal footing with the rest of a high-fan-out net
+  instead of being out-voted by the aggregate of many generic rail pulls (the
+  USB_VBUS/C16 mis-orientation) — without needing PLANE on the rail. The
+  across-pins average keeps a component's total spring force independent of pin
+  count (anti-jitter). Grouping is by target; a by-class variant is noted in
+  code but not exposed. Helpers `_intent_group_key` / `_intent_group_reduce`;
+  tests in `tests/test_intent_group_norm.py`.
+- **`cluster_iters` default 0 → 50.** Letting the spring topology settle before
+  repulsion acts puts parts on the correct side of their IC far more reliably;
+  the old "spread phase absorbs the cluster role" hypothesis didn't hold.
+- **`repulsion_k_start` default 1e-4 → 1e-6.** A gentler early spread sorts
+  loosely- vs tightly-coupled parts out better.
+
+Note: the viz force-arrow overlay (`_compute_total_force_on`) doesn't yet
+reflect intent-group mode — arrows are approximate, positions are correct.
+
+### Incremental autoroute strips target nets before DSN export (develop, 2026-05-29, #248)
+
+The incremental `autoroute(nets=…)` now strips the target nets **before** the
+DSN export (previously it stripped after freerouting, inside the SES copy
+step). Leaving stale/dangling target-net copper in the DSN made freerouting
+thrash — a 400 s timeout was observed re-routing the charger after a
+re-placement moved its pads. Stripping first gives freerouting a clean open
+ratsnest. The live board isn't saved until a successful import, so a
+freerouting failure leaves the on-disk board intact.
+
 ### Incremental autoroute via `nets` parameter (develop, 2026-05-28, #242)
 
 `autoroute` now accepts an optional `nets` array. When given, only those nets

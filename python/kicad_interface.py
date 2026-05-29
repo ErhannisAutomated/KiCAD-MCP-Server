@@ -6843,7 +6843,7 @@ print("ok")
                 locked_refs=params.get("lockedRefs"),
                 margin_mm=float(params.get("marginMm", 1.0)),
                 spring_k=float(params.get("springK", 1.0)),
-                repulsion_k_start=float(params.get("repulsionKStart", 1e-4)),
+                repulsion_k_start=float(params.get("repulsionKStart", 1e-6)),
                 repulsion_k_peak=float(params.get("repulsionKPeak", 0.1)),
                 rotation_snap_peak=float(params.get("rotationSnapPeak", 30.0)),
                 pinwise_torque_k=float(params.get("pinwiseTorqueK", 1.0)),
@@ -6857,7 +6857,7 @@ print("ok")
                     params.get("normalizeSpringForceByDegree", True)
                 ),
                 normalize_by_intent_group=bool(
-                    params.get("normalizeByIntentGroup", False)
+                    params.get("normalizeByIntentGroup", True)
                 ),
                 boundary_k=float(params.get("boundaryK", 1.0)),
                 enforce_rotation_snap=bool(params.get("enforceRotationSnap", True)),

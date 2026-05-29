@@ -615,7 +615,7 @@ class PCBSchedule:
 
     # Force scales (applied as multipliers to engine defaults)
     spring_k: float = 1.0               # attraction_k during all phases
-    repulsion_k_start: float = 1e-4     # start of spread phase (1/r³ formula)
+    repulsion_k_start: float = 1e-6     # start of spread phase (1/r³ formula)
     repulsion_k_peak: float = 0.1       # peak at end of spread phase
     rotation_snap_peak: float = 30.0    # peak snap strength
     # Lever-arm torque coupling for the pin-wise spring forces.
@@ -652,8 +652,9 @@ class PCBSchedule:
     # (within-group-by-target → across-groups-per-pin → across-pins).
     # Supersedes normalize_spring_force_by_degree when True; makes named
     # DECOUPLING targets fan-out-robust without needing PLANE on the rail.
-    # Default off pending harness A/B validation.
-    normalize_by_intent_group: bool = False
+    # Default ON — validated in the harness (parts land on the correct
+    # side of their IC far more reliably than under degree normalization).
+    normalize_by_intent_group: bool = True
 
     # Soft boundary force during iteration (linear restoring force
     # when a component drifts past the keep-in bbox).  Was disabled
@@ -820,7 +821,7 @@ def relax_placement(
     *,
     margin_mm: float = 1.0,
     spring_k: float = 1.0,
-    repulsion_k_start: float = 1e-4,
+    repulsion_k_start: float = 1e-6,
     repulsion_k_peak: float = 0.1,
     rotation_snap_peak: float = 30.0,
     pinwise_torque_k: float = 1.0,
@@ -831,7 +832,7 @@ def relax_placement(
     cross_layer_springs: bool = True,
     force_step_damping: float = 0.3,
     normalize_spring_force_by_degree: bool = True,
-    normalize_by_intent_group: bool = False,
+    normalize_by_intent_group: bool = True,
     boundary_k: float = 1.0,
     enforce_rotation_snap: bool = True,
     dry_run: bool = False,

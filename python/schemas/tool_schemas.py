@@ -1499,7 +1499,7 @@ ROUTING_TOOLS = [
                 },
                 "marginMm": {"type": "number", "description": "Body-repulsion margin (default 1.0 mm).", "default": 1.0},
                 "springK": {"type": "number", "description": "Base attraction spring constant (default 1.0).", "default": 1.0},
-                "repulsionKStart": {"type": "number", "description": "Repulsion strength at start of spread phase (default 1e-4). Ramps geometrically to repulsionKPeak under the inverse-cube formula.", "default": 1e-4},
+                "repulsionKStart": {"type": "number", "description": "Repulsion strength at start of spread phase (default 1e-6). Ramps geometrically to repulsionKPeak under the inverse-cube formula; a small start gives a gentler early spread.", "default": 1e-6},
                 "repulsionKPeak": {"type": "number", "description": "Peak repulsion strength at end of spread phase (default 0.1 under the inverse-cube formula; the historical cubic-ramp default was 30.0).", "default": 0.1},
                 "rotationSnapPeak": {"type": "number", "description": "Peak rotation-snap torque (default 30.0). Set 0 for free rotation.", "default": 30.0},
                 "pinwiseTorqueK": {"type": "number", "description": "Lever-arm torque coupling for pin-wise springs (default 1.0). Without this, off-center spring forces don't rotate components.", "default": 1.0},

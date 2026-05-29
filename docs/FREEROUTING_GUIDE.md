@@ -120,8 +120,15 @@ sub-circuit without disturbing hand-routed work.
 
 How it works (and why it's safe):
 
-1. The board is exported to DSN and freerouting runs as usual. Because the
-   already-routed nets appear as existing wiring in the DSN, freerouting
+0. The target nets are **stripped from the board before the DSN export**
+   (#248), so freerouting sees them as open ratsnest and routes them fresh.
+   This matters when the target nets carry stale/dangling copper (e.g. after
+   a re-placement moved the pads): leaving that in the DSN makes freerouting
+   thrash (a 400 s timeout was seen routing the charger this way). The board
+   isn't saved until a successful import, so a freerouting failure leaves the
+   on-disk board intact.
+1. The board is exported to DSN and freerouting runs as usual. The
+   already-routed *non-target* nets appear as existing wiring, so freerouting
    only has to route the open (target) ratsnest.
 2. The replace-like `ImportSpecctraSES` is applied to a **scratch copy** of
    the board, never the live one — so the board-wipe failure mode can't
