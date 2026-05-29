@@ -6847,7 +6847,7 @@ print("ok")
                 repulsion_k_peak=float(params.get("repulsionKPeak", 0.1)),
                 rotation_snap_peak=float(params.get("rotationSnapPeak", 30.0)),
                 pinwise_torque_k=float(params.get("pinwiseTorqueK", 1.0)),
-                cluster_iters=int(params.get("clusterIters", 0)),
+                cluster_iters=int(params.get("clusterIters", 50)),
                 spread_iters=int(params.get("spreadIters", 200)),
                 snap_iters=int(params.get("snapIters", 100)),
                 relax_iters=int(params.get("relaxIters", 0)),
@@ -6855,6 +6855,9 @@ print("ok")
                 force_step_damping=float(params.get("forceStepDamping", 0.3)),
                 normalize_spring_force_by_degree=bool(
                     params.get("normalizeSpringForceByDegree", True)
+                ),
+                normalize_by_intent_group=bool(
+                    params.get("normalizeByIntentGroup", False)
                 ),
                 boundary_k=float(params.get("boundaryK", 1.0)),
                 enforce_rotation_snap=bool(params.get("enforceRotationSnap", True)),

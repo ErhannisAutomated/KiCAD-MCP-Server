@@ -360,6 +360,15 @@ class Params:
     # turns this on by default; schematic is unaffected unless opted
     # in (preserves the tuned defaults in feedback_autoplacer_params).
     normalize_spring_force_by_degree: bool = False
+    # Alternative spring normalization (#249): three-level averaging —
+    # within each intent group (by matched annotation target), then across
+    # a pin's groups, then across the component's pins.  Makes a named
+    # DECOUPLING target compete on equal footing with the rest of a
+    # high-fan-out net (so it isn't outvoted by the aggregate of many
+    # generic rail pulls), while keeping a component's total spring force
+    # independent of pin count.  When True it SUPERSEDES
+    # normalize_spring_force_by_degree.  Default off; opt in via PCBSchedule.
+    normalize_by_intent_group: bool = False
     # If True, the iterate loop computes forces and applies the step for
     # one component at a time (Gauss-Seidel).  Subsequent components in
     # the same iteration see the just-updated positions.  False (default)
@@ -968,6 +977,72 @@ def _attractive_force_pinwise(
     return k * (p2[0] - p1[0]), k * (p2[1] - p1[1])
 
 
+def _intent_group_key(
+    comp: "Component", pin: str, other_comp: "Component", other_pin: str,
+) -> Tuple[str, str]:
+    """Group key for `normalize_by_intent_group` (#249), from `comp.pin`'s
+    perspective.  A connection that matches a NAMED target in this pin's
+    annotation (e.g. ``{"U3.1": "DECOUPLING"}``) gets its OWN group; every
+    other connection (a ``"*"`` pad-wildcard, a bare pad-general class, a
+    net/component default, or no annotation) falls into the pin's single
+    catch-all group.
+
+    Grouping is by *target*, not by class: two differently-named targets
+    get separate groups even if they resolve to the same class — naming a
+    pin is the signal that it deserves its own equal share of the force.
+    (A by-class variant would lump same-class targets into one averaged
+    group; not currently exposed — flip this to key on the resolved class
+    name if that's ever wanted.)
+    """
+    spec = comp.pin_classes.get(pin)
+    if isinstance(spec, dict):
+        target_key = f"{other_comp.ref}.{other_pin}"
+        if target_key in spec:
+            return (pin, "t:" + target_key)
+    return (pin, "*")
+
+
+def _intent_group_reduce(
+    pins_groups: Dict[str, Dict[Tuple[str, str], List[Tuple[float, float, float]]]],
+) -> Tuple[float, float, float]:
+    """Three-level average of a component's bucketed spring contributions
+    (#249): average within each group, then across a pin's groups, then
+    across the component's pins.  Each bucket entry is ``(fx, fy, torque)``.
+
+    Result: total spring force/torque whose magnitude is bounded by the
+    strongest single group and is independent of how many connections,
+    groups, or pins the component has.  Empty -> zeros.
+    """
+    pin_vecs: List[Tuple[float, float, float]] = []
+    for groups in pins_groups.values():
+        group_vecs: List[Tuple[float, float, float]] = []
+        for items in groups.values():
+            n = len(items)
+            if n == 0:
+                continue
+            group_vecs.append((
+                sum(it[0] for it in items) / n,
+                sum(it[1] for it in items) / n,
+                sum(it[2] for it in items) / n,
+            ))
+        ng = len(group_vecs)
+        if ng == 0:
+            continue
+        pin_vecs.append((
+            sum(g[0] for g in group_vecs) / ng,
+            sum(g[1] for g in group_vecs) / ng,
+            sum(g[2] for g in group_vecs) / ng,
+        ))
+    npins = len(pin_vecs)
+    if npins == 0:
+        return 0.0, 0.0, 0.0
+    return (
+        sum(v[0] for v in pin_vecs) / npins,
+        sum(v[1] for v in pin_vecs) / npins,
+        sum(v[2] for v in pin_vecs) / npins,
+    )
+
+
 def _boundary_force(c: Component, p: Params) -> Tuple[float, float]:
     """Linear restoring force when component is outside the sheet bbox."""
     fx = fy = 0.0
@@ -1350,6 +1425,13 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
         spring_forces: Dict[str, Tuple[float, float]] = {c.key: (0.0, 0.0) for c in comps}
         spring_torques: Dict[str, float] = {c.key: 0.0 for c in comps}
         spring_degree: Dict[str, int] = {c.key: 0 for c in comps}
+        # Intent-group buckets (#249): comp_key -> pin -> group_key ->
+        # [(fx, fy, torque)]. Only populated when normalize_by_intent_group
+        # is on; reduced by the three-level average at merge time.
+        use_intent = p.normalize_by_intent_group
+        intent_buckets: Dict[str, Dict[str, Dict[Tuple[str, str], List[Tuple[float, float, float]]]]] = (
+            {c.key: {} for c in comps} if use_intent else {}
+        )
         for net in sess.nets.values():
             pin_list = net.pins
             if len(pin_list) < 2:
@@ -1406,6 +1488,7 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                     # Gated on use_spring_classes so the schematic flow
                     # keeps its existing angle-based pin-orientation
                     # torque mechanism.
+                    t_a = t_b = 0.0
                     if p.use_spring_classes and p.pinwise_torque_k != 0.0:
                         pa = a.world_pin_xy(pin_a)
                         pb = b.world_pin_xy(pin_b)
@@ -1420,18 +1503,29 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                             t_b = (rbx * afy - rby * afx) * p.pinwise_torque_k
                             spring_torques[key_a] += t_a
                             spring_torques[key_b] += t_b
+                    if use_intent:
+                        gka = _intent_group_key(a, pin_a, b, pin_b)
+                        intent_buckets[key_a].setdefault(pin_a, {}).setdefault(
+                            gka, []).append((afx, afy, t_a))
+                        gkb = _intent_group_key(b, pin_b, a, pin_a)
+                        intent_buckets[key_b].setdefault(pin_b, {}).setdefault(
+                            gkb, []).append((-afx, -afy, t_b))
 
         # Merge spring contributions into the running force/torque
         # totals, optionally normalizing by per-component degree.
         for c in comps:
-            sfx, sfy = spring_forces[c.key]
-            stq = spring_torques[c.key]
-            if p.normalize_spring_force_by_degree:
-                n = spring_degree[c.key]
-                if n > 1:
-                    sfx /= n
-                    sfy /= n
-                    stq /= n
+            if use_intent:
+                # Three-level average supersedes per-degree normalization.
+                sfx, sfy, stq = _intent_group_reduce(intent_buckets[c.key])
+            else:
+                sfx, sfy = spring_forces[c.key]
+                stq = spring_torques[c.key]
+                if p.normalize_spring_force_by_degree:
+                    n = spring_degree[c.key]
+                    if n > 1:
+                        sfx /= n
+                        sfy /= n
+                        stq /= n
             fx_total, fy_total = forces[c.key]
             forces[c.key] = (fx_total + sfx, fy_total + sfy)
             torques[c.key] = torques.get(c.key, 0.0) + stq

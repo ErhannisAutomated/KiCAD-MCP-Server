@@ -586,9 +586,11 @@ class PCBSchedule:
     springs-first relaxation schedule.
 
     Phase 1 (CLUSTER) — springs only, no repulsion: components find
-    their natural connection-determined neighborhoods.  Default
-    skipped (cluster_iters=0); the SPREAD phase starts repulsion
-    near zero so it effectively absorbs the cluster role.
+    their natural connection-determined neighborhoods.  Defaults to 50
+    iterations: letting the spring topology settle BEFORE repulsion acts
+    puts parts on the correct side of their IC far more reliably (the
+    earlier cluster_iters=0 hypothesis — that the spread phase's gentle
+    repulsion ramp absorbs the cluster role — didn't hold in practice).
     Phase 2 (SPREAD) — repulsion ramps in geometrically: bodies
     settle into non-overlapping positions.
     Phase 3 (SNAP) — rotation-snap potential ramps in: orientations
@@ -606,7 +608,7 @@ class PCBSchedule:
     values are: spring_k=0.1, repulsion_k_peak=30, snap_peak=3,
     pinwise_torque_k=0.05, step_spread=3.0.
     """
-    cluster_iters: int = 0
+    cluster_iters: int = 50
     spread_iters: int = 200
     snap_iters: int = 100
     relax_iters: int = 0
@@ -646,6 +648,12 @@ class PCBSchedule:
     # a 2-pin resistor and bucks under the damping that's critical
     # for the resistor.
     normalize_spring_force_by_degree: bool = True
+    # Alternative normalization (#249): three-level intent-group average
+    # (within-group-by-target → across-groups-per-pin → across-pins).
+    # Supersedes normalize_spring_force_by_degree when True; makes named
+    # DECOUPLING targets fan-out-robust without needing PLANE on the rail.
+    # Default off pending harness A/B validation.
+    normalize_by_intent_group: bool = False
 
     # Soft boundary force during iteration (linear restoring force
     # when a component drifts past the keep-in bbox).  Was disabled
@@ -713,6 +721,7 @@ def run_pcb_relax(
     p.cross_layer_springs = schedule.cross_layer_springs
     p.force_step_damping = schedule.force_step_damping
     p.normalize_spring_force_by_degree = schedule.normalize_spring_force_by_degree
+    p.normalize_by_intent_group = schedule.normalize_by_intent_group
 
     # Disable schematic-only forces.
     p.polarity_k = 0.0
@@ -815,13 +824,14 @@ def relax_placement(
     repulsion_k_peak: float = 0.1,
     rotation_snap_peak: float = 30.0,
     pinwise_torque_k: float = 1.0,
-    cluster_iters: int = 0,
+    cluster_iters: int = 50,
     spread_iters: int = 200,
     snap_iters: int = 100,
     relax_iters: int = 0,
     cross_layer_springs: bool = True,
     force_step_damping: float = 0.3,
     normalize_spring_force_by_degree: bool = True,
+    normalize_by_intent_group: bool = False,
     boundary_k: float = 1.0,
     enforce_rotation_snap: bool = True,
     dry_run: bool = False,
@@ -870,6 +880,7 @@ def relax_placement(
         cross_layer_springs=cross_layer_springs,
         force_step_damping=force_step_damping,
         normalize_spring_force_by_degree=normalize_spring_force_by_degree,
+        normalize_by_intent_group=normalize_by_intent_group,
         boundary_k=boundary_k,
         enforce_rotation_snap=enforce_rotation_snap,
     )
