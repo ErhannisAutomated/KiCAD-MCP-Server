@@ -4281,6 +4281,19 @@ class RoutingCommands:
             min_clearance_mm = float(params.get("minClearance", 0.15))
             min_clearance_iu = int(min_clearance_mm * 1_000_000)
             via_diam_iu = int(via_diam_mm * 1_000_000)
+            trace_width_iu = int(width_mm * 1_000_000)
+            # maxPathLength: total committed-segment length budget (mm).
+            # Pathological detour strategies (e.g. via_jumper_z_*_vhvh
+            # rerouting through the next IC over) are silently skipped
+            # if their total path exceeds the budget. Default None
+            # (unbounded — preserves pre-budget behavior); set ≥ direct
+            # distance × 3 as a sane "no wild detours" cap.
+            max_path_length_mm = params.get("maxPathLength")
+            if max_path_length_mm is not None:
+                max_path_length_iu = int(float(max_path_length_mm) * 1_000_000)
+            else:
+                max_path_length_iu = None
+            over_budget_attempts: list = []
             apply = bool(params.get("apply", False))
 
             from_pt = self._resolve_route_endpoint(params.get("from"))
@@ -4299,24 +4312,42 @@ class RoutingCommands:
                 return {"x": pt.x / 1e6, "y": pt.y / 1e6, "unit": "mm"}
 
             # --- Strategy A: direct on fromLayer ---
-            obs_a = self._find_route_obstacles(from_pt, to_pt, from_id, net)
+            obs_a = self._find_route_obstacles(
+                from_pt, to_pt, from_id, net,
+                trace_width_iu, min_clearance_iu,
+            )
             if not obs_a:
-                path = [{
-                    "kind": "track", "layer": from_layer, "width": width_mm,
-                    "net": net,
-                    "start": _pt_dict(from_pt), "end": _pt_dict(to_pt),
-                }]
-                if apply:
-                    self.route_trace({
-                        "start": _pt_dict(from_pt), "end": _pt_dict(to_pt),
-                        "layer": from_layer, "width": width_mm, "net": net,
-                        "checkObstacles": False,
+                direct_len_iu = self._polyline_length_iu([from_pt, to_pt])
+                if (max_path_length_iu is not None
+                        and direct_len_iu > max_path_length_iu):
+                    over_budget_attempts.append({
+                        "strategy": "direct",
+                        "lengthMm": round(direct_len_iu / 1e6, 3),
                     })
-                return {
-                    "success": True, "strategy": "direct", "applied": apply,
-                    "path": path, "vias": [],
-                    "message": "Direct same-layer route is clear; no via needed.",
-                }
+                    # Direct route is over budget — caller's budget is
+                    # tighter than the manhattan distance. Skip and let
+                    # the failure path report it.
+                else:
+                    path = [{
+                        "kind": "track", "layer": from_layer,
+                        "width": width_mm, "net": net,
+                        "start": _pt_dict(from_pt), "end": _pt_dict(to_pt),
+                    }]
+                    if apply:
+                        self.route_trace({
+                            "start": _pt_dict(from_pt),
+                            "end": _pt_dict(to_pt),
+                            "layer": from_layer, "width": width_mm,
+                            "net": net, "checkObstacles": False,
+                        })
+                    return {
+                        "success": True, "strategy": "direct",
+                        "applied": apply, "path": path, "vias": [],
+                        "message": (
+                            "Direct same-layer route is clear; no via "
+                            "needed."
+                        ),
+                    }
 
             # --- Strategy B prep: find safe via insertion points on fromLayer ---
             # via_diam_iu + min_clearance_iu enable Strategy H — the
@@ -4328,11 +4359,13 @@ class RoutingCommands:
                 from_pt, to_pt, from_id, net, margin_iu,
                 via_diam_iu=via_diam_iu,
                 min_clearance_iu=min_clearance_iu,
+                trace_width_iu=trace_width_iu,
             )
             via2 = self._find_safe_via_point(
                 to_pt, from_pt, from_id, net, margin_iu,
                 via_diam_iu=via_diam_iu,
                 min_clearance_iu=min_clearance_iu,
+                trace_width_iu=trace_width_iu,
             )
             if via1 is None or via2 is None:
                 # Distinguish failure mode: did the F.Cu segment hit an
@@ -4424,13 +4457,20 @@ class RoutingCommands:
                 }
 
             # --- Strategy B: straight via-jumper on viaLayer ---
-            obs_b = self._find_route_obstacles(via1, via2, via_id, net)
+            obs_b = self._find_route_obstacles(
+                via1, via2, via_id, net,
+                trace_width_iu, min_clearance_iu,
+            )
             if not obs_b:
-                return self._emit_via_jumper(
+                attempt = self._emit_via_jumper(
                     from_pt, via1, via2, to_pt, [], from_layer, via_layer,
                     width_mm, via_diam_mm, via_drill_mm, net, apply,
                     strategy="via_jumper",
+                    max_path_length_iu=max_path_length_iu,
+                    over_budget_attempts=over_budget_attempts,
                 )
+                if attempt is not None:
+                    return attempt
 
             # --- Strategy C: single-waypoint perpendicular-offset search ---
             # Quick first pass — handles the common "obstacle blocks one
@@ -4442,16 +4482,27 @@ class RoutingCommands:
                     wp = self._perpendicular_offset_midpoint(
                         via1, via2, offset_mm * sign
                     )
-                    if self._find_route_obstacles(via1, wp, via_id, net):
+                    if self._find_route_obstacles(
+                        via1, wp, via_id, net,
+                        trace_width_iu, min_clearance_iu,
+                    ):
                         continue
-                    if self._find_route_obstacles(wp, via2, via_id, net):
+                    if self._find_route_obstacles(
+                        wp, via2, via_id, net,
+                        trace_width_iu, min_clearance_iu,
+                    ):
                         continue
-                    return self._emit_via_jumper(
+                    attempt = self._emit_via_jumper(
                         from_pt, via1, via2, to_pt, [wp],
                         from_layer, via_layer, width_mm,
                         via_diam_mm, via_drill_mm, net, apply,
                         strategy="via_jumper_with_waypoint",
+                        max_path_length_iu=max_path_length_iu,
+                        over_budget_attempts=over_budget_attempts,
                     )
+                    if attempt is not None:
+                        return attempt
+                    continue
 
             # --- Strategy D: 2D grid waypoint search ---
             # For cases where the perpendicular-only search missed because
@@ -4472,16 +4523,27 @@ class RoutingCommands:
                 wp = pcbnew.VECTOR2I(
                     int(mx + ox * 1_000_000), int(my + oy * 1_000_000)
                 )
-                if self._find_route_obstacles(via1, wp, via_id, net):
+                if self._find_route_obstacles(
+                    via1, wp, via_id, net,
+                    trace_width_iu, min_clearance_iu,
+                ):
                     continue
-                if self._find_route_obstacles(wp, via2, via_id, net):
+                if self._find_route_obstacles(
+                    wp, via2, via_id, net,
+                    trace_width_iu, min_clearance_iu,
+                ):
                     continue
-                return self._emit_via_jumper(
+                attempt = self._emit_via_jumper(
                     from_pt, via1, via2, to_pt, [wp],
                     from_layer, via_layer, width_mm,
                     via_diam_mm, via_drill_mm, net, apply,
                     strategy="via_jumper_with_grid_waypoint",
+                    max_path_length_iu=max_path_length_iu,
+                    over_budget_attempts=over_budget_attempts,
                 )
+                if attempt is not None:
+                    return attempt
+                continue
 
             # --- Strategy E: 2-waypoint axis-aligned L-shape ---
             # Genuine HVH or VHV detour around a blocking obstacle that
@@ -4495,29 +4557,37 @@ class RoutingCommands:
                     ext_x = int(via1.x + sign * ext_mm * 1_000_000)
                     c1 = pcbnew.VECTOR2I(ext_x, via1.y)
                     c2 = pcbnew.VECTOR2I(ext_x, via2.y)
-                    if (not self._find_route_obstacles(via1, c1, via_id, net)
-                        and not self._find_route_obstacles(c1, c2, via_id, net)
-                        and not self._find_route_obstacles(c2, via2, via_id, net)):
-                        return self._emit_via_jumper(
+                    if (not self._find_route_obstacles(via1, c1, via_id, net, trace_width_iu, min_clearance_iu)
+                        and not self._find_route_obstacles(c1, c2, via_id, net, trace_width_iu, min_clearance_iu)
+                        and not self._find_route_obstacles(c2, via2, via_id, net, trace_width_iu, min_clearance_iu)):
+                        attempt = self._emit_via_jumper(
                             from_pt, via1, via2, to_pt, [c1, c2],
                             from_layer, via_layer, width_mm,
                             via_diam_mm, via_drill_mm, net, apply,
                             strategy="via_jumper_hvh_lshape",
+                            max_path_length_iu=max_path_length_iu,
+                            over_budget_attempts=over_budget_attempts,
                         )
+                        if attempt is not None:
+                            return attempt
                     # VHV (vertical extension): c1 = (via1.x, via1.y + ext),
                     # c2 = (via2.x, via1.y + ext)
                     ext_y = int(via1.y + sign * ext_mm * 1_000_000)
                     c1 = pcbnew.VECTOR2I(via1.x, ext_y)
                     c2 = pcbnew.VECTOR2I(via2.x, ext_y)
-                    if (not self._find_route_obstacles(via1, c1, via_id, net)
-                        and not self._find_route_obstacles(c1, c2, via_id, net)
-                        and not self._find_route_obstacles(c2, via2, via_id, net)):
-                        return self._emit_via_jumper(
+                    if (not self._find_route_obstacles(via1, c1, via_id, net, trace_width_iu, min_clearance_iu)
+                        and not self._find_route_obstacles(c1, c2, via_id, net, trace_width_iu, min_clearance_iu)
+                        and not self._find_route_obstacles(c2, via2, via_id, net, trace_width_iu, min_clearance_iu)):
+                        attempt = self._emit_via_jumper(
                             from_pt, via1, via2, to_pt, [c1, c2],
                             from_layer, via_layer, width_mm,
                             via_diam_mm, via_drill_mm, net, apply,
                             strategy="via_jumper_vhv_lshape",
+                            max_path_length_iu=max_path_length_iu,
+                            over_budget_attempts=over_budget_attempts,
                         )
+                        if attempt is not None:
+                            return attempt
 
             # --- Strategy F (v3): obstacle-bbox-aware L-shape ---
             # The blind sweeps above step in 1 mm increments within
@@ -4529,7 +4599,8 @@ class RoutingCommands:
             # bbox edge + clearance margin — so the detour is sized to
             # the obstacle's actual extent, not a blind search radius.
             obstacle_items = list(self._iter_route_obstacles(
-                via1, via2, via_id, net
+                via1, via2, via_id, net,
+                trace_width_iu, min_clearance_iu,
             ))
             bbox = self._obstacle_union_bbox(obstacle_items)
             tried_bbox = []
@@ -4552,16 +4623,20 @@ class RoutingCommands:
                     else:
                         c1 = pcbnew.VECTOR2I(via1.x, ext_y)
                         c2 = pcbnew.VECTOR2I(via2.x, ext_y)
-                    leg1 = self._find_route_obstacles(via1, c1, via_id, net)
-                    leg2 = self._find_route_obstacles(c1, c2, via_id, net)
-                    leg3 = self._find_route_obstacles(c2, via2, via_id, net)
+                    leg1 = self._find_route_obstacles(via1, c1, via_id, net, trace_width_iu, min_clearance_iu)
+                    leg2 = self._find_route_obstacles(c1, c2, via_id, net, trace_width_iu, min_clearance_iu)
+                    leg3 = self._find_route_obstacles(c2, via2, via_id, net, trace_width_iu, min_clearance_iu)
                     if not leg1 and not leg2 and not leg3:
-                        return self._emit_via_jumper(
+                        attempt = self._emit_via_jumper(
                             from_pt, via1, via2, to_pt, [c1, c2],
                             from_layer, via_layer, width_mm,
                             via_diam_mm, via_drill_mm, net, apply,
                             strategy=f"via_jumper_bbox_{label}",
+                            max_path_length_iu=max_path_length_iu,
+                            over_budget_attempts=over_budget_attempts,
                         )
+                        if attempt is not None:
+                            return attempt
                     tried_bbox.append({
                         "edge": label,
                         "leg1_blocked": leg1[:3],
@@ -4601,18 +4676,22 @@ class RoutingCommands:
                     c2 = pcbnew.VECTOR2I(ext_x, ext_y)
                     c3 = pcbnew.VECTOR2I(ext_x, via2.y)
                     legs = [
-                        self._find_route_obstacles(via1, c1, via_id, net),
-                        self._find_route_obstacles(c1, c2, via_id, net),
-                        self._find_route_obstacles(c2, c3, via_id, net),
-                        self._find_route_obstacles(c3, via2, via_id, net),
+                        self._find_route_obstacles(via1, c1, via_id, net, trace_width_iu, min_clearance_iu),
+                        self._find_route_obstacles(c1, c2, via_id, net, trace_width_iu, min_clearance_iu),
+                        self._find_route_obstacles(c2, c3, via_id, net, trace_width_iu, min_clearance_iu),
+                        self._find_route_obstacles(c3, via2, via_id, net, trace_width_iu, min_clearance_iu),
                     ]
                     if not any(legs):
-                        return self._emit_via_jumper(
+                        attempt = self._emit_via_jumper(
                             from_pt, via1, via2, to_pt, [c1, c2, c3],
                             from_layer, via_layer, width_mm,
                             via_diam_mm, via_drill_mm, net, apply,
                             strategy=f"via_jumper_z_{corner_label}_hvhv",
+                            max_path_length_iu=max_path_length_iu,
+                            over_budget_attempts=over_budget_attempts,
                         )
+                        if attempt is not None:
+                            return attempt
                     tried_z.append({
                         "corner": corner_label, "pattern": "hvhv",
                         "leg1_blocked": legs[0][:2],
@@ -4626,18 +4705,22 @@ class RoutingCommands:
                     c2 = pcbnew.VECTOR2I(ext_x, ext_y)
                     c3 = pcbnew.VECTOR2I(via2.x, ext_y)
                     legs = [
-                        self._find_route_obstacles(via1, c1, via_id, net),
-                        self._find_route_obstacles(c1, c2, via_id, net),
-                        self._find_route_obstacles(c2, c3, via_id, net),
-                        self._find_route_obstacles(c3, via2, via_id, net),
+                        self._find_route_obstacles(via1, c1, via_id, net, trace_width_iu, min_clearance_iu),
+                        self._find_route_obstacles(c1, c2, via_id, net, trace_width_iu, min_clearance_iu),
+                        self._find_route_obstacles(c2, c3, via_id, net, trace_width_iu, min_clearance_iu),
+                        self._find_route_obstacles(c3, via2, via_id, net, trace_width_iu, min_clearance_iu),
                     ]
                     if not any(legs):
-                        return self._emit_via_jumper(
+                        attempt = self._emit_via_jumper(
                             from_pt, via1, via2, to_pt, [c1, c2, c3],
                             from_layer, via_layer, width_mm,
                             via_diam_mm, via_drill_mm, net, apply,
                             strategy=f"via_jumper_z_{corner_label}_vhvh",
+                            max_path_length_iu=max_path_length_iu,
+                            over_budget_attempts=over_budget_attempts,
                         )
+                        if attempt is not None:
+                            return attempt
                     tried_z.append({
                         "corner": corner_label, "pattern": "vhvh",
                         "leg1_blocked": legs[0][:2],
@@ -4646,8 +4729,24 @@ class RoutingCommands:
                         "leg4_blocked": legs[3][:2],
                     })
 
+            # If candidates were rejected for length budget, surface
+            # that — the user may have set maxPathLength too tight.
+            if over_budget_attempts:
+                budget_note = (
+                    f" {len(over_budget_attempts)} otherwise-valid "
+                    f"candidate(s) were rejected by maxPathLength="
+                    f"{max_path_length_mm} mm "
+                    f"(shortest was {min(a['lengthMm'] for a in over_budget_attempts):.2f} mm); "
+                    "raise the budget if a longer detour is acceptable."
+                )
+            else:
+                budget_note = ""
             return {
-                "success": False, "strategy": "blocked_on_via_layer",
+                "success": False,
+                "strategy": (
+                    "over_budget" if over_budget_attempts and not tried_bbox
+                    and not tried_z else "blocked_on_via_layer"
+                ),
                 "errorDetails": (
                     f"viaLayer ({via_layer}) is blocked: tried straight, "
                     f"perpendicular-offset waypoint, 2D grid search, "
@@ -4655,6 +4754,7 @@ class RoutingCommands:
                     "obstacle-bbox-aware L-shape, and 4-corner Z-shape — "
                     "all hit foreign-net copper. Try a different viaLayer, "
                     "increase waypointSearchMax, or hand-route around."
+                    + budget_note
                 ),
                 "via1": _pt_dict(via1),
                 "via2": _pt_dict(via2),
@@ -4667,6 +4767,7 @@ class RoutingCommands:
                 ),
                 "bboxLshapesTried": tried_bbox,
                 "zShapesTried": tried_z,
+                "overBudgetAttempts": over_budget_attempts,
             }
 
         except Exception as e:
@@ -4701,7 +4802,8 @@ class RoutingCommands:
     def _find_safe_via_point(self, from_pt, to_pt, layer_id, net,
                               margin_iu, n_samples: int = 40,
                               via_diam_iu: int = 0,
-                              min_clearance_iu: int = 0):
+                              min_clearance_iu: int = 0,
+                              trace_width_iu: int = 0):
         """Walk from from_pt toward to_pt on layer; return the furthest
         point along the line where (a) the segment from_pt→point is
         clear on layer_id, AND (b) a through-via placed at point clears
@@ -4719,6 +4821,12 @@ class RoutingCommands:
         but the via would have shorted). The loop continues past via-
         clearance failures (doesn't break) because a later sample,
         further from the offending trace, may pass.
+
+        `trace_width_iu`: when >0, the same-layer segment check uses
+        the swept-stadium check (trace half-width + min_clearance)
+        rather than centerline-only intersection. Without this, a
+        parallel-but-non-crossing foreign track on the approach layer
+        would be missed.
         """
         dx = to_pt.x - from_pt.x
         dy = to_pt.y - from_pt.y
@@ -4733,7 +4841,10 @@ class RoutingCommands:
             py = int(from_pt.y + t * dy)
             pt = pcbnew.VECTOR2I(px, py)
             # Segment check: same-layer obstacles from from_pt → pt.
-            if self._find_route_obstacles(from_pt, pt, layer_id, net):
+            if self._find_route_obstacles(
+                from_pt, pt, layer_id, net,
+                trace_width_iu, min_clearance_iu,
+            ):
                 break  # Once the segment hits an obstacle, all later
                        # samples also cross it. Stop.
             # Via clearance check: would a through via at pt short to
@@ -4772,14 +4883,43 @@ class RoutingCommands:
         my = (a.y + b.y) / 2 + pdy
         return pcbnew.VECTOR2I(int(mx), int(my))
 
+    @staticmethod
+    def _polyline_length_iu(points: list) -> int:
+        """Sum of consecutive segment lengths through `points` (each a
+        pcbnew.VECTOR2I). Returns 0 for fewer than 2 points."""
+        total = 0.0
+        for i in range(1, len(points)):
+            a, b = points[i - 1], points[i]
+            total += ((b.x - a.x) ** 2 + (b.y - a.y) ** 2) ** 0.5
+        return int(total)
+
     def _emit_via_jumper(self, from_pt, via1, via2, to_pt, waypoints,
                           from_layer, via_layer, width_mm,
                           via_diam_mm, via_drill_mm, net, apply,
-                          strategy: str) -> Dict[str, Any]:
+                          strategy: str,
+                          max_path_length_iu: Optional[int] = None,
+                          over_budget_attempts: Optional[list] = None,
+                          ) -> Optional[Dict[str, Any]]:
         """Build the path/vias result for a via-jumper route, and commit
         the segments+vias if apply=true. waypoints is the list of
         intermediate viaLayer points between via1 and via2 (empty for
-        straight, [wp] for 1-bend)."""
+        straight, [wp] for 1-bend).
+
+        If `max_path_length_iu` is set and the total committed-segment
+        length exceeds it, returns None (caller should fall through to
+        the next strategy). When `over_budget_attempts` is also passed,
+        the rejected attempt is recorded for diagnostics.
+        """
+        if max_path_length_iu is not None:
+            polyline_pts = [from_pt, via1, *waypoints, via2, to_pt]
+            total_len_iu = self._polyline_length_iu(polyline_pts)
+            if total_len_iu > max_path_length_iu:
+                if over_budget_attempts is not None:
+                    over_budget_attempts.append({
+                        "strategy": strategy,
+                        "lengthMm": round(total_len_iu / 1e6, 3),
+                    })
+                return None
         def _pt_dict(pt):
             return {"x": pt.x / 1e6, "y": pt.y / 1e6, "unit": "mm"}
 

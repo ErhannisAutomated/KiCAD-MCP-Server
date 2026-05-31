@@ -906,6 +906,19 @@ ROUTING_TOOLS = [
                         "(default 10)."
                     ),
                 },
+                "maxPathLength": {
+                    "type": "number",
+                    "description": (
+                        "Total committed-segment length budget (mm). "
+                        "Strategies whose total path exceeds this are "
+                        "silently skipped, preventing pathological multi-cm "
+                        "detours (e.g. a Z-shape that walks halfway across "
+                        "the board for a 5 mm pin-to-pin link). Default "
+                        "unbounded; set to e.g. 3 × straight-line distance "
+                        "when you'd rather get a `blocked_on_via_layer` "
+                        "failure than a wild reroute."
+                    ),
+                },
                 "apply": {
                     "type": "boolean",
                     "description": (
