@@ -3,9 +3,13 @@
 KiCAD's GUI can silently strip netclass_patterns entries on save when
 it normalises the project file across version upgrades (the
 power_module CELL1_TOP/CELL2_TOP regression in commit 14a143a). This
-tool snapshots the expected pattern set into an
-mcp_expected_netclass_patterns section that KiCAD won't touch, and
-lets us detect/restore drift.
+tool snapshots the expected pattern set into the Schematic_Metadata
+singleton's ``mcp_expected_netclass_patterns`` key (which KiCAD won't
+touch) and lets us detect/restore drift.
+
+Under #233 the expected-set store moved off the .kicad_pro and onto
+the .kicad_sch singleton — these tests therefore create both a
+.kicad_pro and a sibling .kicad_sch.
 """
 
 from __future__ import annotations
@@ -26,13 +30,25 @@ from commands.netclass_patterns import (  # noqa: E402
 
 
 def _make_pro(tmp_path: Path, patterns: list) -> Path:
+    """Create a minimal .kicad_pro and sibling .kicad_sch. Returns the
+    .kicad_pro path; the .sch is derived as `pro.with_suffix('.kicad_sch')`
+    by the system under test."""
+    from tests.test_schematic_metadata import _MIN_SCH
     p = tmp_path / "test.kicad_pro"
     p.write_text(json.dumps({
         "net_settings": {
             "netclass_patterns": patterns,
         },
     }))
+    sch = p.with_suffix(".kicad_sch")
+    sch.write_text(_MIN_SCH, encoding="utf-8")
     return p
+
+
+def _read_expected_from_singleton(pro: Path):
+    """Read the expected-patterns list from the .kicad_sch singleton."""
+    from commands.schematic_metadata import read_metadata_json
+    return read_metadata_json(pro.with_suffix(".kicad_sch"), MCP_EXPECTED_KEY)
 
 
 @pytest.mark.unit
@@ -46,20 +62,23 @@ class TestBootstrap:
         assert result["success"]
         assert result["bootstrapped"] is True
         assert result["drifted"] is False
-        data = json.loads(pro.read_text())
-        expected = data[MCP_EXPECTED_KEY]
+        # Expected set lives on the schematic singleton, not the .pro.
+        expected = _read_expected_from_singleton(pro)
         assert {(p["netclass"], p["pattern"]) for p in expected} == {
             ("POWER_4A", "BAT+"),
             ("POWER_4A", "BAT-"),
         }
+        # And the .kicad_pro must not have grown the singleton key.
+        assert MCP_EXPECTED_KEY not in json.loads(pro.read_text())
 
     def test_bootstrap_is_idempotent(self, tmp_path: Path):
         pro = _make_pro(tmp_path, [
             {"netclass": "POWER_4A", "pattern": "BAT+"},
         ])
-        assert bootstrap_expected_patterns(pro) is True
-        # Second call must NOT mutate the file (returns False).
-        assert bootstrap_expected_patterns(pro) is False
+        sch = pro.with_suffix(".kicad_sch")
+        assert bootstrap_expected_patterns(pro, sch) is True
+        # Second call must NOT mutate the singleton (returns False).
+        assert bootstrap_expected_patterns(pro, sch) is False
 
 
 @pytest.mark.unit

@@ -134,20 +134,32 @@ class TestPropagateRename:
 
 class TestConstraintVersionEnsure:
     def test_can_be_written_alongside_existing_keys(self, tmp_path: Path):
+        """Under #233 the version marker lives in the .kicad_sch's
+        Schematic_Metadata singleton, not the .kicad_pro. Verify the
+        .pro is untouched and the .sch singleton carries the key."""
         from commands.placement_constraints import (
             CONSTRAINT_VERSION,
             ensure_constraint_version,
             get_constraint_version,
         )
+        from commands import schematic_metadata as sm
+        from tests.test_schematic_metadata import _MIN_SCH
         import json
 
         proj = tmp_path / "test.kicad_pro"
         proj.write_text(json.dumps({"board": {"design_settings": {}}}))
+        sch = tmp_path / "test.kicad_sch"
+        sch.write_text(_MIN_SCH, encoding="utf-8")
 
         assert get_constraint_version(proj) is None
         assert ensure_constraint_version(proj) is True
         assert get_constraint_version(proj) == CONSTRAINT_VERSION
 
+        # .kicad_pro untouched — singleton is canonical.
         data = json.loads(proj.read_text())
-        assert data["board"]["design_settings"] == {}
-        assert data["mcp_constraint_version"] == CONSTRAINT_VERSION
+        assert data == {"board": {"design_settings": {}}}
+        assert "mcp_constraint_version" not in data
+
+        # Singleton carries the version.
+        md = sm.read_metadata(sch)
+        assert md.get("mcp_constraint_version") == str(CONSTRAINT_VERSION)

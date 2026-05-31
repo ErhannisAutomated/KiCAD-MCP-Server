@@ -1,8 +1,9 @@
 """Unit tests for placement-constraint primitives.
 
-Covers anchor parsing, rename propagation rewriting, .kicad_pro
-version-marker management, and ground-net classification. These are
-pure-Python tests; no pcbnew needed.
+Covers anchor parsing, rename propagation rewriting,
+Schematic_Metadata singleton version-marker management, and
+ground-net classification. These are pure-Python tests; no pcbnew
+needed.
 """
 
 from __future__ import annotations
@@ -109,30 +110,60 @@ class TestRewriteAnchorValue:
 
 
 class TestConstraintVersion:
+    """As of #233, the canonical store for `mcp_constraint_version`
+    is the Schematic_Metadata singleton in the .kicad_sch — the
+    .kicad_pro path is just sugar that resolves to its sibling .sch.
+    Tests therefore work against a real .kicad_sch fixture."""
+
+    # Reuse the minimal-schematic fixture from test_schematic_metadata
+    # rather than duplicating it. Imported lazily to keep this test
+    # module's top-level imports unchanged.
+    @staticmethod
+    def _write_sch(tmp_path: Path, name: str = "p") -> Path:
+        from tests.test_schematic_metadata import _MIN_SCH
+        sch = tmp_path / f"{name}.kicad_sch"
+        sch.write_text(_MIN_SCH, encoding="utf-8")
+        return sch
+
     def test_round_trip(self, tmp_path: Path):
+        sch = self._write_sch(tmp_path)
         proj = tmp_path / "p.kicad_pro"
         proj.write_text(json.dumps({"foo": "bar"}))
 
+        # Accepts either .kicad_sch or .kicad_pro (sugar — maps to
+        # the .sch sibling under the hood).
         assert get_constraint_version(proj) is None
         assert ensure_constraint_version(proj) is True
         assert get_constraint_version(proj) == CONSTRAINT_VERSION
 
-        # Second call is a no-op (file not rewritten).
+        # Second call is a no-op (singleton already at the version).
         assert ensure_constraint_version(proj) is False
-        # Other keys preserved.
-        data = json.loads(proj.read_text())
-        assert data["foo"] == "bar"
-        assert data["mcp_constraint_version"] == CONSTRAINT_VERSION
 
-    def test_missing_file(self, tmp_path: Path):
+        # The .kicad_pro is untouched — the singleton owns the key.
+        data = json.loads(proj.read_text())
+        assert data == {"foo": "bar"}
+        assert "mcp_constraint_version" not in data
+
+        # The singleton in the .kicad_sch carries the value.
+        from commands import schematic_metadata as sm
+        md = sm.read_metadata(sch)
+        assert md.get("mcp_constraint_version") == str(CONSTRAINT_VERSION)
+
+    def test_missing_sch(self, tmp_path: Path):
+        # No .kicad_sch sibling — both helpers gracefully no-op.
         assert get_constraint_version(tmp_path / "missing.kicad_pro") is None
         assert ensure_constraint_version(tmp_path / "missing.kicad_pro") is False
 
-    def test_corrupt_json(self, tmp_path: Path):
-        proj = tmp_path / "p.kicad_pro"
-        proj.write_text("{not valid json")
-        assert get_constraint_version(proj) is None
-        assert ensure_constraint_version(proj) is False
+    def test_corrupt_sch(self, tmp_path: Path):
+        sch = tmp_path / "p.kicad_sch"
+        sch.write_text("(not valid s-expression")
+        assert get_constraint_version(sch) is None
+        # ensure_ may write a fresh singleton or fail — either is fine,
+        # just don't crash on corrupt input.
+        try:
+            ensure_constraint_version(sch)
+        except Exception as e:
+            pytest.fail(f"corrupt sch should not raise: {e}")
 
 
 class TestIsGnd:

@@ -48,21 +48,33 @@ class TestPlatformDetection:
 class TestPathGeneration:
     """Test path generation functions"""
 
-    def test_config_dir_exists_after_ensure(self):
+    @pytest.fixture()
+    def _sandboxed_user_dirs(self, tmp_path, monkeypatch):
+        """Redirect platform-helper user dirs into tmp_path. Without
+        this, ensure_directories() tries to mkdir under the real
+        ~/.config and ~/.cache, which a sandboxed test environment
+        may have mounted read-only."""
+        cfg = tmp_path / "config"
+        cache = tmp_path / "cache"
+        monkeypatch.setenv("XDG_CONFIG_HOME", str(cfg))
+        monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+        return tmp_path
+
+    def test_config_dir_exists_after_ensure(self, _sandboxed_user_dirs):
         """Test that config directory is created"""
         PlatformHelper.ensure_directories()
         config_dir = PlatformHelper.get_config_dir()
         assert config_dir.exists(), f"Config dir should exist: {config_dir}"
         assert config_dir.is_dir(), f"Config dir should be a directory: {config_dir}"
 
-    def test_log_dir_exists_after_ensure(self):
+    def test_log_dir_exists_after_ensure(self, _sandboxed_user_dirs):
         """Test that log directory is created"""
         PlatformHelper.ensure_directories()
         log_dir = PlatformHelper.get_log_dir()
         assert log_dir.exists(), f"Log dir should exist: {log_dir}"
         assert log_dir.is_dir(), f"Log dir should be a directory: {log_dir}"
 
-    def test_cache_dir_exists_after_ensure(self):
+    def test_cache_dir_exists_after_ensure(self, _sandboxed_user_dirs):
         """Test that cache directory is created"""
         PlatformHelper.ensure_directories()
         cache_dir = PlatformHelper.get_cache_dir()
