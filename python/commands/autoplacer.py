@@ -327,12 +327,19 @@ class Params:
     # (KiCad convention); 45 for finer steps.
     rotation_snap_period: float = 90.0
     # Lever-arm torque scale: T = (r × F) × pinwise_torque_k where
-    # r is the offset from component center to the pin a spring acts on.
-    # Falls out of pin-wise spring forces — without it, off-center
-    # forces don't rotate components.  Gated on use_spring_classes so
-    # the schematic flow keeps its angle-based pin-orientation torque
-    # without a second mechanism stacking on top.
-    pinwise_torque_k: float = 0.05
+    # r is the offset from component center to the pin a spring acts
+    # on. Falls out of pin-wise spring forces — without it, off-center
+    # forces don't rotate components.
+    #
+    # Unified across schematic + PCB (#194): the only gate is
+    # ``pinwise_torque_k != 0.0``. Default 0.0 (off) preserves the
+    # historical schematic behavior, which relies on the angle-based
+    # ``_torque_for_pin_orientation`` for rotation. PCB schedules set
+    # 1.0 to enable the lever-arm physics. Schematic users can opt in
+    # — when stacked with the angle-based torque, the two combine
+    # additively (lever-arm rotates based on where springs pull,
+    # angle-based on where the pin "wants" to point).
+    pinwise_torque_k: float = 0.0
     # If False, springs are skipped for pads on different copper layers
     # (F.Cu vs B.Cu).  Useful when an anchored back-side footprint
     # like a cell holder shouldn't pull front-side parts onto its pads
@@ -1308,7 +1315,7 @@ def _compute_total_force_on(
                 sfx += afx
                 sfy += afy
                 spring_count += 1
-                if p.use_spring_classes and p.pinwise_torque_k != 0.0:
+                if p.pinwise_torque_k != 0.0:
                     pa = c.world_pin_xy(pin_a)
                     if pa is not None:
                         rax, ray = pa[0] - c.x, pa[1] - c.y
@@ -1485,11 +1492,13 @@ def iterate(sess: Session, n: int = 1) -> Dict[str, Any]:
                     # the component CCW visually (= positive c.rotation
                     # increment, matching KiCad).
                     #
-                    # Gated on use_spring_classes so the schematic flow
-                    # keeps its existing angle-based pin-orientation
-                    # torque mechanism.
+                    # Unified across schematic + PCB (#194): the only
+                    # gate is ``pinwise_torque_k != 0.0``. Schematic
+                    # flow keeps its default 0.0 (preserves the
+                    # historical angle-based torque-only behavior);
+                    # schematic users can opt in by raising the knob.
                     t_a = t_b = 0.0
-                    if p.use_spring_classes and p.pinwise_torque_k != 0.0:
+                    if p.pinwise_torque_k != 0.0:
                         pa = a.world_pin_xy(pin_a)
                         pb = b.world_pin_xy(pin_b)
                         if pa is not None and pb is not None:

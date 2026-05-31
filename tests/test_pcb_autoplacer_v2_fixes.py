@@ -5,8 +5,9 @@
   rotation, causing rotated footprints to display with their bbox
   visually perpendicular to their pins).
 * ``cross_layer_springs=False`` skips F.Cu↔B.Cu spring forces.
-* Pin-wise springs produce lever-arm torque under
-  ``use_spring_classes`` + ``pinwise_torque_k > 0``.
+* Pin-wise springs produce lever-arm torque whenever
+  ``pinwise_torque_k > 0`` (unified across schematic + PCB per #194 —
+  the historical ``use_spring_classes`` gate has been removed).
 * ``obb_separation`` axis tie-break is stable: when two separating
   axes have equal gaps, the one most aligned with the center-to-center
   direction wins so micro-drift can't flip the force direction.
@@ -196,9 +197,11 @@ class TestLeverArmTorque:
             f"got rotation={rot:.1f}° (closer to 45° = the sign-bug equilibrium)"
         )
 
-    def test_no_torque_when_flag_off(self):
-        """Without use_spring_classes, lever-arm torque is skipped
-        (schematic flow keeps its existing angle-based torque)."""
+    def test_no_torque_when_pinwise_k_zero(self):
+        """When ``pinwise_torque_k=0`` lever-arm torque is skipped — the
+        only gate post-#194 (was previously also gated on
+        ``use_spring_classes``).
+        """
         from commands.autoplacer import (
             Component, Net, Pin, Session, iterate,
         )
@@ -224,8 +227,8 @@ class TestLeverArmTorque:
         sess.nets["SIG"] = Net(name="SIG", pins=[(a.key, "1"), (b.key, "1")])
 
         p = sess.params
-        p.use_spring_classes = False    # ← flag OFF
-        p.pinwise_torque_k = 1.0
+        p.use_spring_classes = False
+        p.pinwise_torque_k = 0.0  # ← the gate that disables lever-arm
         p.attraction_k = 0.1
         p.repulsion_k = 0.0
         p.boundary_k = 0.0
@@ -236,9 +239,64 @@ class TestLeverArmTorque:
 
         before_rot = a.rotation
         iterate(sess, n=1)
-        # No lever-arm torque should apply.  The schematic _torque_for_pin_orientation
-        # also returns ~0 because rotation_k=0.
+        # No lever-arm torque applies; angle-based torque also off
+        # because rotation_k=0.
         assert abs(a.rotation - before_rot) < 0.01
+
+    def test_lever_arm_fires_without_spring_classes(self):
+        """#194: lever-arm torque now fires whenever
+        ``pinwise_torque_k > 0``, regardless of ``use_spring_classes``.
+        Previously schematic (use_spring_classes=False) was silently
+        excluded; the unified gate makes the schematic flow opt-in
+        explicitly by raising the knob.
+        """
+        from commands.autoplacer import (
+            Component, Net, Pin, Session, iterate,
+        )
+        sess = Session(schematic_path=Path("/tmp/none.kicad_sch"))
+        # Pin offset on A is +y by 2.0; pin on B is at its center.
+        # An attractive force pulling A's pin toward B (+x direction)
+        # combined with the +y lever arm produces a CCW torque.
+        a = Component(
+            ref="A", unit=1, lib_id="x:y",
+            x=0.0, y=0.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=2.0, bbox_h=2.0,
+        )
+        a.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=2.0,
+                           lib_angle=0.0)
+        sess.components[a.key] = a
+        b = Component(
+            ref="B", unit=1, lib_id="x:y",
+            x=10.0, y=0.0, rotation=0.0,
+            mirror_x=False, mirror_y=False,
+            bbox_w=2.0, bbox_h=2.0, pinned=True,
+        )
+        b.pins["1"] = Pin(number="1", name="", local_x=0.0, local_y=0.0,
+                           lib_angle=0.0)
+        sess.components[b.key] = b
+        sess.nets["SIG"] = Net(name="SIG", pins=[(a.key, "1"), (b.key, "1")])
+
+        p = sess.params
+        p.use_spring_classes = False  # schematic-style flow
+        p.pinwise_torque_k = 1.0      # opt in to lever-arm
+        p.attraction_k = 0.1
+        p.repulsion_k = 0.0
+        p.boundary_k = 0.0
+        p.polarity_k = 0.0
+        p.polarity_torque_k = 0.0
+        p.rotation_k = 0.0            # disable angle-based torque to isolate
+        sess.temperature = 0.01
+
+        before_rot = a.rotation
+        iterate(sess, n=1)
+        # Lever-arm torque should now rotate A.  Sign depends on the
+        # screen-Y-down convention (see comments in iterate around the
+        # cross-product); what matters is |Δrotation| > 0.
+        assert abs(a.rotation - before_rot) > 0.0, (
+            "Lever-arm torque should fire when pinwise_torque_k=1.0 "
+            "even with use_spring_classes=False (#194 unification)."
+        )
 
 
 def _build_overshoot_session(*, force_step_damping: float):
