@@ -580,7 +580,42 @@ Create a new net class with custom design rules.
 
 ---
 
-## Trace Operations (3 tools)
+## Trace Operations (4 tools)
+
+### scrub_region
+
+Region-scoped copper cleanup after a re-placement (`relax_placement`) or
+incremental re-route. Given target components, computes a per-layer convex
+hull of their footprints and deletes copper that is either (a) on a
+**target-only net** (every pad on the net belongs to a target) — anywhere,
+any layer; or (b) on a **shared net** (touches a target AND a non-target) —
+only inside the hull. A recursive **dead-end prune** then sweeps anything
+left dangling. This is the geometric scope that net-name stripping
+(`autoroute(nets=…)`'s clear step) lacks: it removes the charger's slice of
+USB_VBUS without nuking the whole rail.
+
+**Dry-run by default.** Returns an authoritative kill-list (each item tagged
+with a reason code — `target-only-net` / `endpoint-in-hull` /
+`intersects-hull` / `in-hull` / `dead-end-prune`), interlopers
+(non-targets inside the hull and their affected nets), flagged-but-spared
+items, a debug viz PNG path, and **`nowOpenNets`** to feed straight into
+`autoroute(nets=…)`. Pass `dryRun=false` to delete.
+
+Margin is implemented as a *distance threshold* (point-to-hull distance ≤
+`marginMm`), not a polygon offset — so degenerate single-point / single-edge
+hulls work naturally. Toggles: `layers` (default `["F.Cu","B.Cu"]`, which
+keeps inner power pours out of scope), `marginMm` (default 1.0),
+`affectTracks` / `affectVias` / `affectZones`, `intersectHull` (opt-in
+segment-crosses-hull for tracks), `pruneDeadEnds` (default true). Deletions
+use `RemoveNative` (SWIG-corruption-safe).
+
+**Pipeline:** `relax_placement` → `scrub_region(dryRun=true)` (inspect
+kill-list + viz) → snapshot/commit board → `scrub_region(dryRun=false)` →
+`autoroute(nets=nowOpenNets)` → `refill_zones` + `via_orphan_pads` →
+`run_drc`. See `docs/SCRUB_REGION_PLAN.md` for the full design rationale.
+
+Live-validated on the power_module charger: 11 shorts → 0; every charger
+DRC error mapped to a kill-list item before commit.
 
 ### delete_trace
 

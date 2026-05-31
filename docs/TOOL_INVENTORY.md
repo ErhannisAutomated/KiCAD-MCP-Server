@@ -1,8 +1,8 @@
 # KiCAD MCP Server - Complete Tool Inventory
 
 **Version:** 2.2.0-alpha
-**Total Tools:** 140
-**Last Updated:** 2026-05-06
+**Total Tools:** 141
+**Last Updated:** 2026-05-31
 
 ## How Tools Are Organized
 
@@ -109,6 +109,7 @@ _Source: `src/tools/routing.ts`_
 | `get_schematic_metadata`  | Read project-wide MCP metadata from the Schematic_Metadata singleton (#230) | Additional |
 | `set_schematic_metadata`  | Write a project-wide MCP metadata key on the Schematic_Metadata singleton; creates on first call (#230, #232) | Additional |
 | `dedupe_traces`           | Remove duplicate tracks / vias (e.g. autoroute reimports) | Additional   |
+| `scrub_region`            | Region-scoped copper cleanup after re-placement / incremental re-route — convex-hull + target-only / shared-net rule + dead-end prune; dry-run by default; returns reason-coded kill-list + nowOpenNets + viz (#251). See [SCRUB_REGION_PLAN](SCRUB_REGION_PLAN.md). | Additional |
 | `copy_routing_pattern`    | Copy routing from source to target component groups  | Additional       |
 
 ---
