@@ -580,6 +580,155 @@ Create a new net class with custom design rules.
 
 ---
 
+## Routing Topology Analysis (5 tools)
+
+Read-only tools that answer "is this *geometrically* routable, and where's
+the bottleneck?" *before* you call the autorouter and wait minutes for it
+to fail. Both compute the trace-width configuration space directly:
+
+```
+free_space(layer, W, C) = board_area \ (foreign_copper(layer) ⊕ disk(W/2 + C))
+```
+
+— rasterized at `resolutionMm` (default 0.05 mm = ¼ of a 0.2 mm signal
+trace). Pairs naturally with `analyze_congestion` (placement-stage density
+heatmap) and the post-failure obstacle dumps that `route_pad_to_pad` /
+`find_via_lane` produce. See `docs/TOPOLOGY_TOOLS_PLAN.md` for the full
+design.
+
+### analyze_routable_regions
+
+Partition a copper layer into the free-space components a trace of
+`widthMm` could occupy. Returns each component's area, bbox, and the pads
+bordering it, plus any pads whose own escape lane can't fit the trace at
+this width (the QFN-internal-escape diagnostic). With `net` set, that net's
+own copper is excluded from the obstacle set so its pads anchor into the
+regions they actually border. With `net` omitted, ALL copper is obstacle
+— the layer-wide free-corridor map.
+
+| Parameter         | Type    | Required | Default | Description |
+| ----------------- | ------- | -------- | ------- | ----------- |
+| layer             | string  | Yes      | —       | `"F.Cu"` / `"B.Cu"` / `"In1.Cu"` etc. |
+| widthMm           | number  | Yes      | —       | Trace width whose configuration space is being analyzed. |
+| clearanceMm       | number  | No       | netclass | Clearance to foreign copper. |
+| net               | string  | No       | none    | Per-net mode: exclude this net's own copper from the obstacle set. |
+| resolutionMm      | number  | No       | 0.05    | Grid step. Use ≤ widthMm/4 for stable answers. |
+| convergenceCheck  | boolean | No       | false   | Also run at g/2 and compare component counts. Use this to confirm grid-independence. |
+| boardPath         | string  | No       | current | Load a specific .kicad_pcb. |
+
+**Returns:** `componentCount`, `regions[]` (`areaMm2`, `bbox`, `pads[]`),
+`padsWithoutEscape[]`, optional `convergence` block.
+
+**Two pads on the same net are routable on this layer iff they fall in
+the same component.** That's the binary go/no-go answer the freerouter
+can't give you without a multi-minute solve.
+
+### check_pad_routability
+
+Per-pair version of `analyze_routable_regions`: are these two pads in the
+same component at `widthMm`, and what's the bottleneck along the path?
+Returns `{reachable, bottleneckWidthMm, pathXy[]}`. Reasons when
+unreachable: `pads_on_different_nets`, `different_components` (corridor
+between them too tight at this width — the placement or netclass is the
+cause, not the router), `from_pad_no_escape` / `to_pad_no_escape` (the
+pad's own escape lane is the problem).
+
+| Parameter         | Type    | Required | Default | Description |
+| ----------------- | ------- | -------- | ------- | ----------- |
+| fromRef           | string  | Yes      | —       | Source component reference. |
+| fromPad           | string  | Yes      | —       | Source pad number. |
+| toRef             | string  | Yes      | —       | Destination component reference. |
+| toPad             | string  | Yes      | —       | Destination pad number. |
+| layer             | string  | Yes      | —       | Copper layer. |
+| widthMm           | number  | Yes      | —       | Trace width to test. |
+| clearanceMm       | number  | No       | netclass | Override clearance. |
+| resolutionMm      | number  | No       | 0.05    | Grid step. |
+| convergenceCheck  | boolean | No       | false   | Re-run at g/2 and compare. |
+| boardPath         | string  | No       | current | Load a specific board. |
+
+`bottleneckWidthMm` is the maximum trace width that still fits at the
+tightest point along the BFS path through the free-space raster. Use it
+to back off the netclass width or pick a wider-tolerant route. `pathXy`
+is for visualisation only — the freerouter still picks the exact geometry.
+
+**Workflow:** placement → `analyze_routable_regions(layer, width)` →
+inspect components / unrouted-pads → fix placement → re-analyze →
+`autoroute`. Catches "geometrically impossible at this netclass width"
+before the long autoroute run.
+
+### max_width_between
+
+Widest single trace that still leaves two pads in the same free-space
+component on `layer`. Binary search on the same rasterized obstacle
+field used by `check_pad_routability` (one EDT, ~10 component-label
+probes — typically faster than 10 freerouting attempts). Read-only.
+
+| Parameter         | Type    | Required | Default | Description |
+| ----------------- | ------- | -------- | ------- | ----------- |
+| fromRef/fromPad   | string  | Yes      | —       | Source pad. |
+| toRef/toPad       | string  | Yes      | —       | Destination pad. |
+| layer             | string  | Yes      | —       | Copper layer. |
+| clearanceMm       | number  | No       | netclass | Override clearance. |
+| resolutionMm      | number  | No       | 0.05    | Grid step. |
+| widthToleranceMm  | number  | No       | 2×g     | Binary-search tolerance. Sub-grid answers are noise. |
+| upperBoundMm      | number  | No       | derived | Skip the preflight by passing the search ceiling explicitly. |
+| boardPath         | string  | No       | current | Load a specific board. |
+
+**Returns:** `maxWidthMm` plus `iterations`, `upperBoundMm`,
+`searchToleranceMm`. Reasons when unreachable: `pads_on_different_nets`,
+`different_components` (the obstacle field separates the pads at any
+positive width — the placement, not the netclass, is the cause).
+
+This is the **max-bottleneck path** width, not the shortest-path
+bottleneck reported by `check_pad_routability`. The two metrics differ
+when a longer, wider corridor exists alongside a shorter, narrower one.
+
+### max_parallel_traces
+
+How many parallel traces of `widthMm` (each with its own clearance
+margin) fit through the **widest** corridor between two pads? Computes
+`floor(maxCorridorWidthMm / (widthMm + 2 × clearanceMm))`, where
+`maxCorridorWidthMm` comes from `max_width_between` (not the shortest
+path's bottleneck — see the rationale above). Read-only.
+
+| Parameter      | Type    | Required | Default | Description |
+| -------------- | ------- | -------- | ------- | ----------- |
+| fromRef/fromPad| string  | Yes      | —       | Source pad. |
+| toRef/toPad    | string  | Yes      | —       | Destination pad. |
+| layer          | string  | Yes      | —       | Copper layer. |
+| widthMm        | number  | Yes      | —       | Per-trace width. |
+| clearanceMm    | number  | No       | netclass | Override clearance. |
+| resolutionMm   | number  | No       | 0.05    | Grid step. |
+| boardPath      | string  | No       | current | Load a specific board. |
+
+**Returns:** `maxParallelTraces`, `pitchMm` (= W + 2C),
+`maxCorridorWidthMm`. Use it to size a bus ("can I run all 5 SPI
+signals through this gap?") before committing to a placement.
+
+### routability_heatmap
+
+Geodesic-distance heatmap from a source pad: where can a trace of
+`widthMm` reach on `layer`, and how far? Bright = far reachable;
+black/NaN = unreachable enclave or obstacle. Writes a PNG to
+`/tmp/claude-1000` (or `outputPath`). Read-only. Use this to **see**
+the shape of the reachable region when `check_pad_routability` reports
+`different_components` — the gap in the heatmap is exactly the corridor
+that's too tight. Falls back to a numeric summary if matplotlib isn't
+importable.
+
+| Parameter      | Type    | Required | Default | Description |
+| -------------- | ------- | -------- | ------- | ----------- |
+| fromRef/fromPad| string  | Yes      | —       | Source pad. |
+| layer          | string  | Yes      | —       | Copper layer. |
+| widthMm        | number  | Yes      | —       | Trace width. |
+| clearanceMm    | number  | No       | netclass | Override clearance. |
+| resolutionMm   | number  | No       | 0.05    | Grid step = pixel size. |
+| outputPath     | string  | No       | derived | Explicit PNG path. |
+| boardPath      | string  | No       | current | Load a specific board. |
+
+**Returns:** `vizPath`, `reachableAreaMm2`, `maxReachMm`, the source
+pad's xy in mm.
+
 ## Trace Operations (4 tools)
 
 ### scrub_region

@@ -1,6 +1,13 @@
 # Routing Topology Tools — Design Plan
 
-Status: **planned** (no task ID yet). Branch: `develop` when started.
+Status: **Phases 1+2 implemented** on `develop` (2026-05-31). Phases 3–4
+still planned. Implementation lives in `python/commands/topology.py`;
+TS bindings in `src/tools/placement.ts`. See `## Effort` for the phase
+table. Phase 2 picks the *max-bottleneck* path for
+`max_width_between` / `max_parallel_traces`, not the shortest-path
+bottleneck (the engineering question is "where could I route the bus
+to get the widest gap?", not "what's the worst squeeze on the
+straightest route?").
 
 ## Problem
 
@@ -169,15 +176,55 @@ quantization), but slower on dense boards. Worth it for the final
 ## Effort
 
 - **Phase 1 — core primitive + region enum:** rasterize + erode + label,
-  expose `analyze_routable_regions` and `check_pad_routability`. ~2 sessions.
-- **Phase 2 — medial axis + bottleneck + max-width binary search +
-  reachability heatmap:** built on the same data. ~1 session.
+  expose `analyze_routable_regions` and `check_pad_routability`.
+  **Shipped 2026-05-31** on `develop`.
+- **Phase 2 — max-width binary search + parallel-trace count +
+  reachability heatmap:** built on the same data. **Shipped 2026-05-31**
+  on `develop`. (Medial-axis graph deferred; the EDT-threshold +
+  connected-components approach turned out to be enough for the Phase 2
+  questions and avoids a scikit-image dependency. If we need
+  `count_distinct_paths` in Phase 3, medial axis comes back.)
 - **Phase 3 — via bridges + multi-layer routability + `routability_report`:**
   meta-graph construction. ~1 session.
 - **Phase 4 — polygon-exact mode + integration with existing tools' failure
   messages + `pre_route_audit`:** plumbing. ~1-2 sessions.
 
 Total: ~5-7 sessions for a useful first cut with rich integration.
+
+### How to resume Phase 3
+
+Entry point for the next session: implement multi-layer routability via
+a **per-via meta-graph**. The Phase 1 EDT already exists per-layer;
+Phase 3 needs to *bridge* per-layer free spaces wherever a via could
+land.
+
+Concrete first move:
+1. In `python/commands/topology.py`, lift the per-layer
+   `_compute_obstacle_state` call into a loop over all copper layers,
+   so the per-layer EDT cache is built once for a multi-layer query.
+2. Build a via-candidacy predicate: a pixel `(x, y)` on layer pair
+   `(L1, L2)` admits a via iff a disk of `viaSize/2 + clearance` at
+   that point fits the free-space of **both** layers. That's two
+   EDT-threshold checks AND-ed together — same primitive as the rest of
+   the module, just intersected across layers.
+3. The meta-graph: per-layer connected components (already from
+   `scipy_label`), plus one undirected edge between two components
+   whenever the via-candidacy mask intersects both. Union-find on the
+   resulting graph answers "are these pads connected across all layers
+   the trace could traverse?".
+4. Public surface: `check_pad_routability_multilayer(fromPad, toPad,
+   widthMm, viaSize, ...)` and `routability_report(widthMmDefault,
+   viaSize)` for the all-ratlines feasibility matrix.
+
+Pour handling is the trickiest sub-task — pre-zone-fill state is what
+the analysis sees, but the user routes against the post-fill state.
+Mitigation discussed in "Pour fill-time uncertainty" above (run queries
+both ways and warn on divergence).
+
+Phase 2 surfaced one bug worth remembering: the free-space mask must
+exclude obstacles (`(dist_px >= radius_px) & (~mask)`) to handle the
+W=C=0 degenerate case correctly. Phase 3's via-candidacy mask has the
+same structure — apply the same correction up-front.
 
 ## Comparison vs. freerouting fork
 

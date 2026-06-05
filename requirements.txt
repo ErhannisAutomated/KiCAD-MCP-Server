@@ -30,3 +30,8 @@ python-dotenv>=1.0.0
 # required for the MCP server itself.  Lazy-imported at viz instantiation
 # so non-viz callers don't pay the load cost.
 matplotlib>=3.7
+
+# Routing-topology analysis (commands/topology.py): distance transform +
+# connected-components labelling for analyze_routable_regions /
+# check_pad_routability. Pulls numpy as a transitive dep.
+scipy>=1.11

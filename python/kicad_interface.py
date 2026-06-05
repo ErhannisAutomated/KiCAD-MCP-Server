@@ -497,6 +497,12 @@ class KiCADInterface:
             "check_freerouting": self.freerouting_commands.check_freerouting,
             # Region-scoped copper cleanup
             "scrub_region": self.scrub_region_commands.scrub_region,
+            # Routing-topology analysis (Phases 1+2 of TOPOLOGY_TOOLS_PLAN)
+            "analyze_routable_regions": self._handle_analyze_routable_regions,
+            "check_pad_routability": self._handle_check_pad_routability,
+            "max_width_between": self._handle_max_width_between,
+            "max_parallel_traces": self._handle_max_parallel_traces,
+            "routability_heatmap": self._handle_routability_heatmap,
         }
 
         logger.info(f"KiCAD interface initialized (backend: {'IPC' if self.use_ipc else 'SWIG'})")
@@ -6690,6 +6696,265 @@ print("ok")
             )
         except Exception as e:
             logger.error(f"Error in analyze_congestion: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_analyze_routable_regions(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Connected components of free space on a layer at a given trace
+        width — Phase 1 of TOPOLOGY_TOOLS_PLAN.md. Pure analysis; never
+        mutates the board.
+
+        Required: ``layer`` (e.g. ``"F.Cu"``), ``widthMm``.
+        Optional: ``clearanceMm`` (default = netclass / design default),
+        ``net`` (per-net analysis; default = treat all copper as obstacle),
+        ``resolutionMm`` (grid step; default 0.05 mm),
+        ``convergenceCheck`` (rerun at g/2 and compare; default false),
+        ``boardPath`` (load a specific board; default = currently loaded).
+        """
+        logger.info("Running analyze_routable_regions")
+        try:
+            from commands.topology import analyze_routable_regions
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+
+            layer = params.get("layer")
+            width_mm = params.get("widthMm")
+            if not layer or width_mm is None:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": "layer and widthMm are required",
+                }
+
+            return analyze_routable_regions(
+                board,
+                layer=layer,
+                width_mm=float(width_mm),
+                clearance_mm=(
+                    float(params["clearanceMm"]) if params.get("clearanceMm") is not None else None
+                ),
+                net=params.get("net"),
+                resolution_mm=float(params.get("resolutionMm", 0.05)),
+                convergence_check=bool(params.get("convergenceCheck", False)),
+            )
+        except Exception as e:
+            logger.error(f"Error in analyze_routable_regions: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_check_pad_routability(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Are two pads in the same free-space component at a given trace
+        width? If yes, what's the bottleneck along the path? Phase 1 of
+        TOPOLOGY_TOOLS_PLAN.md. Pure analysis; never mutates the board.
+
+        Required: ``fromRef``, ``fromPad``, ``toRef``, ``toPad``, ``layer``,
+        ``widthMm``.
+        Optional: ``clearanceMm``, ``resolutionMm``, ``convergenceCheck``,
+        ``boardPath``.
+        """
+        logger.info("Running check_pad_routability")
+        try:
+            from commands.topology import check_pad_routability
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+
+            required = ["fromRef", "fromPad", "toRef", "toPad", "layer", "widthMm"]
+            missing = [k for k in required if params.get(k) is None]
+            if missing:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": f"Required: {', '.join(missing)}",
+                }
+
+            return check_pad_routability(
+                board,
+                from_ref=str(params["fromRef"]),
+                from_pad=str(params["fromPad"]),
+                to_ref=str(params["toRef"]),
+                to_pad=str(params["toPad"]),
+                layer=str(params["layer"]),
+                width_mm=float(params["widthMm"]),
+                clearance_mm=(
+                    float(params["clearanceMm"]) if params.get("clearanceMm") is not None else None
+                ),
+                resolution_mm=float(params.get("resolutionMm", 0.05)),
+                convergence_check=bool(params.get("convergenceCheck", False)),
+            )
+        except Exception as e:
+            logger.error(f"Error in check_pad_routability: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_max_width_between(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Binary-search the widest trace that still leaves the two pads
+        in the same free-space component on `layer`. Phase 2 of
+        TOPOLOGY_TOOLS_PLAN.md. Read-only.
+
+        Required: ``fromRef``, ``fromPad``, ``toRef``, ``toPad``, ``layer``.
+        Optional: ``clearanceMm``, ``resolutionMm``, ``widthToleranceMm``,
+        ``upperBoundMm``, ``boardPath``.
+        """
+        logger.info("Running max_width_between")
+        try:
+            from commands.topology import max_width_between
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+            required = ["fromRef", "fromPad", "toRef", "toPad", "layer"]
+            missing = [k for k in required if params.get(k) is None]
+            if missing:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": f"Required: {', '.join(missing)}",
+                }
+            return max_width_between(
+                board,
+                from_ref=str(params["fromRef"]),
+                from_pad=str(params["fromPad"]),
+                to_ref=str(params["toRef"]),
+                to_pad=str(params["toPad"]),
+                layer=str(params["layer"]),
+                clearance_mm=(
+                    float(params["clearanceMm"]) if params.get("clearanceMm") is not None else None
+                ),
+                resolution_mm=float(params.get("resolutionMm", 0.05)),
+                width_tolerance_mm=(
+                    float(params["widthToleranceMm"])
+                    if params.get("widthToleranceMm") is not None else None
+                ),
+                upper_bound_mm=(
+                    float(params["upperBoundMm"])
+                    if params.get("upperBoundMm") is not None else None
+                ),
+            )
+        except Exception as e:
+            logger.error(f"Error in max_width_between: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_max_parallel_traces(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """How many parallel traces of `widthMm` fit through the
+        bottleneck of the BFS path between two pads at that width?
+        Phase 2 of TOPOLOGY_TOOLS_PLAN.md. Read-only.
+
+        Required: ``fromRef``, ``fromPad``, ``toRef``, ``toPad``, ``layer``,
+        ``widthMm``.
+        Optional: ``clearanceMm``, ``resolutionMm``, ``boardPath``.
+        """
+        logger.info("Running max_parallel_traces")
+        try:
+            from commands.topology import max_parallel_traces
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+            required = ["fromRef", "fromPad", "toRef", "toPad", "layer", "widthMm"]
+            missing = [k for k in required if params.get(k) is None]
+            if missing:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": f"Required: {', '.join(missing)}",
+                }
+            return max_parallel_traces(
+                board,
+                from_ref=str(params["fromRef"]),
+                from_pad=str(params["fromPad"]),
+                to_ref=str(params["toRef"]),
+                to_pad=str(params["toPad"]),
+                layer=str(params["layer"]),
+                width_mm=float(params["widthMm"]),
+                clearance_mm=(
+                    float(params["clearanceMm"]) if params.get("clearanceMm") is not None else None
+                ),
+                resolution_mm=float(params.get("resolutionMm", 0.05)),
+            )
+        except Exception as e:
+            logger.error(f"Error in max_parallel_traces: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_routability_heatmap(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Geodesic-distance PNG visualisation of where a trace of
+        ``widthMm`` can reach from a source pad on `layer`. Phase 2 of
+        TOPOLOGY_TOOLS_PLAN.md. Read-only; writes a PNG to
+        ``/tmp/claude-1000`` (or ``outputPath``).
+
+        Required: ``fromRef``, ``fromPad``, ``layer``, ``widthMm``.
+        Optional: ``clearanceMm``, ``resolutionMm``, ``outputPath``,
+        ``boardPath``.
+        """
+        logger.info("Running routability_heatmap")
+        try:
+            from commands.topology import routability_heatmap
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+            required = ["fromRef", "fromPad", "layer", "widthMm"]
+            missing = [k for k in required if params.get(k) is None]
+            if missing:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": f"Required: {', '.join(missing)}",
+                }
+            return routability_heatmap(
+                board,
+                from_ref=str(params["fromRef"]),
+                from_pad=str(params["fromPad"]),
+                layer=str(params["layer"]),
+                width_mm=float(params["widthMm"]),
+                clearance_mm=(
+                    float(params["clearanceMm"]) if params.get("clearanceMm") is not None else None
+                ),
+                resolution_mm=float(params.get("resolutionMm", 0.05)),
+                output_path=params.get("outputPath"),
+            )
+        except Exception as e:
+            logger.error(f"Error in routability_heatmap: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
     def _handle_get_ratsnest(self, params: Dict[str, Any]) -> Dict[str, Any]:

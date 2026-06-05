@@ -188,6 +188,120 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
+  // analyze_routable_regions — Phase 1 of TOPOLOGY_TOOLS_PLAN.md
+  server.tool(
+    "analyze_routable_regions",
+    "Partition a copper layer into the free-space regions a trace of `widthMm` could occupy without violating clearance against foreign copper. Read-only analysis (rasterized at `resolutionMm`, default 0.05 mm = 1/4 of a 0.2 mm signal trace). Returns the list of connected components — each with area, bbox, and the pads bordering it — plus pads with no escape lane at this width (the QFN-internal-escape diagnostic). The free space formula is `board_area \\ (foreign_copper(layer) ⊕ disk(W/2 + C))`. Two pads on the same net are routable iff they fall in the same component. When `net` is set, that net's own copper is excluded from obstacles so its pads anchor into the regions they actually border; when `net` is omitted, ALL copper is obstacle (the layer's free corridors regardless of any specific net). Pairs with `check_pad_routability` for pair-wise queries and the existing `analyze_congestion` for placement diagnosis. Pass `convergenceCheck=true` to also run at half the grid step and confirm the component count is grid-independent.",
+    {
+      layer: z.string().describe("Copper layer (e.g. \"F.Cu\", \"B.Cu\", \"In1.Cu\")."),
+      widthMm: z.number().describe("Trace width in mm — the smallest trace whose centerline could live in the returned regions."),
+      clearanceMm: z.number().optional().describe("Clearance to foreign copper in mm. Default = net's netclass clearance, then board's design default, then 0."),
+      net: z.string().optional().describe("Per-net analysis: exclude this net's own copper from obstacles. When omitted, every net's copper is treated as obstacle (layer-wide free corridors)."),
+      resolutionMm: z.number().optional().describe("Grid step in mm (default 0.05 — 1/4 of a typical 0.2 mm signal trace). For a 100×100 mm board the default = 2000×2000 cells. Use a finer grid for the final go/no-go answer."),
+      convergenceCheck: z.boolean().optional().describe("Also run at half the grid step and compare component counts; agrees=true means grid-independent at this resolution. Default false."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("analyze_routable_regions", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  // check_pad_routability — Phase 1 of TOPOLOGY_TOOLS_PLAN.md
+  server.tool(
+    "check_pad_routability",
+    "Are these two pads geometrically reachable on `layer` at `widthMm`? Returns `{reachable, bottleneckWidthMm, pathXy[]}`. Read-only. Reasons when unreachable: `pads_on_different_nets`, `different_components` (the corridor between them is too tight for this trace width — the placement or netclass is the cause, not the router), `from_pad_no_escape` / `to_pad_no_escape` (the pad's own escape lane can't fit the trace, e.g. QFN-internal-escape). `bottleneckWidthMm` is the maximum trace width that still fits at the tightest point along the BFS path — use it to back off the netclass width or pick a wider-tolerant route. `pathXy` is the path through the free-space raster (visualisation only, NOT a routing suggestion — the freerouter still picks the exact geometry). Pairs with `analyze_routable_regions` for full-layer surveys. Pass `convergenceCheck=true` to also run at half the grid step and confirm the answer is stable.",
+    {
+      fromRef: z.string().describe("Source component reference (e.g. \"U3\")."),
+      fromPad: z.string().describe("Source pad number (e.g. \"4\")."),
+      toRef: z.string().describe("Destination component reference."),
+      toPad: z.string().describe("Destination pad number."),
+      layer: z.string().describe("Copper layer to check on (e.g. \"F.Cu\")."),
+      widthMm: z.number().describe("Trace width in mm."),
+      clearanceMm: z.number().optional().describe("Clearance to foreign copper in mm. Default = netclass clearance, then design default, then 0."),
+      resolutionMm: z.number().optional().describe("Grid step in mm (default 0.05). Finer = more accurate bottleneck width but slower."),
+      convergenceCheck: z.boolean().optional().describe("Also run at half the grid step and compare. Default false."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("check_pad_routability", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  // max_width_between — Phase 2 of TOPOLOGY_TOOLS_PLAN.md
+  server.tool(
+    "max_width_between",
+    "Widest trace that still leaves these two pads in the same free-space component on `layer`. Binary search on the same rasterized obstacle field used by `check_pad_routability` (single EDT, ~10 component-label probes — typically faster than 10 freerouting attempts). Read-only. Use this to pick a netclass width before laying out a high-current rail, or to ask \"how much margin do I have on this signal at the current placement?\". Returns `{reachable, maxWidthMm, iterations, upperBoundMm}` plus the existing `pads_on_different_nets` / `different_components` reason codes when the pads can't connect at any width. `searchToleranceMm` defaults to 2 × `resolutionMm` (sub-grid answers are noise).",
+    {
+      fromRef: z.string().describe("Source component reference."),
+      fromPad: z.string().describe("Source pad number."),
+      toRef: z.string().describe("Destination component reference."),
+      toPad: z.string().describe("Destination pad number."),
+      layer: z.string().describe("Copper layer (e.g. \"F.Cu\")."),
+      clearanceMm: z.number().optional().describe("Clearance to foreign copper. Default = netclass clearance, then design default, then 0."),
+      resolutionMm: z.number().optional().describe("Grid step in mm (default 0.05). Finer = more accurate max-width but slower."),
+      widthToleranceMm: z.number().optional().describe("Binary-search tolerance in mm. Default = 2 × resolutionMm."),
+      upperBoundMm: z.number().optional().describe("Skip the precomputation step by passing an explicit search ceiling in mm. Default = twice the max distance-to-obstacle on the layer."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("max_width_between", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  // max_parallel_traces — Phase 2 of TOPOLOGY_TOOLS_PLAN.md
+  server.tool(
+    "max_parallel_traces",
+    "How many parallel traces of `widthMm` (each with its netclass clearance) fit through the bottleneck along the path between these two pads? Computes `floor(bottleneckWidthMm / (widthMm + 2 × clearanceMm))`. Read-only. Use this to size a bus (\"can I run all 5 SPI signals through this gap?\") before committing to a placement. When the pads aren't reachable at the queried width, forwards the same reason codes as `check_pad_routability` (and reports `maxParallelTraces=0`).",
+    {
+      fromRef: z.string().describe("Source component reference."),
+      fromPad: z.string().describe("Source pad number."),
+      toRef: z.string().describe("Destination component reference."),
+      toPad: z.string().describe("Destination pad number."),
+      layer: z.string().describe("Copper layer."),
+      widthMm: z.number().describe("Per-trace width in mm."),
+      clearanceMm: z.number().optional().describe("Override clearance in mm. Default = netclass / design default."),
+      resolutionMm: z.number().optional().describe("Grid step in mm (default 0.05)."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("max_parallel_traces", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  // routability_heatmap — Phase 2 of TOPOLOGY_TOOLS_PLAN.md
+  server.tool(
+    "routability_heatmap",
+    "Render a geodesic-distance heatmap from a source pad: where can a trace of `widthMm` reach on `layer`, and how far? Bright = far reachable; black = unreachable (obstacle or different component). Writes a PNG to `/tmp/claude-1000` (or `outputPath`) and returns `{vizPath, reachableAreaMm2, maxReachMm}`. Read-only. Use this to *see* the shape of the reachable region when `check_pad_routability` reports `different_components` — the gap in the heatmap is exactly the corridor that's too tight. Falls back to a numeric summary if matplotlib isn't importable.",
+    {
+      fromRef: z.string().describe("Source component reference."),
+      fromPad: z.string().describe("Source pad number."),
+      layer: z.string().describe("Copper layer."),
+      widthMm: z.number().describe("Trace width in mm."),
+      clearanceMm: z.number().optional().describe("Override clearance. Default = netclass / design default."),
+      resolutionMm: z.number().optional().describe("Grid step in mm (default 0.05). Heatmap pixel size = resolutionMm."),
+      outputPath: z.string().optional().describe("Explicit PNG path. Default: `/tmp/claude-1000/routability_<REF>_<PAD>_<layer>.png`."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("routability_heatmap", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // place_near
   server.tool(
     "place_near",

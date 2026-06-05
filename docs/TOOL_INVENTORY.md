@@ -110,6 +110,11 @@ _Source: `src/tools/routing.ts`_
 | `set_schematic_metadata`  | Write a project-wide MCP metadata key on the Schematic_Metadata singleton; creates on first call (#230, #232) | Additional |
 | `dedupe_traces`           | Remove duplicate tracks / vias (e.g. autoroute reimports) | Additional   |
 | `scrub_region`            | Region-scoped copper cleanup after re-placement / incremental re-route — convex-hull + target-only / shared-net rule + dead-end prune; dry-run by default; returns reason-coded kill-list + nowOpenNets + viz (#251). See [SCRUB_REGION_PLAN](SCRUB_REGION_PLAN.md). | Additional |
+| `analyze_routable_regions`| Partition a copper layer into the free-space components a trace of `widthMm` can occupy (per-net or layer-wide). Returns each component's pads + bbox, plus pads with no escape lane. Phase 1 of [TOPOLOGY_TOOLS_PLAN](TOPOLOGY_TOOLS_PLAN.md). Read-only. | Additional |
+| `check_pad_routability`   | Are two pads in the same free-space component at `widthMm`, and what's the bottleneck width along the shortest path? `pads_on_different_nets` / `different_components` / `*_pad_no_escape` reason codes. Phase 1 of [TOPOLOGY_TOOLS_PLAN](TOPOLOGY_TOOLS_PLAN.md). Read-only. | Additional |
+| `max_width_between`       | Binary-search the widest trace that still leaves two pads in the same free-space component on `layer`. Returns the max-bottleneck path width (not the shortest-path bottleneck). Phase 2 of [TOPOLOGY_TOOLS_PLAN](TOPOLOGY_TOOLS_PLAN.md). Read-only. | Additional |
+| `max_parallel_traces`     | How many parallel traces of `widthMm` fit through the widest corridor between two pads? `floor(maxCorridorWidthMm / (widthMm + 2×clearance))`. Phase 2 of [TOPOLOGY_TOOLS_PLAN](TOPOLOGY_TOOLS_PLAN.md). Read-only. | Additional |
+| `routability_heatmap`     | Geodesic-distance PNG from a source pad — where can a trace of `widthMm` reach on `layer` and how far? Bright = far; black = unreachable enclave / obstacle. Phase 2 of [TOPOLOGY_TOOLS_PLAN](TOPOLOGY_TOOLS_PLAN.md). Read-only. | Additional |
 | `copy_routing_pattern`    | Copy routing from source to target component groups  | Additional       |
 
 ---
