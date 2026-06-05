@@ -302,6 +302,54 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
+  // check_pad_routability_multilayer — Phase 3 of TOPOLOGY_TOOLS_PLAN.md
+  server.tool(
+    "check_pad_routability_multilayer",
+    "Are two pads reachable across all copper layers, hopping between them through vias where the via fits both layers' free space? Phase 3 of the topology tools — extends `check_pad_routability` from one layer to N layers via a per-via meta-graph. Read-only. Through-vias only (no blind/buried). Returns `{reachable, sameLayerReachable, viaCandidates, layerComponents}`. `viaCandidates` is one representative (x, y, layerA, layerB) per component bridge in the meta-graph — *where you could drop a via*, NOT a routing prescription. Reasons when unreachable: `pads_on_different_nets`, `from_pad_no_escape` / `to_pad_no_escape` (no escape on any considered layer), `unreachable_any_layer` (even with via bridges). Pairs with `routability_report` for the board-wide all-pairs view.",
+    {
+      fromRef: z.string().describe("Source component reference."),
+      fromPad: z.string().describe("Source pad number."),
+      toRef: z.string().describe("Destination component reference."),
+      toPad: z.string().describe("Destination pad number."),
+      widthMm: z.number().describe("Trace width in mm."),
+      viaDiameterMm: z.number().describe("Via diameter in mm (the copper pad of the via; used as `2 × (via radius + clearance)` in the via-candidacy mask)."),
+      clearanceMm: z.number().optional().describe("Trace clearance to foreign copper in mm. Default = netclass / design default."),
+      viaClearanceMm: z.number().optional().describe("Separate via clearance in mm. Default = clearanceMm (same setting for trace and via)."),
+      layers: z.array(z.string()).optional().describe("Subset of copper layer names to consider (e.g. [\"F.Cu\", \"In1.Cu\"]). Default = all enabled copper layers — restrict to ask 'can I do this on F.Cu + In1.Cu only?'."),
+      resolutionMm: z.number().optional().describe("Grid step in mm (default 0.05). The per-layer EDT is built once and shared across the meta-graph."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("check_pad_routability_multilayer", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
+  // routability_report — Phase 3 of TOPOLOGY_TOOLS_PLAN.md
+  server.tool(
+    "routability_report",
+    "All-ratlines multi-layer feasibility matrix at the queried `widthMm` + `viaDiameterMm`. Phase 3 of the topology tools — flags ratlines that are geometrically impossible across every copper layer (and via combination) BEFORE the autoroute attempt. Read-only. Per net: builds a spanning star from the first pad to the rest (capped by `maxPairsPerNet` — GND-style large nets won't blow up runtime), then asks `check_pad_routability_multilayer` for each pair. Returns `{summary, ratlines, limitations}`. Each ratline entry: `{net, fromRef/Pad, toRef/Pad, reachable, sameLayerReachable, reason}`. Summary counts: `totalRatlines / reachable / unreachable / sameLayer / viaRequired`. CAVEAT: uses the all-copper-is-obstacle approximation for speed; a ratline flagged unreachable here MIGHT still route per-net — confirm with `check_pad_routability_multilayer` per-net.",
+    {
+      widthMm: z.number().describe("Trace width in mm (all ratlines queried at this width)."),
+      viaDiameterMm: z.number().describe("Via diameter in mm."),
+      clearanceMm: z.number().optional().describe("Trace clearance to foreign copper. Default = design default."),
+      viaClearanceMm: z.number().optional().describe("Via clearance. Default = clearanceMm."),
+      layers: z.array(z.string()).optional().describe("Copper layers to consider (default = all enabled)."),
+      resolutionMm: z.number().optional().describe("Grid step in mm (default 0.05)."),
+      nets: z.array(z.string()).optional().describe("Restrict to these net names (default = all nets with ≥2 pads)."),
+      maxPairsPerNet: z.number().optional().describe("Cap pairs evaluated per net (default 64). Protects against GND-style fan-out where Σ(n choose 2) explodes."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("routability_report", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // place_near
   server.tool(
     "place_near",

@@ -580,7 +580,7 @@ Create a new net class with custom design rules.
 
 ---
 
-## Routing Topology Analysis (5 tools)
+## Routing Topology Analysis (7 tools)
 
 Read-only tools that answer "is this *geometrically* routable, and where's
 the bottleneck?" *before* you call the autorouter and wait minutes for it
@@ -728,6 +728,78 @@ importable.
 
 **Returns:** `vizPath`, `reachableAreaMm2`, `maxReachMm`, the source
 pad's xy in mm.
+
+### check_pad_routability_multilayer
+
+Multi-layer reachability with via bridges. Phase 3 of the topology
+tools — extends `check_pad_routability` from one layer to N layers via
+a per-via meta-graph. Through-vias only. Read-only.
+
+For each enabled copper layer (or `layers` subset), the per-layer EDT
+is built once. A *via-candidacy* mask per layer-pair marks pixels where
+a via of `viaDiameterMm` fits in BOTH layers' free spaces. Union-find on
+`(layer, component_id)` nodes — bridged by the via-candidacy mask —
+answers "are the two pads connected across all available layers and
+via positions?".
+
+| Parameter         | Type    | Required | Default | Description |
+| ----------------- | ------- | -------- | ------- | ----------- |
+| fromRef/fromPad   | string  | Yes      | —       | Source pad. |
+| toRef/toPad       | string  | Yes      | —       | Destination pad. |
+| widthMm           | number  | Yes      | —       | Trace width. |
+| viaDiameterMm     | number  | Yes      | —       | Via diameter (used as `2 × (radius + clearance)` in the candidacy mask). |
+| clearanceMm       | number  | No       | netclass | Trace clearance. |
+| viaClearanceMm    | number  | No       | clearanceMm | Separate via clearance. |
+| layers            | array   | No       | all     | Subset of copper layers. Restrict to ask "F.Cu + In1.Cu only?". |
+| resolutionMm      | number  | No       | 0.05    | Grid step. |
+| boardPath         | string  | No       | current | Load a specific board. |
+
+**Returns:** `reachable`, `sameLayerReachable` (the trace stays on one
+layer iff the anchors land in the same `(layer, component)` node),
+`viaCandidates[]` (one representative `(x, y, layerA, layerB,
+componentA, componentB)` per component-bridge — *where* you could drop
+a via, NOT a routing prescription), `viaCandidatesTotal`,
+`layerComponents` (per-layer connected-component counts at the queried
+width).
+
+**Reasons when unreachable:** `pads_on_different_nets`,
+`from_pad_no_escape` / `to_pad_no_escape` (no escape lane on any
+considered layer), `unreachable_any_layer` (even with via bridges, the
+union-find leaves the pads disconnected — the placement, not the
+netclass or stackup, is the cause).
+
+### routability_report
+
+All-ratlines multi-layer feasibility matrix at the queried width + via
+size. Phase 3 of the topology tools — flags ratlines that are
+geometrically impossible BEFORE the autoroute attempt. Read-only.
+
+Per net (≥ 2 pads): builds a spanning star from the first pad to the
+rest (capped by `maxPairsPerNet` — GND-style large nets won't blow up
+runtime), then asks `check_pad_routability_multilayer` for each pair.
+
+| Parameter        | Type    | Required | Default | Description |
+| ---------------- | ------- | -------- | ------- | ----------- |
+| widthMm          | number  | Yes      | —       | Trace width (all ratlines queried at this width). |
+| viaDiameterMm    | number  | Yes      | —       | Via diameter. |
+| clearanceMm      | number  | No       | design default | Trace clearance. |
+| viaClearanceMm   | number  | No       | clearanceMm | Via clearance. |
+| layers           | array   | No       | all     | Copper layers to consider. |
+| resolutionMm     | number  | No       | 0.05    | Grid step. |
+| nets             | array   | No       | all     | Restrict to these nets. |
+| maxPairsPerNet   | number  | No       | 64      | Cap pairs per net to bound runtime. |
+| boardPath        | string  | No       | current | Load a specific board. |
+
+**Returns:** `summary` (`totalRatlines`, `reachable`, `unreachable`,
+`sameLayer`, `viaRequired`), `ratlines[]` (each: `net`, `fromRef/Pad`,
+`toRef/Pad`, `reachable`, `sameLayerReachable`, `reason`),
+`limitations` (the per-net caveat — see CAVEAT below).
+
+**CAVEAT:** uses the all-copper-is-obstacle approximation for speed
+(builds one meta-graph for the whole board, reuses across nets). A
+ratline marked unreachable here MIGHT still route per-net — confirm
+with `check_pad_routability_multilayer` per-net for any flagged
+ratline.
 
 ## Trace Operations (4 tools)
 

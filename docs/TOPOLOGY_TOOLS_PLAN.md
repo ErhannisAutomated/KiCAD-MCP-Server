@@ -1,13 +1,16 @@
 # Routing Topology Tools — Design Plan
 
-Status: **Phases 1+2 implemented** on `develop` (2026-05-31). Phases 3–4
-still planned. Implementation lives in `python/commands/topology.py`;
-TS bindings in `src/tools/placement.ts`. See `## Effort` for the phase
-table. Phase 2 picks the *max-bottleneck* path for
-`max_width_between` / `max_parallel_traces`, not the shortest-path
-bottleneck (the engineering question is "where could I route the bus
-to get the widest gap?", not "what's the worst squeeze on the
-straightest route?").
+Status: **Phases 1+2+3 implemented** on `develop` (Phase 1+2: 2026-05-31,
+Phase 3: 2026-06-05). Phase 4 still planned. Implementation lives in
+`python/commands/topology.py`; TS bindings in `src/tools/placement.ts`.
+See `## Effort` for the phase table. Phase 2 picks the *max-bottleneck*
+path for `max_width_between` / `max_parallel_traces`, not the
+shortest-path bottleneck (the engineering question is "where could I
+route the bus to get the widest gap?", not "what's the worst squeeze on
+the straightest route?"). Phase 3 distinguishes *same-layer reachable*
+(both anchors land in the same component on the same layer) from
+*reachable-via-bridge* (the union-find connects via a via on another
+layer) — `na == nb` not `na[0] == nb[0]`.
 
 ## Problem
 
@@ -185,46 +188,56 @@ quantization), but slower on dense boards. Worth it for the final
   questions and avoids a scikit-image dependency. If we need
   `count_distinct_paths` in Phase 3, medial axis comes back.)
 - **Phase 3 — via bridges + multi-layer routability + `routability_report`:**
-  meta-graph construction. ~1 session.
+  meta-graph construction. **Shipped 2026-06-05** on `develop`.
+  Through-vias only; per-via candidacy mask AND-ed across layers;
+  union-find on `(layer, component)` nodes. Same-layer-reachable
+  distinguished from via-bridge-reachable via exact node equality (not
+  layer-name equality). `routability_report` uses the all-copper-is-
+  obstacle approximation for speed with the per-net caveat in its
+  `limitations` field.
 - **Phase 4 — polygon-exact mode + integration with existing tools' failure
   messages + `pre_route_audit`:** plumbing. ~1-2 sessions.
 
 Total: ~5-7 sessions for a useful first cut with rich integration.
 
-### How to resume Phase 3
+### How to resume Phase 4
 
-Entry point for the next session: implement multi-layer routability via
-a **per-via meta-graph**. The Phase 1 EDT already exists per-layer;
-Phase 3 needs to *bridge* per-layer free spaces wherever a via could
-land.
+Entry point for the next session: integrate the analysis tools' output
+into the *existing* routing failure paths and add the polygon-exact
+mode for the "really, really sure?" question.
 
 Concrete first move:
-1. In `python/commands/topology.py`, lift the per-layer
-   `_compute_obstacle_state` call into a loop over all copper layers,
-   so the per-layer EDT cache is built once for a multi-layer query.
-2. Build a via-candidacy predicate: a pixel `(x, y)` on layer pair
-   `(L1, L2)` admits a via iff a disk of `viaSize/2 + clearance` at
-   that point fits the free-space of **both** layers. That's two
-   EDT-threshold checks AND-ed together — same primitive as the rest of
-   the module, just intersected across layers.
-3. The meta-graph: per-layer connected components (already from
-   `scipy_label`), plus one undirected edge between two components
-   whenever the via-candidacy mask intersects both. Union-find on the
-   resulting graph answers "are these pads connected across all layers
-   the trace could traverse?".
-4. Public surface: `check_pad_routability_multilayer(fromPad, toPad,
-   widthMm, viaSize, ...)` and `routability_report(widthMmDefault,
-   viaSize)` for the all-ratlines feasibility matrix.
+1. `pre_route_audit(boardPath, widthMmOverride?)` — wraps
+   `routability_report` at each net's netclass width, returns the
+   per-ratline impossible-at-netclass list with suggested remediation
+   (widen corridor / change netclass / move component). Wire it into
+   the autoroute pipeline as a pre-flight check.
+2. Integrate the topology answer into `route_pad_to_pad` /
+   `find_via_lane` failure messages: when they fail, call
+   `check_pad_routability` / `check_pad_routability_multilayer` to
+   replace the raw obstacle list with the "different_components at
+   width W" / "via bridge required at (x, y)" diagnostic.
+3. `relax_placement` scoring: sum `check_pad_routability` over the
+   ratsnest at netclass widths and hard-penalise placements that flip a
+   ratline from reachable → unreachable.
+4. **Polygon-exact mode (phase 4 proper):** swap the rasterizer for
+   `shapely.unary_union(foreign_polygons).buffer(W/2 + C)` and
+   `Polygon.difference` for free space. Same algorithms; exact answer
+   on the final go/no-go question. Slower on dense boards — keep raster
+   as the default, polygon as a `mode="exact"` flag.
 
-Pour handling is the trickiest sub-task — pre-zone-fill state is what
-the analysis sees, but the user routes against the post-fill state.
-Mitigation discussed in "Pour fill-time uncertainty" above (run queries
-both ways and warn on divergence).
+Phase 3 surfaced two bugs worth remembering:
+- The "same-layer reachable" predicate must compare
+  `(layer, component_id)` exactly, not just layer names. Otherwise a
+  two-component layer connected via a B.Cu detour gets flagged as
+  same-layer reachable. (`na == nb` not `na[0] == nb[0]`.)
+- Tuple unpacking order — `_enabled_copper_layers` returns
+  `[(layer_id, layer_name), ...]`, easy to swap on iteration. Stay
+  consistent or use named tuples.
 
-Phase 2 surfaced one bug worth remembering: the free-space mask must
-exclude obstacles (`(dist_px >= radius_px) & (~mask)`) to handle the
-W=C=0 degenerate case correctly. Phase 3's via-candidacy mask has the
-same structure — apply the same correction up-front.
+Phase 2 bug from last round still applies: the free-space mask must
+exclude obstacles (`(dist_px >= radius_px) & (~mask)`). The
+via-candidacy mask in Phase 3 inherited that pattern.
 
 ## Comparison vs. freerouting fork
 

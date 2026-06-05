@@ -497,12 +497,14 @@ class KiCADInterface:
             "check_freerouting": self.freerouting_commands.check_freerouting,
             # Region-scoped copper cleanup
             "scrub_region": self.scrub_region_commands.scrub_region,
-            # Routing-topology analysis (Phases 1+2 of TOPOLOGY_TOOLS_PLAN)
+            # Routing-topology analysis (Phases 1+2+3 of TOPOLOGY_TOOLS_PLAN)
             "analyze_routable_regions": self._handle_analyze_routable_regions,
             "check_pad_routability": self._handle_check_pad_routability,
             "max_width_between": self._handle_max_width_between,
             "max_parallel_traces": self._handle_max_parallel_traces,
             "routability_heatmap": self._handle_routability_heatmap,
+            "check_pad_routability_multilayer": self._handle_check_pad_routability_multilayer,
+            "routability_report": self._handle_routability_report,
         }
 
         logger.info(f"KiCAD interface initialized (backend: {'IPC' if self.use_ipc else 'SWIG'})")
@@ -6955,6 +6957,120 @@ print("ok")
             )
         except Exception as e:
             logger.error(f"Error in routability_heatmap: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_check_pad_routability_multilayer(
+        self, params: Dict[str, Any],
+    ) -> Dict[str, Any]:
+        """Multi-layer reachability with via bridges. Phase 3 of
+        TOPOLOGY_TOOLS_PLAN.md. Read-only.
+
+        Required: ``fromRef``, ``fromPad``, ``toRef``, ``toPad``,
+        ``widthMm``, ``viaDiameterMm``.
+        Optional: ``clearanceMm``, ``viaClearanceMm``, ``layers``,
+        ``resolutionMm``, ``boardPath``.
+        """
+        logger.info("Running check_pad_routability_multilayer")
+        try:
+            from commands.topology import check_pad_routability_multilayer
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+            required = [
+                "fromRef", "fromPad", "toRef", "toPad",
+                "widthMm", "viaDiameterMm",
+            ]
+            missing = [k for k in required if params.get(k) is None]
+            if missing:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": f"Required: {', '.join(missing)}",
+                }
+            return check_pad_routability_multilayer(
+                board,
+                from_ref=str(params["fromRef"]),
+                from_pad=str(params["fromPad"]),
+                to_ref=str(params["toRef"]),
+                to_pad=str(params["toPad"]),
+                width_mm=float(params["widthMm"]),
+                via_diameter_mm=float(params["viaDiameterMm"]),
+                clearance_mm=(
+                    float(params["clearanceMm"])
+                    if params.get("clearanceMm") is not None else None
+                ),
+                via_clearance_mm=(
+                    float(params["viaClearanceMm"])
+                    if params.get("viaClearanceMm") is not None else None
+                ),
+                layers=params.get("layers"),
+                resolution_mm=float(params.get("resolutionMm", 0.05)),
+            )
+        except Exception as e:
+            logger.error(
+                f"Error in check_pad_routability_multilayer: {e}", exc_info=True,
+            )
+            return {"success": False, "message": str(e)}
+
+    def _handle_routability_report(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """All-ratlines multi-layer feasibility matrix. Phase 3 of
+        TOPOLOGY_TOOLS_PLAN.md. Read-only.
+
+        Required: ``widthMm``, ``viaDiameterMm``.
+        Optional: ``clearanceMm``, ``viaClearanceMm``, ``layers``,
+        ``resolutionMm``, ``nets``, ``maxPairsPerNet``, ``boardPath``.
+        """
+        logger.info("Running routability_report")
+        try:
+            from commands.topology import routability_report
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+            required = ["widthMm", "viaDiameterMm"]
+            missing = [k for k in required if params.get(k) is None]
+            if missing:
+                return {
+                    "success": False,
+                    "message": "Missing parameters",
+                    "errorDetails": f"Required: {', '.join(missing)}",
+                }
+            return routability_report(
+                board,
+                width_mm=float(params["widthMm"]),
+                via_diameter_mm=float(params["viaDiameterMm"]),
+                clearance_mm=(
+                    float(params["clearanceMm"])
+                    if params.get("clearanceMm") is not None else None
+                ),
+                via_clearance_mm=(
+                    float(params["viaClearanceMm"])
+                    if params.get("viaClearanceMm") is not None else None
+                ),
+                layers=params.get("layers"),
+                resolution_mm=float(params.get("resolutionMm", 0.05)),
+                nets=params.get("nets"),
+                max_pairs_per_net=int(params.get("maxPairsPerNet", 64)),
+            )
+        except Exception as e:
+            logger.error(f"Error in routability_report: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
     def _handle_get_ratsnest(self, params: Dict[str, Any]) -> Dict[str, Any]:

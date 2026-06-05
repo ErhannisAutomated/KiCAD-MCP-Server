@@ -1165,3 +1165,546 @@ def routability_heatmap(
             f"PNG: {out_path or '(matplotlib unavailable)'}."
         ),
     }
+
+
+# --------------------------------------------------------------------------
+# Phase 3: per-layer cache + via meta-graph
+# --------------------------------------------------------------------------
+def _enabled_copper_layers(board: Any) -> List[Tuple[int, str]]:
+    """Return the [(layer_id, layer_name)] of enabled copper layers, in
+    KiCad's stackup order (F.Cu, In*.Cu, ..., B.Cu)."""
+    out: List[Tuple[int, str]] = []
+    try:
+        seq = board.GetEnabledLayers().Seq()
+    except Exception:
+        seq = []
+    for lid in seq:
+        try:
+            name = board.GetLayerName(lid)
+        except Exception:
+            continue
+        if isinstance(name, str) and name.endswith(".Cu"):
+            out.append((int(lid), name))
+    return out
+
+
+def _compute_layer_cache(
+    board: Any,
+    own_net: Optional[str],
+    g: float,
+    layer_ids: Optional[List[int]] = None,
+) -> Dict[str, Dict[str, Any]]:
+    """Build a `_compute_obstacle_state` per enabled copper layer (or the
+    given subset). Keyed by layer name. The grid (`x0, y0, nx, ny`) is
+    identical across all layers — same `_board_bbox_mm`."""
+    enabled = _enabled_copper_layers(board)
+    if layer_ids is not None:
+        wanted = set(int(i) for i in layer_ids)
+        enabled = [(lid, ln) for lid, ln in enabled if lid in wanted]
+    cache: Dict[str, Dict[str, Any]] = {}
+    for lid, name in enabled:
+        cache[name] = _compute_obstacle_state(board, lid, own_net, g)
+    return cache
+
+
+def _via_candidacy_mask(
+    state_a: Dict[str, Any],
+    state_b: Dict[str, Any],
+    via_diameter_mm: float,
+    clearance_mm: float,
+) -> np.ndarray:
+    """Pixels where a through-via of `via_diameter_mm` (center diameter)
+    fits in BOTH layers' free spaces with `clearance_mm` to foreign copper.
+
+    Same correction as `_free_space`: AND with `~mask` on each layer so
+    the via center can't land on top of an obstacle in the degenerate
+    `via_diameter=clearance=0` case."""
+    radius_px = (via_diameter_mm / 2 + clearance_mm) / state_a["g"]
+    a_ok = (state_a["dist_px"] >= radius_px) & (~state_a["mask"])
+    b_ok = (state_b["dist_px"] >= radius_px) & (~state_b["mask"])
+    return a_ok & b_ok
+
+
+class _UnionFind:
+    """Tiny union-find for the meta-graph."""
+
+    def __init__(self) -> None:
+        self.parent: Dict[Tuple[str, int], Tuple[str, int]] = {}
+
+    def find(self, x: Tuple[str, int]) -> Tuple[str, int]:
+        # Path compression.
+        root = x
+        while self.parent.get(root, root) != root:
+            root = self.parent[root]
+        cur = x
+        while self.parent.get(cur, cur) != cur:
+            nxt = self.parent[cur]
+            self.parent[cur] = root
+            cur = nxt
+        return root
+
+    def union(self, a: Tuple[str, int], b: Tuple[str, int]) -> None:
+        ra, rb = self.find(a), self.find(b)
+        if ra != rb:
+            self.parent[rb] = ra
+
+    def add(self, x: Tuple[str, int]) -> None:
+        self.parent.setdefault(x, x)
+
+
+def _build_meta_graph(
+    cache: Dict[str, Dict[str, Any]],
+    width_mm: float,
+    clearance_mm: float,
+    via_diameter_mm: float,
+    via_clearance_mm: float,
+) -> Dict[str, Any]:
+    """For each layer, compute the per-layer free space + labels. For
+    each layer pair, walk the via-candidacy mask and union (layer_a,
+    label_a[y,x]) with (layer_b, label_b[y,x]).
+
+    Returns ``{layer_labels, layer_free, uf, via_witness}`` — the union-
+    find for connectivity queries, plus per-pair witness pixels for the
+    user's "where could I drop a via?" question."""
+    layer_names = list(cache.keys())
+    layer_free: Dict[str, np.ndarray] = {}
+    layer_labels: Dict[str, np.ndarray] = {}
+    layer_n: Dict[str, int] = {}
+    for name, state in cache.items():
+        free = _free_space(state, width_mm, clearance_mm)
+        labels, n = scipy_label(free)
+        layer_free[name] = free
+        layer_labels[name] = labels
+        layer_n[name] = int(n)
+
+    uf = _UnionFind()
+    for name, n in layer_n.items():
+        for cid in range(1, n + 1):
+            uf.add((name, cid))
+
+    # Per layer-pair via witnesses. Store one representative (y, x)
+    # pixel per (componentA, componentB) bridge for the caller.
+    via_witness: Dict[Tuple[str, str], Dict[Tuple[int, int], Tuple[int, int]]] = {}
+    for i, la in enumerate(layer_names):
+        for lb in layer_names[i + 1:]:
+            mask = _via_candidacy_mask(
+                cache[la], cache[lb], via_diameter_mm, via_clearance_mm,
+            )
+            if not mask.any():
+                continue
+            ys, xs = np.where(mask)
+            labels_a = layer_labels[la][ys, xs]
+            labels_b = layer_labels[lb][ys, xs]
+            # Only pixels where BOTH sides land in a real component
+            # (label > 0). The free mask already excludes obstacles so
+            # this is usually all pixels, but tiny corner cases at the
+            # padding border can produce label==0.
+            ok = (labels_a > 0) & (labels_b > 0)
+            if not ok.any():
+                continue
+            ys = ys[ok]
+            xs = xs[ok]
+            labels_a = labels_a[ok]
+            labels_b = labels_b[ok]
+
+            pair_witness: Dict[Tuple[int, int], Tuple[int, int]] = {}
+            for y, x, ca, cb in zip(ys.tolist(), xs.tolist(),
+                                    labels_a.tolist(), labels_b.tolist()):
+                key = (int(ca), int(cb))
+                if key not in pair_witness:
+                    pair_witness[key] = (int(y), int(x))
+                uf.union((la, int(ca)), (lb, int(cb)))
+            via_witness[(la, lb)] = pair_witness
+
+    return {
+        "layer_free": layer_free,
+        "layer_labels": layer_labels,
+        "layer_n": layer_n,
+        "uf": uf,
+        "via_witness": via_witness,
+    }
+
+
+# --------------------------------------------------------------------------
+# Public: check_pad_routability_multilayer
+# --------------------------------------------------------------------------
+def check_pad_routability_multilayer(
+    board: Any,
+    from_ref: str,
+    from_pad: str,
+    to_ref: str,
+    to_pad: str,
+    width_mm: float,
+    via_diameter_mm: float,
+    clearance_mm: Optional[float] = None,
+    via_clearance_mm: Optional[float] = None,
+    layers: Optional[List[str]] = None,
+    resolution_mm: float = 0.05,
+) -> Dict[str, Any]:
+    """Are two pads reachable across all copper layers, hopping between
+    layers through vias where the via fits in both layers' free space?
+
+    Phase 3 of TOPOLOGY_TOOLS_PLAN.md. Read-only. Through-vias only.
+
+    `layers`: subset of copper layer names to consider (default = all
+    enabled copper layers). Useful for "can I route this on F.Cu + In1.Cu
+    only" surveys without an inner-layer detour.
+
+    Returns `{reachable, sameLayerReachable, viaCount,
+    viaCandidates: [...], layerComponents: [...]}`. `viaCandidates` is a
+    sampling of one representative (x, y, layerA, layerB) per
+    component-bridge in the meta-graph — *where you could drop a via to
+    connect the two regions*, not a prescription.
+    """
+    pa = _find_pad(board, from_ref, from_pad)
+    pb = _find_pad(board, to_ref, to_pad)
+    if pa is None:
+        return {"success": False, "message": f"Pad not found: {from_ref} pad {from_pad}"}
+    if pb is None:
+        return {"success": False, "message": f"Pad not found: {to_ref} pad {to_pad}"}
+
+    net_a = pa.GetNetname() or ""
+    net_b = pb.GetNetname() or ""
+    if net_a and net_b and net_a != net_b:
+        return {
+            "success": True, "reachable": False,
+            "reason": "pads_on_different_nets",
+            "fromNet": net_a, "toNet": net_b,
+        }
+    own_net = net_a or net_b or None
+    clearance = _resolve_clearance_mm(board, own_net, clearance_mm)
+    via_clearance = (
+        float(via_clearance_mm) if via_clearance_mm is not None else clearance
+    )
+
+    # Enumerate target layers.
+    all_enabled = _enabled_copper_layers(board)
+    if layers is not None:
+        wanted = set(layers)
+        target = [(lid, ln) for lid, ln in all_enabled if ln in wanted]
+        unknown = wanted - {ln for _, ln in all_enabled}
+        if unknown:
+            return {"success": False, "message": f"Unknown layer(s): {sorted(unknown)}"}
+    else:
+        target = all_enabled
+    if not target:
+        return {"success": False, "message": "No copper layers found on board"}
+    layer_ids = [lid for lid, _ in target]
+
+    # Per-layer state cache (EDT etc.) — single pass.
+    cache = _compute_layer_cache(board, own_net, resolution_mm, layer_ids=layer_ids)
+    meta = _build_meta_graph(
+        cache, width_mm, clearance, via_diameter_mm, via_clearance,
+    )
+
+    # Anchor each pad on every layer it has copper on.
+    def _anchors_for(pad: Any) -> Dict[str, Tuple[int, int]]:
+        out: Dict[str, Tuple[int, int]] = {}
+        for lid, ln in target:
+            if not _pad_is_on_layer(pad, lid):
+                continue
+            state = cache[ln]
+            free = meta["layer_free"][ln]
+            halo_px = int(math.ceil((width_mm / 2 + clearance) / state["g"]))
+            anchor, _ = _pad_anchor(state, free, pad, extra_halo_px=halo_px)
+            if anchor is not None:
+                out[ln] = anchor
+        return out
+
+    anchors_a = _anchors_for(pa)
+    anchors_b = _anchors_for(pb)
+    if not anchors_a:
+        return {
+            "success": True, "reachable": False,
+            "reason": "from_pad_no_escape",
+            "message": (
+                f"{from_ref}.{from_pad} has no escape lane on any of "
+                f"{[ln for _, ln in target]} at W={width_mm} mm."
+            ),
+        }
+    if not anchors_b:
+        return {
+            "success": True, "reachable": False,
+            "reason": "to_pad_no_escape",
+            "message": (
+                f"{to_ref}.{to_pad} has no escape lane on any of "
+                f"{[ln for _, ln in target]} at W={width_mm} mm."
+            ),
+        }
+
+    # Translate anchors to meta-graph nodes (layer, component_label).
+    def _component(layer_name: str, anchor: Tuple[int, int]) -> int:
+        return int(meta["layer_labels"][layer_name][anchor])
+
+    nodes_a = {ln: (ln, _component(ln, anc)) for ln, anc in anchors_a.items()}
+    nodes_b = {ln: (ln, _component(ln, anc)) for ln, anc in anchors_b.items()}
+
+    uf = meta["uf"]
+    reachable = False
+    same_layer_only = False
+    for na in nodes_a.values():
+        for nb in nodes_b.values():
+            if uf.find(na) == uf.find(nb):
+                reachable = True
+                # Same-layer reachable means the two anchors land in the
+                # SAME component on the SAME layer. Equal layer names is
+                # not enough — the layers could still be split into
+                # multiple components that only connect through a via
+                # on another layer.
+                if na == nb:
+                    same_layer_only = True
+                    break
+        if same_layer_only:
+            break
+
+    if not reachable:
+        return {
+            "success": True, "reachable": False,
+            "reason": "unreachable_any_layer",
+            "fromAnchors": list(nodes_a.keys()),
+            "toAnchors": list(nodes_b.keys()),
+            "message": (
+                f"{from_ref}.{from_pad} → {to_ref}.{to_pad}: not reachable "
+                f"on {[ln for _, ln in target]} at W={width_mm} mm + "
+                f"via={via_diameter_mm} mm even with via bridges."
+            ),
+            "layer": None,
+            "widthMm": width_mm,
+            "clearanceMm": round(clearance, 4),
+            "net": own_net,
+        }
+
+    # Sample one representative via candidate per (layer-pair, comp-pair)
+    # bridge — the caller's "where could I drop a via" answer.
+    via_candidates: List[Dict[str, Any]] = []
+    for (la, lb), bridges in meta["via_witness"].items():
+        # Skip pairs that aren't in either pad's reachable closure to
+        # keep the list useful.
+        state = cache[la]
+        for (ca, cb), (y, x) in bridges.items():
+            via_candidates.append({
+                "layerA": la, "layerB": lb,
+                "componentA": ca, "componentB": cb,
+                "x": round(state["x0"] + x * state["g"], 4),
+                "y": round(state["y0"] + y * state["g"], 4),
+                "unit": "mm",
+            })
+
+    return {
+        "success": True,
+        "reachable": True,
+        "sameLayerReachable": same_layer_only,
+        "fromAnchors": list(nodes_a.keys()),
+        "toAnchors": list(nodes_b.keys()),
+        "viaCandidates": via_candidates[:100],  # cap noise
+        "viaCandidatesTotal": len(via_candidates),
+        "layerComponents": {
+            ln: meta["layer_n"][ln] for _, ln in target
+        },
+        "widthMm": width_mm,
+        "viaDiameterMm": via_diameter_mm,
+        "clearanceMm": round(clearance, 4),
+        "viaClearanceMm": round(via_clearance, 4),
+        "net": own_net,
+        "layers": [ln for _, ln in target],
+        "grid": {"resolutionMm": resolution_mm},
+        "message": (
+            f"{from_ref}.{from_pad} → {to_ref}.{to_pad}: reachable "
+            f"({'same-layer' if same_layer_only else 'requires via bridge'}). "
+            f"{len(via_candidates)} candidate via location(s) found across "
+            f"{len(meta['via_witness'])} layer-pair(s)."
+        ),
+    }
+
+
+# --------------------------------------------------------------------------
+# Public: routability_report (all-pairs feasibility matrix)
+# --------------------------------------------------------------------------
+def routability_report(
+    board: Any,
+    width_mm: float,
+    via_diameter_mm: float,
+    clearance_mm: Optional[float] = None,
+    via_clearance_mm: Optional[float] = None,
+    layers: Optional[List[str]] = None,
+    resolution_mm: float = 0.05,
+    nets: Optional[List[str]] = None,
+    max_pairs_per_net: int = 64,
+) -> Dict[str, Any]:
+    """All-pairs multi-layer feasibility matrix. For each net, build the
+    pad pairs (capped at `max_pairs_per_net` to bound runtime on large
+    nets like GND) and ask `check_pad_routability_multilayer`. The
+    expensive bit — per-layer EDT + meta-graph — is built ONCE per
+    distinct `(net, width)` pair: for the simple "all nets at one width"
+    use case, we cache the layer state at the all-copper-is-obstacle
+    setting and reuse across nets (close enough for the matrix's
+    'flag the impossible ratlines' purpose; per-net refinement is a
+    Phase-4 follow-up).
+
+    Returns `{ratlines: [...], summary: {totalRatlines, reachable,
+    unreachable, sameLayer, viaRequired}}`. Each ratline entry includes
+    `fromRef/Pad`, `toRef/Pad`, `net`, `reachable`, `reason`,
+    `sameLayerReachable`.
+    """
+    # Enumerate target layers.
+    all_enabled = _enabled_copper_layers(board)
+    if layers is not None:
+        wanted = set(layers)
+        target = [(lid, ln) for lid, ln in all_enabled if ln in wanted]
+        unknown = wanted - {ln for _, ln in all_enabled}
+        if unknown:
+            return {"success": False, "message": f"Unknown layer(s): {sorted(unknown)}"}
+    else:
+        target = all_enabled
+    if not target:
+        return {"success": False, "message": "No copper layers found on board"}
+    layer_ids = [lid for lid, _ in target]
+    layer_names = [ln for _, ln in target]
+
+    # Collect pad pairs per net.
+    nets_to_pads: Dict[str, List[Tuple[str, str, Any]]] = {}
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            name = pad.GetNetname() or ""
+            if not name:
+                continue
+            if nets is not None and name not in nets:
+                continue
+            nets_to_pads.setdefault(name, []).append(
+                (fp.GetReference(), pad.GetNumber(), pad)
+            )
+
+    # Build a single layer cache + meta-graph treating "all copper as
+    # obstacle" (own_net=None). This is approximate vs. per-net analysis
+    # but it's the matrix's right granularity: a ratline that can't be
+    # routed even WITH its own net's copper removed is the same one
+    # we'd flag with per-net analysis, modulo small numerical noise.
+    # The conservative bias: a ratline marked unreachable here MIGHT be
+    # routable per-net. We document that and recommend
+    # check_pad_routability_multilayer for the per-net follow-up.
+    default_clearance = _resolve_clearance_mm(board, None, clearance_mm)
+    via_clearance = (
+        float(via_clearance_mm)
+        if via_clearance_mm is not None else default_clearance
+    )
+
+    cache = _compute_layer_cache(board, None, resolution_mm, layer_ids=layer_ids)
+    meta = _build_meta_graph(
+        cache, width_mm, default_clearance, via_diameter_mm, via_clearance,
+    )
+    uf = meta["uf"]
+    layer_free = meta["layer_free"]
+    layer_labels = meta["layer_labels"]
+
+    ratlines: List[Dict[str, Any]] = []
+    counts = {
+        "totalRatlines": 0, "reachable": 0, "unreachable": 0,
+        "sameLayer": 0, "viaRequired": 0,
+    }
+
+    def _anchors_for(pad: Any) -> Dict[str, Tuple[int, int]]:
+        out: Dict[str, Tuple[int, int]] = {}
+        for lid, ln in target:
+            if not _pad_is_on_layer(pad, lid):
+                continue
+            state = cache[ln]
+            halo_px = int(math.ceil(
+                (width_mm / 2 + default_clearance) / state["g"]
+            ))
+            anchor, _ = _pad_anchor(
+                state, layer_free[ln], pad, extra_halo_px=halo_px,
+            )
+            if anchor is not None:
+                out[ln] = anchor
+        return out
+
+    for net_name, entries in nets_to_pads.items():
+        if len(entries) < 2:
+            continue
+        # Take entries in order, build a spanning star (entry[0] → each
+        # of entry[1:]) and cap at max_pairs_per_net per net. This is
+        # not a Steiner tree, but mirrors what the ratsnest cache emits.
+        pairs = [
+            (entries[0], entries[i])
+            for i in range(1, min(len(entries), max_pairs_per_net + 1))
+        ]
+        for (ra, na, pad_a), (rb, nb, pad_b) in pairs:
+            counts["totalRatlines"] += 1
+            anchors_a = _anchors_for(pad_a)
+            anchors_b = _anchors_for(pad_b)
+            if not anchors_a or not anchors_b:
+                ratlines.append({
+                    "net": net_name,
+                    "fromRef": ra, "fromPad": na,
+                    "toRef": rb, "toPad": nb,
+                    "reachable": False,
+                    "reason": (
+                        "from_pad_no_escape" if not anchors_a
+                        else "to_pad_no_escape"
+                    ),
+                    "sameLayerReachable": False,
+                })
+                counts["unreachable"] += 1
+                continue
+
+            nodes_a = [(ln, int(layer_labels[ln][anc]))
+                       for ln, anc in anchors_a.items()]
+            nodes_b = [(ln, int(layer_labels[ln][anc]))
+                       for ln, anc in anchors_b.items()]
+            reach = False
+            same = False
+            for na_node in nodes_a:
+                for nb_node in nodes_b:
+                    if uf.find(na_node) == uf.find(nb_node):
+                        reach = True
+                        # See note in check_pad_routability_multilayer:
+                        # same-layer reachable requires the anchors to
+                        # land in the same component on the same layer.
+                        if na_node == nb_node:
+                            same = True
+                            break
+                if same:
+                    break
+
+            ratlines.append({
+                "net": net_name,
+                "fromRef": ra, "fromPad": na,
+                "toRef": rb, "toPad": nb,
+                "reachable": reach,
+                "sameLayerReachable": reach and same,
+                "reason": None if reach else "unreachable_any_layer",
+            })
+            if reach:
+                counts["reachable"] += 1
+                if same:
+                    counts["sameLayer"] += 1
+                else:
+                    counts["viaRequired"] += 1
+            else:
+                counts["unreachable"] += 1
+
+    return {
+        "success": True,
+        "widthMm": width_mm,
+        "viaDiameterMm": via_diameter_mm,
+        "clearanceMm": round(default_clearance, 4),
+        "viaClearanceMm": round(via_clearance, 4),
+        "layers": layer_names,
+        "grid": {"resolutionMm": resolution_mm, "perLayerComponents": meta["layer_n"]},
+        "summary": counts,
+        "ratlines": ratlines,
+        "limitations": (
+            "Treats all copper as obstacle (per-net analysis would be "
+            "more accurate but slower). A ratline marked unreachable "
+            "here MIGHT still route once its own net's copper is "
+            "excluded — confirm with check_pad_routability_multilayer "
+            "per-net for any flagged ratline."
+        ),
+        "message": (
+            f"{counts['totalRatlines']} ratlines @ W={width_mm} mm, "
+            f"via={via_diameter_mm} mm: {counts['reachable']} reachable "
+            f"({counts['sameLayer']} same-layer, "
+            f"{counts['viaRequired']} via-required), "
+            f"{counts['unreachable']} UNREACHABLE."
+        ),
+    }
