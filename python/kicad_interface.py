@@ -343,7 +343,7 @@ class KiCADInterface:
             "add_net": self.routing_commands.add_net,
             "route_trace": self.routing_commands.route_trace,
             "check_route_segment": self.routing_commands.check_route_segment,
-            "find_via_lane": self.routing_commands.find_via_lane,
+            "find_via_lane": self._handle_find_via_lane,
             "add_via": self.routing_commands.add_via,
             "stitch_pour_vias": self.routing_commands.stitch_pour_vias,
             "pair_via": self.routing_commands.pair_via,
@@ -6801,6 +6801,7 @@ print("ok")
                 ),
                 resolution_mm=float(params.get("resolutionMm", 0.05)),
                 convergence_check=bool(params.get("convergenceCheck", False)),
+                mode=str(params.get("mode", "raster")),
             )
         except Exception as e:
             logger.error(f"Error in check_pad_routability: {e}", exc_info=True)
@@ -7125,6 +7126,82 @@ print("ok")
         except Exception as e:
             logger.error(f"Error in pre_route_audit: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
+
+    def _handle_find_via_lane(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Wraps `RoutingCommands.find_via_lane` to opportunistically add
+        a Phase-4 topology hint to failure responses.
+
+        When find_via_lane returns `success=False` AND both endpoints are
+        `{ref, pad}` specs (vs raw `{x, y}` waypoints), call
+        `check_pad_routability_multilayer` for the same pair and append
+        the answer as `topologyHint`. Best-effort: any analysis error is
+        silently swallowed and the raw find_via_lane diagnostic remains
+        the authoritative answer.
+        """
+        result = self.routing_commands.find_via_lane(params)
+        if result.get("success"):
+            return result
+
+        from_spec = params.get("from") or {}
+        to_spec = params.get("to") or {}
+        from_ref = from_spec.get("ref")
+        from_pad = from_spec.get("pad")
+        to_ref = to_spec.get("ref")
+        to_pad = to_spec.get("pad")
+        # Only attempt enrichment when both endpoints are pads; raw XY
+        # waypoints can't be passed to the topology tools.
+        if not (from_ref and from_pad and to_ref and to_pad):
+            return result
+        try:
+            from commands.topology import check_pad_routability_multilayer
+
+            width = params.get("width", 0.2)
+            via_d = params.get("viaDiameter", 0.6)
+            board = self.board
+            if board is None:
+                return result
+            topo = check_pad_routability_multilayer(
+                board,
+                from_ref=str(from_ref), from_pad=str(from_pad),
+                to_ref=str(to_ref), to_pad=str(to_pad),
+                width_mm=float(width),
+                via_diameter_mm=float(via_d),
+            )
+            if topo.get("success"):
+                hint = {
+                    "reachable": topo.get("reachable"),
+                    "reason": topo.get("reason"),
+                }
+                if topo.get("sameLayerReachable") is not None:
+                    hint["sameLayerReachable"] = topo["sameLayerReachable"]
+                if topo.get("viaCandidatesTotal"):
+                    hint["viaCandidatesTotal"] = topo["viaCandidatesTotal"]
+                if topo.get("viaCandidates"):
+                    # Show up to 3 candidate via locations — that's
+                    # actionable "drop a via near (x, y)" info without
+                    # blowing up the error response.
+                    hint["viaCandidateExamples"] = topo["viaCandidates"][:3]
+                result["topologyHint"] = hint
+                details = result.get("errorDetails", "")
+                if topo.get("reachable"):
+                    result["errorDetails"] = (
+                        details
+                        + " | Topology: pads ARE reachable across all "
+                        "layers — find_via_lane just couldn't find a "
+                        "viable via placement. Consider widening "
+                        "waypointSearchMax, hand-placing a via at one of "
+                        "the candidate positions in topologyHint."
+                    )
+                else:
+                    result["errorDetails"] = (
+                        details
+                        + f" | Topology: pads are NOT reachable on any "
+                        f"layer at this width (reason: "
+                        f"{topo.get('reason')})."
+                    )
+        except Exception:
+            pass
+        return result
 
     def _handle_get_ratsnest(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Return per-segment ratsnest data + crossing detection.

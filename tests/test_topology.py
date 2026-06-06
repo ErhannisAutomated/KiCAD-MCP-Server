@@ -486,6 +486,52 @@ class TestAnalyzeRegionsIntegration:
         assert r["summary"]["totalRatlines"] == 0
         assert r["ratlines"] == []
 
+    # ----- Phase 4c: polygon-exact mode --------------------------------
+    def test_polygon_exact_matches_raster_on_open_board(self):
+        from commands.topology import check_pad_routability
+
+        board = self._build_open_board()
+        # Both pads on an empty board: both modes must say reachable.
+        r_raster = check_pad_routability(
+            board, "L1", "1", "R1", "1",
+            layer="F.Cu", width_mm=0.25, resolution_mm=0.1, mode="raster",
+        )
+        r_exact = check_pad_routability(
+            board, "L1", "1", "R1", "1",
+            layer="F.Cu", width_mm=0.25, mode="exact",
+        )
+        assert r_raster["success"] and r_raster["reachable"] is True
+        assert r_exact["success"] and r_exact["reachable"] is True
+        assert r_exact["mode"] == "exact"
+        # Exact mode does NOT report bottleneckWidthMm or pathXy.
+        assert "bottleneckWidthMm" not in r_exact or r_exact.get("bottleneckWidthMm") is None
+        assert "pathXy" not in r_exact
+
+    def test_polygon_exact_unreachable_across_wall(self):
+        from commands.topology import check_pad_routability
+
+        board = self._build_split_board()
+        r = check_pad_routability(
+            board, "L1", "1", "R1", "1",
+            layer="F.Cu", width_mm=0.2, mode="exact",
+        )
+        assert r["success"] is True
+        assert r["reachable"] is False
+        # The 2 mm wall separates the two SMD pads.
+        assert r["reason"] == "different_components"
+
+    def test_polygon_exact_rejects_unknown_mode(self):
+        from commands.topology import check_pad_routability
+
+        board = self._build_open_board()
+        r = check_pad_routability(
+            board, "L1", "1", "R1", "1",
+            layer="F.Cu", width_mm=0.2, mode="bogus",
+        )
+        assert r["success"] is False
+        assert "raster" in r["message"]
+        assert "exact" in r["message"]
+
     def test_pre_route_audit_unreachable_carries_remediation(self):
         """Build a board with a net forcing an unreachable ratline; the
         audit must surface a remediationHint string."""

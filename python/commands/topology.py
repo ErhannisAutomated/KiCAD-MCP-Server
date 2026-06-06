@@ -603,6 +603,7 @@ def check_pad_routability(
     clearance_mm: Optional[float] = None,
     resolution_mm: float = 0.05,
     convergence_check: bool = False,
+    mode: str = "raster",
 ) -> Dict[str, Any]:
     """Are these two pads in the same free-space component on `layer` at
     `width_mm`? If yes, what's the bottleneck width along a shortest path
@@ -611,7 +612,31 @@ def check_pad_routability(
     Returns `{reachable, bottleneckWidthMm, pathXy[], reason}`. `pathXy` is
     a downsampled list of (x, y) mm coordinates along the BFS path through
     the free space — useful for visualisation, NOT a routing suggestion.
+
+    `mode` (default `"raster"`): pick the engine.
+    - `"raster"` — Phase-1 algorithm: rasterize → EDT → label. Fast,
+      grid-quantization noise visible via `convergenceCheck=True`. Reports
+      `bottleneckWidthMm` + `pathXy` because BFS + distance transform
+      give them naturally.
+    - `"exact"` — Phase-4 polygon-exact engine: `shapely.unary_union` +
+      `buffer` + `Polygon.difference`. No grid quantization, slightly
+      slower on dense boards. Use this for the final "really, really
+      sure?" go/no-go after raster mode says yes-but-near-the-edge.
+      Returns the reachability flag only — `bottleneckWidthMm` and
+      `pathXy` are omitted (not naturally computable from the polygon
+      set). For bottleneck, stay in raster mode and crank `convergenceCheck`.
     """
+    if mode == "exact":
+        return _check_pad_routability_exact(
+            board, from_ref, from_pad, to_ref, to_pad,
+            layer, width_mm, clearance_mm,
+        )
+    if mode != "raster":
+        return {
+            "success": False,
+            "message": f"Unknown mode '{mode}' — use 'raster' or 'exact'.",
+        }
+
     layer_id = board.GetLayerID(layer)
     if layer_id < 0:
         return {"success": False, "message": f"Unknown layer: {layer}"}
@@ -2033,5 +2058,246 @@ def pre_route_audit(
             f"{counts['viaRequired']} via-required), "
             f"{counts['unreachable']} UNREACHABLE — see ratlines[] for "
             f"per-ratline remediation hints."
+        ),
+    }
+
+
+# --------------------------------------------------------------------------
+# Phase 4c: polygon-exact mode (shapely)
+# --------------------------------------------------------------------------
+def _oriented_rect_polygon(
+    cx_mm: float, cy_mm: float,
+    w_mm: float, h_mm: float, angle_deg: float,
+) -> Any:
+    """Return a shapely Polygon for an oriented rectangle."""
+    from shapely.geometry import Polygon
+    cos_a = math.cos(math.radians(angle_deg))
+    sin_a = math.sin(math.radians(angle_deg))
+    hw, hh = w_mm / 2.0, h_mm / 2.0
+    corners = [(-hw, -hh), (hw, -hh), (hw, hh), (-hw, hh)]
+    pts = [
+        (cx_mm + cx * cos_a - cy * sin_a, cy_mm + cx * sin_a + cy * cos_a)
+        for cx, cy in corners
+    ]
+    return Polygon(pts)
+
+
+def _pad_polygon(pad: Any) -> Any:
+    """Approximate a pad as an oriented rectangle (matching the raster
+    rasterizer's choice). Same accuracy trade-off as Phase 1."""
+    pos = pad.GetPosition()
+    sz = pad.GetSize()
+    try:
+        angle_deg = pad.GetOrientation().AsDegrees()
+    except AttributeError:
+        angle_deg = float(pad.GetOrientation()) / 10.0
+    return _oriented_rect_polygon(
+        pos.x / SCALE, pos.y / SCALE,
+        sz.x / SCALE, sz.y / SCALE,
+        angle_deg,
+    )
+
+
+def _build_obstacle_polygons(
+    board: Any, layer_id: int, own_net: Optional[str],
+) -> List[Any]:
+    """Return shapely polygons for foreign-net copper on `layer_id`.
+    Vias affect every layer."""
+    from shapely.geometry import LineString, Point
+
+    polys: List[Any] = []
+    for t in board.Tracks():
+        net = t.GetNetname() or ""
+        if own_net is not None and net == own_net:
+            continue
+        if t.Type() == pcbnew.PCB_VIA_T:
+            try:
+                via_w = t.GetWidth(pcbnew.F_Cu)
+            except TypeError:
+                via_w = t.GetWidth()
+            pos = t.GetPosition()
+            polys.append(
+                Point(pos.x / SCALE, pos.y / SCALE)
+                .buffer((via_w / SCALE) / 2.0, quad_segs=8)
+            )
+        else:
+            if t.GetLayer() != layer_id:
+                continue
+            s, e = t.GetStart(), t.GetEnd()
+            half_w = (t.GetWidth() / SCALE) / 2.0
+            line = LineString(
+                [(s.x / SCALE, s.y / SCALE), (e.x / SCALE, e.y / SCALE)]
+            )
+            polys.append(line.buffer(half_w, cap_style="round", quad_segs=8))
+
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            if not _pad_is_on_layer(pad, layer_id):
+                continue
+            net = pad.GetNetname() or ""
+            if own_net is not None and net == own_net:
+                continue
+            polys.append(_pad_polygon(pad))
+
+    return polys
+
+
+def _check_pad_routability_exact(
+    board: Any,
+    from_ref: str, from_pad: str,
+    to_ref: str, to_pad: str,
+    layer: str,
+    width_mm: float,
+    clearance_mm: Optional[float],
+) -> Dict[str, Any]:
+    """Polygon-exact `check_pad_routability` via shapely. Returns
+    `{reachable, reason, mode}` — no bottleneck/path (those are
+    raster-only)."""
+    from shapely.geometry import box
+    from shapely.ops import unary_union
+
+    layer_id = board.GetLayerID(layer)
+    if layer_id < 0:
+        return {"success": False, "message": f"Unknown layer: {layer}"}
+
+    pa = _find_pad(board, from_ref, from_pad)
+    pb = _find_pad(board, to_ref, to_pad)
+    if pa is None:
+        return {"success": False, "message": f"Pad not found: {from_ref} pad {from_pad}"}
+    if pb is None:
+        return {"success": False, "message": f"Pad not found: {to_ref} pad {to_pad}"}
+
+    net_a = pa.GetNetname() or ""
+    net_b = pb.GetNetname() or ""
+    if net_a and net_b and net_a != net_b:
+        return {
+            "success": True, "reachable": False, "mode": "exact",
+            "reason": "pads_on_different_nets",
+            "fromNet": net_a, "toNet": net_b,
+        }
+    own_net = net_a or net_b or None
+    clearance = _resolve_clearance_mm(board, own_net, clearance_mm)
+
+    obstacles = _build_obstacle_polygons(board, layer_id, own_net)
+    xmin, ymin, xmax, ymax = _board_bbox_mm(board)
+    board_poly = box(xmin, ymin, xmax, ymax)
+
+    erosion = width_mm / 2.0 + clearance
+    if obstacles:
+        # Union foreign obstacles, then buffer by W/2+C to model the
+        # "trace centerline can live here" set. Difference from the
+        # board outline gives the exact free space.
+        unioned = unary_union(obstacles)
+        expanded = unioned.buffer(erosion, quad_segs=8)
+        free = board_poly.difference(expanded)
+    else:
+        # No foreign copper on this layer — the whole board is free.
+        free = board_poly
+
+    # Enumerate components.
+    try:
+        from shapely.geometry import MultiPolygon
+        if isinstance(free, MultiPolygon):
+            components = list(free.geoms)
+        elif free.is_empty:
+            components = []
+        else:
+            components = [free]
+    except Exception:
+        components = [free] if not free.is_empty else []
+
+    if not components:
+        return {
+            "success": True, "reachable": False, "mode": "exact",
+            "reason": "different_components",
+            "message": (
+                f"No free space on {layer} at width {width_mm} mm + "
+                f"clearance {round(clearance, 3)} mm — every pixel is "
+                "within (W/2 + C) of foreign copper."
+            ),
+            "layer": layer, "widthMm": width_mm,
+            "clearanceMm": round(clearance, 4),
+            "net": own_net,
+        }
+
+    # Anchor each pad to a component. The pad's "escape zone" is the
+    # pad polygon buffered by W/2 + C + ε — a trace exits the pad into
+    # free space at exactly this offset. Using the escape zone (not the
+    # bare pad polygon) handles both cases uniformly:
+    #   own_net=X: same-net pad isn't in obstacles, escape zone touches
+    #     the adjacent free-space component.
+    #   own_net=None: pad IS in the obstacle set, buffered out by W/2+C;
+    #     the free-space boundary sits exactly at the escape-zone edge.
+    # If no free-space component intersects the escape zone, the pad's
+    # escape lane is too tight at this width.
+    epsilon = 1e-4  # mm — sub-µm slack for floating-point edge cases.
+    pa_zone = _pad_polygon(pa).buffer(erosion + epsilon, quad_segs=8)
+    pb_zone = _pad_polygon(pb).buffer(erosion + epsilon, quad_segs=8)
+    pa_comp = pb_comp = None
+    for i, c in enumerate(components):
+        if pa_comp is None and c.intersects(pa_zone):
+            pa_comp = i
+        if pb_comp is None and c.intersects(pb_zone):
+            pb_comp = i
+        if pa_comp is not None and pb_comp is not None:
+            break
+
+    if pa_comp is None:
+        return {
+            "success": True, "reachable": False, "mode": "exact",
+            "reason": "from_pad_no_escape",
+            "message": (
+                f"{from_ref}.{from_pad} has no free-space neighbour on "
+                f"{layer} at width {width_mm} mm + clearance "
+                f"{round(clearance, 3)} mm (polygon-exact)."
+            ),
+            "layer": layer, "widthMm": width_mm,
+            "clearanceMm": round(clearance, 4),
+            "net": own_net,
+        }
+    if pb_comp is None:
+        return {
+            "success": True, "reachable": False, "mode": "exact",
+            "reason": "to_pad_no_escape",
+            "message": (
+                f"{to_ref}.{to_pad} has no free-space neighbour on "
+                f"{layer} at width {width_mm} mm + clearance "
+                f"{round(clearance, 3)} mm (polygon-exact)."
+            ),
+            "layer": layer, "widthMm": width_mm,
+            "clearanceMm": round(clearance, 4),
+            "net": own_net,
+        }
+
+    if pa_comp == pb_comp:
+        return {
+            "success": True, "reachable": True, "mode": "exact",
+            "reason": None,
+            "fromComponent": pa_comp,
+            "toComponent": pb_comp,
+            "componentCount": len(components),
+            "layer": layer, "widthMm": width_mm,
+            "clearanceMm": round(clearance, 4),
+            "net": own_net,
+            "message": (
+                f"{from_ref}.{from_pad} → {to_ref}.{to_pad} on {layer} "
+                f"at W={width_mm} mm: reachable (polygon-exact). "
+                f"{len(components)} free-space component(s) on layer."
+            ),
+        }
+    return {
+        "success": True, "reachable": False, "mode": "exact",
+        "reason": "different_components",
+        "fromComponent": pa_comp,
+        "toComponent": pb_comp,
+        "componentCount": len(components),
+        "layer": layer, "widthMm": width_mm,
+        "clearanceMm": round(clearance, 4),
+        "net": own_net,
+        "message": (
+            f"{from_ref}.{from_pad} and {to_ref}.{to_pad} fall in "
+            f"different free-space components on {layer} at width "
+            f"{width_mm} mm (polygon-exact). The placement, not the "
+            "netclass, is the cause."
         ),
     }

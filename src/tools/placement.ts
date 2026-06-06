@@ -209,10 +209,10 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
-  // check_pad_routability — Phase 1 of TOPOLOGY_TOOLS_PLAN.md
+  // check_pad_routability — Phase 1+4c of TOPOLOGY_TOOLS_PLAN.md
   server.tool(
     "check_pad_routability",
-    "Are these two pads geometrically reachable on `layer` at `widthMm`? Returns `{reachable, bottleneckWidthMm, pathXy[]}`. Read-only. Reasons when unreachable: `pads_on_different_nets`, `different_components` (the corridor between them is too tight for this trace width — the placement or netclass is the cause, not the router), `from_pad_no_escape` / `to_pad_no_escape` (the pad's own escape lane can't fit the trace, e.g. QFN-internal-escape). `bottleneckWidthMm` is the maximum trace width that still fits at the tightest point along the BFS path — use it to back off the netclass width or pick a wider-tolerant route. `pathXy` is the path through the free-space raster (visualisation only, NOT a routing suggestion — the freerouter still picks the exact geometry). Pairs with `analyze_routable_regions` for full-layer surveys. Pass `convergenceCheck=true` to also run at half the grid step and confirm the answer is stable.",
+    "Are these two pads geometrically reachable on `layer` at `widthMm`? Returns `{reachable, bottleneckWidthMm, pathXy[]}`. Read-only. Reasons when unreachable: `pads_on_different_nets`, `different_components` (the corridor between them is too tight for this trace width — the placement or netclass is the cause, not the router), `from_pad_no_escape` / `to_pad_no_escape` (the pad's own escape lane can't fit the trace, e.g. QFN-internal-escape). `bottleneckWidthMm` is the maximum trace width that still fits at the tightest point along the BFS path — use it to back off the netclass width or pick a wider-tolerant route. `pathXy` is the path through the free-space raster (visualisation only, NOT a routing suggestion — the freerouter still picks the exact geometry). Pairs with `analyze_routable_regions` for full-layer surveys. Pass `convergenceCheck=true` to also run at half the grid step and confirm the answer is stable. Pass `mode=\"exact\"` for the polygon-exact engine (shapely; no grid quantization, no bottleneck/path output) when a raster `convergenceCheck` disagrees and you want the authoritative answer.",
     {
       fromRef: z.string().describe("Source component reference (e.g. \"U3\")."),
       fromPad: z.string().describe("Source pad number (e.g. \"4\")."),
@@ -221,8 +221,9 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
       layer: z.string().describe("Copper layer to check on (e.g. \"F.Cu\")."),
       widthMm: z.number().describe("Trace width in mm."),
       clearanceMm: z.number().optional().describe("Clearance to foreign copper in mm. Default = netclass clearance, then design default, then 0."),
-      resolutionMm: z.number().optional().describe("Grid step in mm (default 0.05). Finer = more accurate bottleneck width but slower."),
-      convergenceCheck: z.boolean().optional().describe("Also run at half the grid step and compare. Default false."),
+      resolutionMm: z.number().optional().describe("Grid step in mm (default 0.05). Finer = more accurate bottleneck width but slower. Ignored when mode=\"exact\"."),
+      convergenceCheck: z.boolean().optional().describe("Also run at half the grid step and compare. Default false. Ignored when mode=\"exact\" (polygon mode has no grid)."),
+      mode: z.enum(["raster", "exact"]).optional().describe("Engine: \"raster\" (default; fast EDT-based; reports bottleneck + path) or \"exact\" (polygon-exact via shapely; no grid quantization; returns reachability only). Use \"exact\" as the verification mode when raster convergenceCheck disagrees."),
       boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
     },
     async (args: any) => {

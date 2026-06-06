@@ -633,23 +633,36 @@ between them too tight at this width — the placement or netclass is the
 cause, not the router), `from_pad_no_escape` / `to_pad_no_escape` (the
 pad's own escape lane is the problem).
 
-| Parameter         | Type    | Required | Default | Description |
-| ----------------- | ------- | -------- | ------- | ----------- |
-| fromRef           | string  | Yes      | —       | Source component reference. |
-| fromPad           | string  | Yes      | —       | Source pad number. |
-| toRef             | string  | Yes      | —       | Destination component reference. |
-| toPad             | string  | Yes      | —       | Destination pad number. |
-| layer             | string  | Yes      | —       | Copper layer. |
-| widthMm           | number  | Yes      | —       | Trace width to test. |
+| Parameter         | Type    | Required | Default  | Description |
+| ----------------- | ------- | -------- | -------- | ----------- |
+| fromRef           | string  | Yes      | —        | Source component reference. |
+| fromPad           | string  | Yes      | —        | Source pad number. |
+| toRef             | string  | Yes      | —        | Destination component reference. |
+| toPad             | string  | Yes      | —        | Destination pad number. |
+| layer             | string  | Yes      | —        | Copper layer. |
+| widthMm           | number  | Yes      | —        | Trace width to test. |
 | clearanceMm       | number  | No       | netclass | Override clearance. |
-| resolutionMm      | number  | No       | 0.05    | Grid step. |
-| convergenceCheck  | boolean | No       | false   | Re-run at g/2 and compare. |
-| boardPath         | string  | No       | current | Load a specific board. |
+| resolutionMm      | number  | No       | 0.05     | Grid step (raster mode only). |
+| convergenceCheck  | boolean | No       | false    | Re-run at g/2 and compare (raster mode only). |
+| mode              | string  | No       | "raster" | Engine: `"raster"` (default) or `"exact"`. |
+| boardPath         | string  | No       | current  | Load a specific board. |
 
 `bottleneckWidthMm` is the maximum trace width that still fits at the
 tightest point along the BFS path through the free-space raster. Use it
 to back off the netclass width or pick a wider-tolerant route. `pathXy`
 is for visualisation only — the freerouter still picks the exact geometry.
+
+**`mode="exact"` (Phase 4c).** Polygon-exact engine via shapely
+(`unary_union(obstacles).buffer(W/2 + C)` + `Polygon.difference`). No
+grid quantization → authoritative reachability answer. Returns
+`{reachable, reason, mode, fromComponent, toComponent, componentCount}`
+only — `bottleneckWidthMm` and `pathXy` are NOT reported (not naturally
+computable from the polygon set). Use the raster mode for the
+bottleneck question and `mode="exact"` for the final
+"really-really-sure?" verification when raster `convergenceCheck`
+disagrees between `g` and `g/2`. Pad anchoring uses the pad's *escape
+zone* (pad polygon buffered by W/2+C+ε) to handle both per-net and
+all-copper-as-obstacle cases uniformly.
 
 **Workflow:** placement → `analyze_routable_regions(layer, width)` →
 inspect components / unrouted-pads → fix placement → re-analyze →

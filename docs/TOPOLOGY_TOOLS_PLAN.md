@@ -1,9 +1,8 @@
 # Routing Topology Tools — Design Plan
 
-Status: **Phases 1+2+3+4a implemented** on `develop` (Phase 1+2:
-2026-05-31, Phase 3: 2026-06-05, Phase 4 first wave: 2026-06-06).
-Phase 4 polygon-exact mode + `relax_placement` scoring integration
-still planned. Implementation lives in `python/commands/topology.py`
+Status: **Phases 1+2+3+4a/4b/4c implemented** on `develop` (Phase 1+2:
+2026-05-31, Phase 3: 2026-06-05, Phase 4a/4b/4c: 2026-06-06). Phase 4
+`relax_placement` routability scoring still planned. Implementation lives in `python/commands/topology.py`
 (plus a small enrichment to `python/commands/routing.py`'s
 `_obstacle_error` closure); TS bindings in `src/tools/placement.ts`.
 See `## Effort` for the phase table. Phase 2 picks the *max-bottleneck*
@@ -199,58 +198,70 @@ quantization), but slower on dense boards. Worth it for the final
   obstacle approximation for speed with the per-net caveat in its
   `limitations` field.
 - **Phase 4 — polygon-exact mode + integration with existing tools' failure
-  messages + `pre_route_audit`:** plumbing. First wave **shipped
-  2026-06-06** on `develop`: `pre_route_audit` (per-netclass widths,
-  per-ratline remediation hints, shared per-layer EDT cache across
-  netclasses) and `route_pad_to_pad` failure-path enrichment (appends
-  a topology hint to the obstacle error so the user sees "pads ARE
-  reachable, just not via a straight line" without a second tool call).
-  Polygon-exact `mode="exact"` flag (via shapely) and `relax_placement`
-  routability scoring still pending.
+  messages + `pre_route_audit`:** plumbing. **Shipped 2026-06-06** on
+  `develop` in three sub-commits: (a) `pre_route_audit` (per-netclass
+  widths, per-ratline remediation hints, shared per-layer EDT across
+  netclasses) + `route_pad_to_pad` failure-path enrichment; (b)
+  `find_via_lane` failure-path enrichment via a `_handle_find_via_lane`
+  wrapper that post-attaches `topologyHint` to any failure response
+  with pad-spec endpoints; (c) `check_pad_routability(mode="exact")`
+  polygon-exact engine via shapely (`unary_union + buffer +
+  Polygon.difference`). Exact mode returns reachability only —
+  `bottleneckWidthMm` + `pathXy` stay raster-only (not naturally
+  computable from the polygon set). Pad anchor in exact mode uses the
+  pad's **escape zone** (pad polygon buffered by W/2+C+ε) intersected
+  with each free-space component — handles `own_net=None` and
+  `own_net=X` uniformly without special-casing. `relax_placement`
+  routability scoring still pending (touches the autoplacer; intentionally
+  not bundled with the analysis work).
 
 Total: ~5-7 sessions for a useful first cut with rich integration.
 
-### How to resume Phase 4 (remainder)
+### How to resume (remaining work)
 
-Phase 4 first wave (`pre_route_audit` + `route_pad_to_pad` enrichment)
-shipped 2026-06-06. Remaining items:
+Phases 4a, 4b, 4c all shipped 2026-06-06. The only remaining item from
+the original Phase 4 scope:
 
-1. **Polygon-exact mode** (the original Phase 4 ambition). Swap the
-   rasterizer for `shapely.unary_union(foreign_polygons).buffer(W/2 + C)`
-   + `Polygon.difference`. Same algorithms; exact answer for the final
-   go/no-go question. Slower on dense boards — keep raster as default,
-   polygon as a `mode="exact"` flag. Pulls `shapely` as a new
-   dependency.
-2. **`relax_placement` routability scoring.** Sum `check_pad_routability`
-   over the ratsnest at netclass widths and hard-penalise placements
-   that flip a ratline from reachable → unreachable. Touches the
-   placement scoring function in `python/commands/pcb_autoplacer.py` —
-   non-trivial integration.
-3. **`find_via_lane` failure enrichment.** Same pattern as
-   `route_pad_to_pad`'s `_obstacle_error` — when the via lookup fails,
-   append a `check_pad_routability_multilayer` diagnostic. Low-risk;
-   ~30 lines.
+**`relax_placement` routability scoring.** Sum `check_pad_routability`
+over the ratsnest at netclass widths and hard-penalise placements that
+flip a ratline from reachable → unreachable. Touches the placement
+scoring function in `python/commands/pcb_autoplacer.py` — non-trivial
+integration, intentionally not bundled with the analysis work. The
+hook point is wherever the placer evaluates "is this candidate
+position good?" — add a per-ratline reachability term to the score
+function. Start small: only the affected nets (those whose pads are in
+the moved cluster).
 
-Phase 3 surfaced two bugs worth remembering:
-- The "same-layer reachable" predicate must compare
-  `(layer, component_id)` exactly, not just layer names. Otherwise a
-  two-component layer connected via a B.Cu detour gets flagged as
-  same-layer reachable. (`na == nb` not `na[0] == nb[0]`.)
-- Tuple unpacking order — `_enabled_copper_layers` returns
-  `[(layer_id, layer_name), ...]`, easy to swap on iteration. Stay
-  consistent or use named tuples.
+**Other deferred items** (not in original Phase 4 scope; revisit when
+needed):
+- `analyze_routable_regions(mode="exact")` — same shapely treatment;
+  return polygons as WKT. Skipped this round because the Phase 4c
+  use case is the binary go/no-go question, not the area survey.
+- Medial-axis graph, `count_distinct_paths`, `rooms_and_corridors` —
+  the EDT-threshold + connected-components approach turned out to be
+  sufficient for everything shipped. Bring back medial axis only if a
+  future tool needs it.
 
-Phase 4a surfaced one lesson:
-- `pcbnew.NETINFO_ITEM.GetNetClass()` returns a raw `SwigPyObject` that
-  lacks `.GetName()`. Use
+Bug log (worth remembering):
+- **Phase 2:** the free-space mask must exclude obstacles
+  (`(dist_px >= radius_px) & (~mask)`). Handles the W=C=0 degenerate
+  case correctly.
+- **Phase 3:** `sameLayerReachable` requires `(layer, component_id)`
+  equality — full node equality, not layer-name equality.
+  `_enabled_copper_layers` returns `[(layer_id, layer_name), ...]`,
+  easy to swap on iteration; stay consistent.
+- **Phase 4a:** `pcbnew.NETINFO_ITEM.GetNetClass()` returns a raw
+  `SwigPyObject` that lacks `.GetName()`. Use
   `board.GetDesignSettings().m_NetSettings.GetEffectiveNetClass(net_name)`
-  instead — that returns a proper `NETCLASS` with the named accessors.
+  instead (returns a proper `NETCLASS`).
   `board.GetAllNetClasses()` returns `dict[name, NETCLASS]` for the
-  full enumeration. Both APIs cross-check each other.
-
-Phase 2 bug from last round still applies: the free-space mask must
-exclude obstacles (`(dist_px >= radius_px) & (~mask)`). The
-via-candidacy mask in Phase 3 inherited that pattern.
+  full enumeration.
+- **Phase 4c:** in polygon-exact mode with `own_net=None`, the pad's
+  own polygon is in the obstacle set and bare-intersect doesn't anchor
+  the pad to any free component. Solution: use the pad's **escape
+  zone** = pad polygon buffered by `W/2 + C + ε`, then intersect with
+  components. Same epsilon-buffered check works for `own_net=X` too —
+  no special-casing required.
 
 ## Comparison vs. freerouting fork
 

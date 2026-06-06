@@ -35,3 +35,7 @@ matplotlib>=3.7
 # connected-components labelling for analyze_routable_regions /
 # check_pad_routability. Pulls numpy as a transitive dep.
 scipy>=1.11
+
+# Routing-topology polygon-exact mode (check_pad_routability(mode="exact"))
+# — Phase 4c verification path. Pulls numpy as a transitive dep.
+shapely>=2.0
