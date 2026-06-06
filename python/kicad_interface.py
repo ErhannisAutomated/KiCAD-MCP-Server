@@ -497,7 +497,7 @@ class KiCADInterface:
             "check_freerouting": self.freerouting_commands.check_freerouting,
             # Region-scoped copper cleanup
             "scrub_region": self.scrub_region_commands.scrub_region,
-            # Routing-topology analysis (Phases 1+2+3 of TOPOLOGY_TOOLS_PLAN)
+            # Routing-topology analysis (Phases 1+2+3+4 of TOPOLOGY_TOOLS_PLAN)
             "analyze_routable_regions": self._handle_analyze_routable_regions,
             "check_pad_routability": self._handle_check_pad_routability,
             "max_width_between": self._handle_max_width_between,
@@ -505,6 +505,7 @@ class KiCADInterface:
             "routability_heatmap": self._handle_routability_heatmap,
             "check_pad_routability_multilayer": self._handle_check_pad_routability_multilayer,
             "routability_report": self._handle_routability_report,
+            "pre_route_audit": self._handle_pre_route_audit,
         }
 
         logger.info(f"KiCAD interface initialized (backend: {'IPC' if self.use_ipc else 'SWIG'})")
@@ -7071,6 +7072,58 @@ print("ok")
             )
         except Exception as e:
             logger.error(f"Error in routability_report: {e}", exc_info=True)
+            return {"success": False, "message": str(e)}
+
+    def _handle_pre_route_audit(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Per-netclass all-ratlines feasibility check + remediation hints.
+        Phase 4 of TOPOLOGY_TOOLS_PLAN.md. Read-only.
+
+        Required: nothing (uses the currently-loaded board + each net's
+        netclass widths).
+        Optional: ``widthMmOverride``, ``viaDiameterMmOverride``,
+        ``clearanceMmOverride``, ``viaClearanceMmOverride``, ``layers``,
+        ``resolutionMm``, ``nets``, ``maxPairsPerNet``, ``boardPath``.
+        """
+        logger.info("Running pre_route_audit")
+        try:
+            from commands.topology import pre_route_audit
+
+            board_path = params.get("boardPath")
+            if board_path:
+                board = pcbnew.LoadBoard(board_path)
+            else:
+                board = self.board
+            if board is None:
+                return {
+                    "success": False,
+                    "message": "No board loaded",
+                    "errorDetails": "Pass boardPath= or call open_project first",
+                }
+            return pre_route_audit(
+                board,
+                width_mm_override=(
+                    float(params["widthMmOverride"])
+                    if params.get("widthMmOverride") is not None else None
+                ),
+                via_diameter_mm_override=(
+                    float(params["viaDiameterMmOverride"])
+                    if params.get("viaDiameterMmOverride") is not None else None
+                ),
+                clearance_mm_override=(
+                    float(params["clearanceMmOverride"])
+                    if params.get("clearanceMmOverride") is not None else None
+                ),
+                via_clearance_mm_override=(
+                    float(params["viaClearanceMmOverride"])
+                    if params.get("viaClearanceMmOverride") is not None else None
+                ),
+                layers=params.get("layers"),
+                resolution_mm=float(params.get("resolutionMm", 0.05)),
+                nets=params.get("nets"),
+                max_pairs_per_net=int(params.get("maxPairsPerNet", 64)),
+            )
+        except Exception as e:
+            logger.error(f"Error in pre_route_audit: {e}", exc_info=True)
             return {"success": False, "message": str(e)}
 
     def _handle_get_ratsnest(self, params: Dict[str, Any]) -> Dict[str, Any]:

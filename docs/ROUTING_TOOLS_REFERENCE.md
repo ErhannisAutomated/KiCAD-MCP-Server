@@ -580,7 +580,7 @@ Create a new net class with custom design rules.
 
 ---
 
-## Routing Topology Analysis (7 tools)
+## Routing Topology Analysis (8 tools)
 
 Read-only tools that answer "is this *geometrically* routable, and where's
 the bottleneck?" *before* you call the autorouter and wait minutes for it
@@ -800,6 +800,64 @@ runtime), then asks `check_pad_routability_multilayer` for each pair.
 ratline marked unreachable here MIGHT still route per-net — confirm
 with `check_pad_routability_multilayer` per-net for any flagged
 ratline.
+
+### pre_route_audit
+
+Pre-flight all-ratlines feasibility check at each net's **own**
+netclass widths. The Phase-4 workflow tool — run this BEFORE the
+autoroute attempt to flag impossible ratlines with actionable
+remediation hints. Read-only.
+
+Per netclass on the board: builds the multi-layer meta-graph at the
+class's `(trackWidth, clearance, viaDiameter, viaClearance)`, then
+queries every net assigned to the class. The per-layer EDT cache is
+**shared** across netclasses (the obstacle SET is the same; only the
+width/clearance erosion differs), so the cost scales with the number
+of netclasses, not with the total ratline count.
+
+| Parameter                | Type    | Required | Default | Description |
+| ------------------------ | ------- | -------- | ------- | ----------- |
+| widthMmOverride          | number  | No       | per-netclass | Use one width for all nets instead of the per-netclass lookup. |
+| viaDiameterMmOverride    | number  | No       | per-netclass | Override via diameter. |
+| clearanceMmOverride      | number  | No       | per-netclass | Override clearance. |
+| viaClearanceMmOverride   | number  | No       | clearance   | Override via clearance. |
+| layers                   | array   | No       | all       | Copper layers to consider. |
+| resolutionMm             | number  | No       | 0.05      | Grid step. |
+| nets                     | array   | No       | all       | Restrict to these nets. |
+| maxPairsPerNet           | number  | No       | 64        | Cap pairs per net to bound runtime. |
+| boardPath                | string  | No       | current   | Load a specific board. |
+
+**Returns:** `summary` + `ratlines[]` (each with the standard Phase-3
+shape plus `netclass`, `trackWidthMm`, `clearanceMm`, `viaDiameterMm`,
+and — when `reachable=false` — a `remediationHint` string), plus
+`netclassesEvaluated[]` (per-class counts of reachable / unreachable /
+sameLayer / viaRequired), plus the same `limitations` caveat as
+`routability_report`.
+
+**Remediation hints:** mapped from the Phase-3 failure reasons:
+- `from_pad_no_escape` / `to_pad_no_escape` → "Pad has no escape lane
+  at width W mm. Lower the netclass width, move foreign-net copper
+  away from the pad, or pin-escape with a narrow stub."
+- `unreachable_any_layer` → "Pads cannot be connected at netclass
+  'X' on ANY layer even with via bridges. Move components closer,
+  widen the corridor, or assign a netclass with narrower width."
+
+**Workflow:** placement → `pre_route_audit` → for each unreachable
+ratline: investigate with `routability_heatmap` and/or
+`check_pad_routability_multilayer` (per-net for the precise answer) →
+fix placement/netclass → re-audit → `autoroute`.
+
+### route_pad_to_pad failure enrichment (not a new tool — note)
+
+When `route_pad_to_pad` fails with `Route blocked by N obstacle(s)`,
+the response now also carries a `topologyHint` field with the
+`check_pad_routability` / `check_pad_routability_multilayer` answer
+for the same pad pair. This distinguishes "pads ARE reachable, just
+not via a straight line — use route_trace or autoroute" from "pads are
+geometrically separated at this width — fix the placement or
+netclass" without a follow-up tool call. Best-effort: any error in
+the topology analysis is silently swallowed and the raw obstacle list
+remains the authoritative answer.
 
 ## Trace Operations (4 tools)
 

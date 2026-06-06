@@ -350,6 +350,29 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
+  // pre_route_audit — Phase 4 of TOPOLOGY_TOOLS_PLAN.md
+  server.tool(
+    "pre_route_audit",
+    "Pre-flight all-ratlines feasibility check at each net's OWN netclass widths. The Phase 4 workflow tool — run this BEFORE the autoroute attempt to flag impossible ratlines with actionable remediation hints. Read-only. Per netclass on the board: builds the multi-layer meta-graph at the class's (track width, clearance, via diameter, via clearance), then queries every net assigned to the class. Per-layer EDT cache shared across netclasses for speed. Returns `{summary, ratlines, netclassesEvaluated, limitations}`. Each ratline with `reachable=false` carries a `remediationHint` string explaining the next move (move components / widen corridor / change netclass / pin-escape). Pass any `*Override` to skip per-netclass lookup and use one value (useful for 'what if I dropped the netclass to W?' surveys). Same CAVEAT as `routability_report`: all-copper-as-obstacle approximation; confirm flagged ratlines per-net via `check_pad_routability_multilayer`.",
+    {
+      widthMmOverride: z.number().optional().describe("Override netclass track widths. Default = each net's own netclass width."),
+      viaDiameterMmOverride: z.number().optional().describe("Override netclass via diameters. Default = each net's netclass via."),
+      clearanceMmOverride: z.number().optional().describe("Override netclass clearances. Default = each net's netclass clearance."),
+      viaClearanceMmOverride: z.number().optional().describe("Override via clearance (default = clearance value)."),
+      layers: z.array(z.string()).optional().describe("Copper layers to consider (default = all enabled)."),
+      resolutionMm: z.number().optional().describe("Grid step in mm (default 0.05)."),
+      nets: z.array(z.string()).optional().describe("Restrict to these net names (default = all nets with ≥2 pads)."),
+      maxPairsPerNet: z.number().optional().describe("Cap pairs per net to bound runtime on GND-style fan-out (default 64)."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("pre_route_audit", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // place_near
   server.tool(
     "place_near",

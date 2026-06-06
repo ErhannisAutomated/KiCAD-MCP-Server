@@ -117,6 +117,7 @@ _Source: `src/tools/routing.ts`_
 | `routability_heatmap`     | Geodesic-distance PNG from a source pad — where can a trace of `widthMm` reach on `layer` and how far? Bright = far; black = unreachable enclave / obstacle. Phase 2 of [TOPOLOGY_TOOLS_PLAN](TOPOLOGY_TOOLS_PLAN.md). Read-only. | Additional |
 | `check_pad_routability_multilayer` | Multi-layer reachability with via bridges (through-vias). Per-layer EDT + via-candidacy mask + union-find on `(layer, component)` nodes. Distinguishes same-layer-reachable from via-bridge-reachable; returns candidate via positions per component bridge. Phase 3 of [TOPOLOGY_TOOLS_PLAN](TOPOLOGY_TOOLS_PLAN.md). Read-only. | Additional |
 | `routability_report`      | All-ratlines feasibility matrix at queried `widthMm` + `viaDiameterMm`. Per-net spanning star, capped by `maxPairsPerNet`. Summary counts (reachable / unreachable / sameLayer / viaRequired) + per-ratline detail. Uses the all-copper-is-obstacle approximation for speed; per-net follow-up via `check_pad_routability_multilayer`. Phase 3 of [TOPOLOGY_TOOLS_PLAN](TOPOLOGY_TOOLS_PLAN.md). Read-only. | Additional |
+| `pre_route_audit`         | Pre-flight all-ratlines feasibility at each net's OWN netclass widths. Per-netclass meta-graph + shared per-layer EDT cache. Unreachable ratlines carry an actionable `remediationHint`. Phase 4 of [TOPOLOGY_TOOLS_PLAN](TOPOLOGY_TOOLS_PLAN.md). Read-only. | Additional |
 | `copy_routing_pattern`    | Copy routing from source to target component groups  | Additional       |
 
 ---

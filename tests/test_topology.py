@@ -464,3 +464,60 @@ class TestAnalyzeRegionsIntegration:
         # Limitations note must mention the per-net caveat so callers
         # don't over-trust a report-level "unreachable".
         assert "per-net" in r["limitations"]
+
+    # ----- Phase 4 ------------------------------------------------------
+    def test_pre_route_audit_returns_remediation_hints(self):
+        from commands.topology import pre_route_audit
+
+        board = self._build_two_layer_split_board()
+        # No nets assigned to pads in this fixture → audit should
+        # still succeed but with 0 ratlines (no ≥2-pad net).
+        r = pre_route_audit(
+            board,
+            width_mm_override=0.2,
+            via_diameter_mm_override=0.6,
+            clearance_mm_override=0.0,
+            resolution_mm=0.1,
+        )
+        assert r["success"] is True
+        assert "netclassesEvaluated" in r
+        assert "limitations" in r and "per-net" in r["limitations"]
+        # Empty board (no nets) should produce an empty ratline list.
+        assert r["summary"]["totalRatlines"] == 0
+        assert r["ratlines"] == []
+
+    def test_pre_route_audit_unreachable_carries_remediation(self):
+        """Build a board with a net forcing an unreachable ratline; the
+        audit must surface a remediationHint string."""
+        import pcbnew
+
+        board = self._build_two_layer_split_board()
+        # Give L1 + R1 the same net so they form a ratline; the F.Cu
+        # wall splits the layer, but B.Cu is open so reach=True
+        # (via-required). Inject a second pair (L2 + R2) that are
+        # *on the same net* but no via candidacy can bridge them
+        # because the via would need to land on the wall.
+        net = pcbnew.NETINFO_ITEM(board, "SAMENET")
+        board.Add(net)
+        for fp in board.GetFootprints():
+            for pad in fp.Pads():
+                pad.SetNet(net)
+        from commands.topology import pre_route_audit
+        r = pre_route_audit(
+            board,
+            width_mm_override=0.2,
+            via_diameter_mm_override=0.6,
+            clearance_mm_override=0.0,
+            resolution_mm=0.1,
+        )
+        assert r["success"] is True
+        # At least one ratline created.
+        assert r["summary"]["totalRatlines"] >= 1
+        # Should be reachable via B.Cu bridge.
+        ratline = r["ratlines"][0]
+        assert ratline["reachable"] is True
+        assert ratline["sameLayerReachable"] is False
+        # Reachable ratlines have remediationHint=None.
+        assert ratline["remediationHint"] is None
+        assert "netclass" in ratline
+        assert "trackWidthMm" in ratline

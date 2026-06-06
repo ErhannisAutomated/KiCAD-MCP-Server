@@ -1708,3 +1708,330 @@ def routability_report(
             f"{counts['unreachable']} UNREACHABLE."
         ),
     }
+
+
+# --------------------------------------------------------------------------
+# Phase 4: pre_route_audit + remediation hints
+# --------------------------------------------------------------------------
+def _remediation_hint(
+    reason: Optional[str],
+    width_mm: float,
+    clearance_mm: float,
+    netclass_name: str,
+) -> Optional[str]:
+    """Map a Phase 3 failure-reason code to a short, actionable hint.
+    Returns None for reachable ratlines."""
+    if reason is None:
+        return None
+    w = round(width_mm, 3)
+    c = round(clearance_mm, 3)
+    if reason == "from_pad_no_escape":
+        return (
+            f"From-pad has no escape at width {w} mm + clearance {c} mm "
+            f"(netclass '{netclass_name}'). Either lower the netclass "
+            f"width, move foreign-net copper away from the pad, or pin-"
+            f"escape with a narrow stub (route_pad_to_pad escapeFromWidth)."
+        )
+    if reason == "to_pad_no_escape":
+        return (
+            f"To-pad has no escape at width {w} mm + clearance {c} mm "
+            f"(netclass '{netclass_name}'). Same remediation as above on "
+            f"the destination side."
+        )
+    if reason == "unreachable_any_layer":
+        return (
+            f"Pads cannot be connected at netclass '{netclass_name}' "
+            f"(W={w} mm, C={c} mm) on ANY copper layer, even with via "
+            f"bridges. Move components closer, widen the corridor, or "
+            f"assign a netclass with narrower width."
+        )
+    if reason == "pads_on_different_nets":
+        return (
+            "Endpoint pads are on different nets — the ratline shouldn't "
+            "exist. Re-check schematic connections."
+        )
+    return None
+
+
+def pre_route_audit(
+    board: Any,
+    width_mm_override: Optional[float] = None,
+    via_diameter_mm_override: Optional[float] = None,
+    clearance_mm_override: Optional[float] = None,
+    via_clearance_mm_override: Optional[float] = None,
+    layers: Optional[List[str]] = None,
+    resolution_mm: float = 0.05,
+    nets: Optional[List[str]] = None,
+    max_pairs_per_net: int = 64,
+) -> Dict[str, Any]:
+    """Pre-flight all-ratlines feasibility check at each net's *own*
+    netclass widths — the Phase-4 workflow tool. Read-only.
+
+    Iterates the board's netclasses. For each, builds the multi-layer
+    meta-graph once at that class's (track width, clearance, via
+    diameter, via clearance), then queries the ratlines of every net
+    assigned to the class. The per-layer EDT cache is shared across
+    netclasses (it depends only on the obstacle SET, which is the same
+    `all-copper-as-obstacle` approximation `routability_report` uses).
+
+    Pass any `*_override` to skip the per-netclass lookup and use a
+    single value for all nets (useful for "what if I dropped the
+    netclass width to W?" what-if surveys).
+
+    Returns `{summary, ratlines, netclassesEvaluated, limitations}`.
+    Each unreachable ratline carries a `remediationHint` string with
+    the actionable next move.
+    """
+    # Enumerate copper layers (same as Phase 3 tools).
+    all_enabled = _enabled_copper_layers(board)
+    if layers is not None:
+        wanted = set(layers)
+        target = [(lid, ln) for lid, ln in all_enabled if ln in wanted]
+        unknown = wanted - {ln for _, ln in all_enabled}
+        if unknown:
+            return {"success": False, "message": f"Unknown layer(s): {sorted(unknown)}"}
+    else:
+        target = all_enabled
+    if not target:
+        return {"success": False, "message": "No copper layers found on board"}
+    layer_ids = [lid for lid, _ in target]
+
+    # Collect pad pairs per net (same model as routability_report).
+    nets_to_pads: Dict[str, List[Tuple[str, str, Any]]] = {}
+    for fp in board.GetFootprints():
+        for pad in fp.Pads():
+            name = pad.GetNetname() or ""
+            if not name:
+                continue
+            if nets is not None and name not in nets:
+                continue
+            nets_to_pads.setdefault(name, []).append(
+                (fp.GetReference(), pad.GetNumber(), pad)
+            )
+
+    # Group nets by their netclass — one meta-graph per class.
+    try:
+        net_settings = board.GetDesignSettings().m_NetSettings
+    except Exception:
+        net_settings = None
+    classes_to_nets: Dict[str, List[str]] = {}
+    class_to_widths: Dict[str, Dict[str, float]] = {}
+    for net_name in nets_to_pads:
+        nc_name = "Default"
+        if net_settings is not None:
+            try:
+                nc = net_settings.GetEffectiveNetClass(net_name)
+                if nc is not None:
+                    nc_name = nc.GetName()
+            except Exception:
+                pass
+        classes_to_nets.setdefault(nc_name, []).append(net_name)
+
+    # Look up each class's widths/clearances.
+    all_classes = {}
+    try:
+        all_classes = board.GetAllNetClasses()
+    except Exception:
+        all_classes = {}
+    for nc_name in classes_to_nets:
+        nc = all_classes.get(nc_name)
+        if nc is None and net_settings is not None:
+            try:
+                nc = net_settings.GetNetClassByName(nc_name)
+            except Exception:
+                nc = None
+        widths = {
+            "trackWidthMm": 0.2,
+            "clearanceMm": 0.2,
+            "viaDiameterMm": 0.6,
+            "viaClearanceMm": 0.2,
+        }
+        if nc is not None:
+            try:
+                widths["trackWidthMm"] = float(nc.GetTrackWidth()) / SCALE
+                widths["clearanceMm"] = float(nc.GetClearance()) / SCALE
+                widths["viaDiameterMm"] = float(nc.GetViaDiameter()) / SCALE
+                # Vias inherit the netclass clearance unless KiCad
+                # exposes a separate field; the same value is the safe
+                # default for v1.
+                widths["viaClearanceMm"] = widths["clearanceMm"]
+            except Exception:
+                pass
+        # Apply overrides.
+        if width_mm_override is not None:
+            widths["trackWidthMm"] = float(width_mm_override)
+        if clearance_mm_override is not None:
+            widths["clearanceMm"] = float(clearance_mm_override)
+        if via_diameter_mm_override is not None:
+            widths["viaDiameterMm"] = float(via_diameter_mm_override)
+        if via_clearance_mm_override is not None:
+            widths["viaClearanceMm"] = float(via_clearance_mm_override)
+        class_to_widths[nc_name] = widths
+
+    # Build the per-layer cache ONCE (it depends only on the obstacle
+    # set, not on width). Reused across all netclasses.
+    cache = _compute_layer_cache(board, None, resolution_mm, layer_ids=layer_ids)
+
+    # Per-netclass meta-graph + ratline evaluation.
+    ratlines: List[Dict[str, Any]] = []
+    counts = {
+        "totalRatlines": 0, "reachable": 0, "unreachable": 0,
+        "sameLayer": 0, "viaRequired": 0,
+    }
+    netclasses_evaluated: List[Dict[str, Any]] = []
+
+    def _anchors_for_pad(
+        pad: Any,
+        meta_layer_free: Dict[str, np.ndarray],
+        width_mm: float,
+        clearance_mm: float,
+    ) -> Dict[str, Tuple[int, int]]:
+        out: Dict[str, Tuple[int, int]] = {}
+        for lid, ln in target:
+            if not _pad_is_on_layer(pad, lid):
+                continue
+            state = cache[ln]
+            halo_px = int(math.ceil((width_mm / 2 + clearance_mm) / state["g"]))
+            anchor, _ = _pad_anchor(
+                state, meta_layer_free[ln], pad, extra_halo_px=halo_px,
+            )
+            if anchor is not None:
+                out[ln] = anchor
+        return out
+
+    for nc_name, net_names in classes_to_nets.items():
+        widths = class_to_widths[nc_name]
+        meta = _build_meta_graph(
+            cache,
+            widths["trackWidthMm"], widths["clearanceMm"],
+            widths["viaDiameterMm"], widths["viaClearanceMm"],
+        )
+        uf = meta["uf"]
+        layer_free = meta["layer_free"]
+        layer_labels = meta["layer_labels"]
+
+        nc_counts = {
+            "totalRatlines": 0, "reachable": 0, "unreachable": 0,
+            "sameLayer": 0, "viaRequired": 0,
+        }
+
+        for net_name in net_names:
+            entries = nets_to_pads.get(net_name, [])
+            if len(entries) < 2:
+                continue
+            pairs = [
+                (entries[0], entries[i])
+                for i in range(1, min(len(entries), max_pairs_per_net + 1))
+            ]
+            for (ra, na, pad_a), (rb, nb, pad_b) in pairs:
+                nc_counts["totalRatlines"] += 1
+                counts["totalRatlines"] += 1
+                anchors_a = _anchors_for_pad(
+                    pad_a, layer_free,
+                    widths["trackWidthMm"], widths["clearanceMm"],
+                )
+                anchors_b = _anchors_for_pad(
+                    pad_b, layer_free,
+                    widths["trackWidthMm"], widths["clearanceMm"],
+                )
+                if not anchors_a or not anchors_b:
+                    reason = (
+                        "from_pad_no_escape" if not anchors_a
+                        else "to_pad_no_escape"
+                    )
+                    hint = _remediation_hint(
+                        reason, widths["trackWidthMm"],
+                        widths["clearanceMm"], nc_name,
+                    )
+                    ratlines.append({
+                        "net": net_name, "netclass": nc_name,
+                        "trackWidthMm": widths["trackWidthMm"],
+                        "clearanceMm": widths["clearanceMm"],
+                        "fromRef": ra, "fromPad": na,
+                        "toRef": rb, "toPad": nb,
+                        "reachable": False,
+                        "sameLayerReachable": False,
+                        "reason": reason,
+                        "remediationHint": hint,
+                    })
+                    nc_counts["unreachable"] += 1
+                    counts["unreachable"] += 1
+                    continue
+
+                nodes_a = [(ln, int(layer_labels[ln][anc]))
+                           for ln, anc in anchors_a.items()]
+                nodes_b = [(ln, int(layer_labels[ln][anc]))
+                           for ln, anc in anchors_b.items()]
+                reach = False
+                same = False
+                for na_node in nodes_a:
+                    for nb_node in nodes_b:
+                        if uf.find(na_node) == uf.find(nb_node):
+                            reach = True
+                            if na_node == nb_node:
+                                same = True
+                                break
+                    if same:
+                        break
+
+                reason = None if reach else "unreachable_any_layer"
+                hint = _remediation_hint(
+                    reason, widths["trackWidthMm"],
+                    widths["clearanceMm"], nc_name,
+                )
+                ratlines.append({
+                    "net": net_name, "netclass": nc_name,
+                    "trackWidthMm": widths["trackWidthMm"],
+                    "clearanceMm": widths["clearanceMm"],
+                    "viaDiameterMm": widths["viaDiameterMm"],
+                    "fromRef": ra, "fromPad": na,
+                    "toRef": rb, "toPad": nb,
+                    "reachable": reach,
+                    "sameLayerReachable": reach and same,
+                    "reason": reason,
+                    "remediationHint": hint,
+                })
+                if reach:
+                    counts["reachable"] += 1
+                    nc_counts["reachable"] += 1
+                    if same:
+                        counts["sameLayer"] += 1
+                        nc_counts["sameLayer"] += 1
+                    else:
+                        counts["viaRequired"] += 1
+                        nc_counts["viaRequired"] += 1
+                else:
+                    counts["unreachable"] += 1
+                    nc_counts["unreachable"] += 1
+
+        netclasses_evaluated.append({
+            "netclass": nc_name,
+            **widths,
+            "netCount": len(net_names),
+            "counts": nc_counts,
+        })
+
+    return {
+        "success": True,
+        "layers": [ln for _, ln in target],
+        "grid": {"resolutionMm": resolution_mm},
+        "netclassesEvaluated": netclasses_evaluated,
+        "summary": counts,
+        "ratlines": ratlines,
+        "limitations": (
+            "Uses the all-copper-as-obstacle approximation (same as "
+            "routability_report) — fast and shared per-layer EDT across "
+            "netclasses. A ratline marked unreachable here might still "
+            "route per-net; confirm with check_pad_routability_multilayer "
+            "per-net for any flagged ratline."
+        ),
+        "message": (
+            f"Pre-route audit: {counts['totalRatlines']} ratlines across "
+            f"{len(netclasses_evaluated)} netclass(es). "
+            f"{counts['reachable']} reachable "
+            f"({counts['sameLayer']} same-layer, "
+            f"{counts['viaRequired']} via-required), "
+            f"{counts['unreachable']} UNREACHABLE — see ratlines[] for "
+            f"per-ratline remediation hints."
+        ),
+    }

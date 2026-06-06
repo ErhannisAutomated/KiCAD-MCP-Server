@@ -210,7 +210,7 @@ class RoutingCommands:
                 shown = "; ".join(obs[:8])
                 if len(obs) > 8:
                     shown += f" (+{len(obs) - 8} more)"
-                return {
+                error: Dict[str, Any] = {
                     "success": False,
                     "message": f"Route blocked by {len(obs)} obstacle(s)",
                     "errorDetails": (
@@ -225,6 +225,77 @@ class RoutingCommands:
                     ),
                     "obstacles": obs,
                 }
+                # Phase-4 enrichment: layer-topology answer for the same
+                # failure question ("is this even reachable, and if so
+                # where's the bottleneck?"). Best-effort — any error in
+                # the analysis is swallowed; the raw obstacle list is
+                # the authoritative answer.
+                try:
+                    from commands.topology import (
+                        check_pad_routability,
+                        check_pad_routability_multilayer,
+                    )
+                    if needs_via:
+                        topo = check_pad_routability_multilayer(
+                            self.board,
+                            from_ref=from_ref, from_pad=from_pad,
+                            to_ref=to_ref, to_pad=to_pad,
+                            width_mm=(
+                                float(width) if width is not None else 0.2
+                            ),
+                            via_diameter_mm=0.6,  # routing-default fallback
+                            clearance_mm=(
+                                float(clearance)
+                                if clearance is not None else None
+                            ),
+                        )
+                    else:
+                        topo = check_pad_routability(
+                            self.board,
+                            from_ref=from_ref, from_pad=from_pad,
+                            to_ref=to_ref, to_pad=to_pad,
+                            layer=start_layer,
+                            width_mm=(
+                                float(width) if width is not None else 0.2
+                            ),
+                            clearance_mm=(
+                                float(clearance)
+                                if clearance is not None else None
+                            ),
+                        )
+                    if topo.get("success"):
+                        hint: Dict[str, Any] = {
+                            "reachable": topo.get("reachable"),
+                            "reason": topo.get("reason"),
+                        }
+                        if topo.get("bottleneckWidthMm") is not None:
+                            hint["bottleneckWidthMm"] = topo["bottleneckWidthMm"]
+                        if topo.get("sameLayerReachable") is not None:
+                            hint["sameLayerReachable"] = topo["sameLayerReachable"]
+                        if topo.get("viaCandidatesTotal"):
+                            hint["viaCandidatesTotal"] = topo["viaCandidatesTotal"]
+                        error["topologyHint"] = hint
+                        if topo.get("reachable"):
+                            error["errorDetails"] += (
+                                " | Topology: pads ARE reachable at this "
+                                "width — route_pad_to_pad just can't find a "
+                                "straight path. Try route_trace with "
+                                "intermediate waypoints, or use the "
+                                "freerouter (autoroute)."
+                            )
+                            if topo.get("bottleneckWidthMm"):
+                                error["errorDetails"] += (
+                                    f" Path bottleneck ≈ "
+                                    f"{topo['bottleneckWidthMm']} mm."
+                                )
+                        else:
+                            error["errorDetails"] += (
+                                f" | Topology: pads are NOT reachable at "
+                                f"this width (reason: {topo.get('reason')})."
+                            )
+                except Exception:
+                    pass
+                return error
 
             if needs_via:
                 if escape_from_w or escape_to_w:
