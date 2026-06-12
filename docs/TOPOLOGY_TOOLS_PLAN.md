@@ -1,8 +1,11 @@
 # Routing Topology Tools — Design Plan
 
-Status: **Phases 1+2+3+4a/4b/4c implemented** on `develop` (Phase 1+2:
-2026-05-31, Phase 3: 2026-06-05, Phase 4a/4b/4c: 2026-06-06). Phase 4
-`relax_placement` routability scoring still planned. Implementation lives in `python/commands/topology.py`
+Status: **Complete** on `develop` (Phase 1+2: 2026-05-31, Phase 3:
+2026-06-05, Phase 4a/4b/4c: 2026-06-06; project closed 2026-06-10).
+The originally-planned `relax_placement` routability scoring was
+**declined as not worth the cost** — see "Decision log" below. Reopen
+the project if/when a concrete workflow problem surfaces that the
+shipped tools can't address. Implementation lives in `python/commands/topology.py`
 (plus a small enrichment to `python/commands/routing.py`'s
 `_obstacle_error` closure); TS bindings in `src/tools/placement.ts`.
 See `## Effort` for the phase table. Phase 2 picks the *max-bottleneck*
@@ -212,35 +215,51 @@ quantization), but slower on dense boards. Worth it for the final
   pad's **escape zone** (pad polygon buffered by W/2+C+ε) intersected
   with each free-space component — handles `own_net=None` and
   `own_net=X` uniformly without special-casing. `relax_placement`
-  routability scoring still pending (touches the autoplacer; intentionally
-  not bundled with the analysis work).
+  routability scoring **declined 2026-06-10** — see decision log.
 
 Total: ~5-7 sessions for a useful first cut with rich integration.
 
-### How to resume (remaining work)
+### Decision log
 
-Phases 4a, 4b, 4c all shipped 2026-06-06. The only remaining item from
-the original Phase 4 scope:
+**`relax_placement` routability scoring — declined 2026-06-10.**
+The original plan listed this as a Phase 4 deliverable. After Phases
+4a/4b/4c shipped, re-evaluation showed the cost/benefit doesn't favor
+it:
 
-**`relax_placement` routability scoring.** Sum `check_pad_routability`
-over the ratsnest at netclass widths and hard-penalise placements that
-flip a ratline from reachable → unreachable. Touches the placement
-scoring function in `python/commands/pcb_autoplacer.py` — non-trivial
-integration, intentionally not bundled with the analysis work. The
-hook point is wherever the placer evaluates "is this candidate
-position good?" — add a per-ratline reachability term to the score
-function. Start small: only the affected nets (those whose pads are in
-the moved cluster).
+- **Performance.** Spring relaxation runs hundreds of iterations ×
+  hundreds of candidate moves. `check_pad_routability` is 10–50 ms
+  even in raster mode. Naively bolted on, the relax loop blows up
+  from seconds to minutes/hours. Amortizing (sample every N
+  iterations, only re-check ratlines whose endpoints moved) is doable
+  but fiddly.
+- **Tuning regression risk.** The autoplacer's force constants are
+  already validated; adding a new score term forces a re-tuning round
+  with the usual long tail of "huh, that broke X in a weird way".
+- **Marginal value.** The autoplacer already minimizes wire length,
+  which correlates strongly with keeping ratlines reachable. Cases
+  where relax flips a ratline reachable → unreachable are probably
+  uncommon, AND the shipped workflow (`pre_route_audit` after
+  placement → fix flagged ratlines → re-relax) catches them with one
+  extra round-trip.
 
-**Other deferred items** (not in original Phase 4 scope; revisit when
-needed):
+**Other items not shipped** (revisit only when there's evidence of
+need):
 - `analyze_routable_regions(mode="exact")` — same shapely treatment;
-  return polygons as WKT. Skipped this round because the Phase 4c
-  use case is the binary go/no-go question, not the area survey.
+  return polygons as WKT. Skipped because the Phase 4c use case is
+  the binary go/no-go pair question.
 - Medial-axis graph, `count_distinct_paths`, `rooms_and_corridors` —
   the EDT-threshold + connected-components approach turned out to be
-  sufficient for everything shipped. Bring back medial axis only if a
-  future tool needs it.
+  enough for every shipped tool.
+
+### How to reopen
+
+If a real workflow problem surfaces that points back at the autoplacer
+("I keep getting placements where ratline X is unreachable and the
+autoplacer can't see it"), reopen with concrete evidence. The hook
+point is wherever the placer evaluates "is this candidate position
+good?" in `python/commands/pcb_autoplacer.py` — add a per-ratline
+reachability term to the score function, scoped to affected nets only
+to bound runtime.
 
 Bug log (worth remembering):
 - **Phase 2:** the free-space mask must exclude obstacles
