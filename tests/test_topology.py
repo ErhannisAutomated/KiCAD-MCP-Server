@@ -141,6 +141,90 @@ class TestBfsPath:
 class TestAnalyzeRegionsIntegration:
     SCALE = 1_000_000
 
+    def test_zones_modeled_as_obstacles(self):
+        """Regression: zones (pours) must count as obstacles for
+        foreign nets and be invisible for the trace's own net. Before
+        the fix `_build_obstacle_mask` ignored every zone on the board,
+        so a GND plane fill on In1.Cu looked like an empty layer to a
+        BAT+ trace — false-positive "wide open routing space".
+        """
+        import pcbnew
+        from commands.topology import _build_obstacle_mask
+
+        # 20 x 10 mm board with a foreign-net (FOREIGN) zone covering
+        # most of F.Cu, plus a small same-net (OWN) zone in one corner.
+        board = pcbnew.BOARD()
+        edge_layer = board.GetLayerID("Edge.Cuts")
+        for (x0, y0), (x1, y1) in [
+            ((0, 0), (20, 0)),
+            ((20, 0), (20, 10)),
+            ((20, 10), (0, 10)),
+            ((0, 10), (0, 0)),
+        ]:
+            seg = pcbnew.PCB_SHAPE(board)
+            seg.SetShape(pcbnew.SHAPE_T_SEGMENT)
+            seg.SetLayer(edge_layer)
+            seg.SetStart(pcbnew.VECTOR2I(int(x0 * self.SCALE), int(y0 * self.SCALE)))
+            seg.SetEnd(pcbnew.VECTOR2I(int(x1 * self.SCALE), int(y1 * self.SCALE)))
+            board.Add(seg)
+
+        foreign = pcbnew.NETINFO_ITEM(board, "FOREIGN")
+        board.Add(foreign)
+        own = pcbnew.NETINFO_ITEM(board, "OWN")
+        board.Add(own)
+
+        # Big FOREIGN zone covering F.Cu from x=2..18, y=2..8.
+        # We bypass ZONE_FILLER (which segfaults on a board built
+        # bare in Python) and inject the filled-polys directly via
+        # SetFilledPolysList — same data the filler would have
+        # produced.
+        z_foreign = pcbnew.ZONE(board)
+        z_foreign.SetLayer(pcbnew.F_Cu)
+        z_foreign.SetNet(foreign)
+        outline = pcbnew.SHAPE_LINE_CHAIN()
+        for x, y in [(2, 2), (18, 2), (18, 8), (2, 8)]:
+            outline.Append(int(x * self.SCALE), int(y * self.SCALE))
+        outline.SetClosed(True)
+        z_foreign.Outline().AddOutline(outline)
+        # Mirror outline → filled polys (no clearance cutouts; v1).
+        filled = pcbnew.SHAPE_POLY_SET()
+        filled.AddOutline(outline)
+        z_foreign.SetFilledPolysList(pcbnew.F_Cu, filled)
+        z_foreign.SetIsFilled(True)
+        board.Add(z_foreign)
+
+        # Build the obstacle mask seen by a "FOREIGN" trace and an
+        # "OWN" trace on F.Cu.
+        g = 0.1
+        nx = int(20 / g) + 4
+        ny = int(10 / g) + 4
+        x0_grid = -0.2; y0_grid = -0.2
+        mask_foreign = _build_obstacle_mask(
+            board, pcbnew.F_Cu, "FOREIGN", x0_grid, y0_grid, nx, ny, g,
+        )
+        mask_own = _build_obstacle_mask(
+            board, pcbnew.F_Cu, "OWN", x0_grid, y0_grid, nx, ny, g,
+        )
+
+        # Trace on the FOREIGN net: own copper excluded → very few
+        # obstacle pixels (mostly board padding). Sanity-check it's
+        # well below the zone area.
+        foreign_pct = 100 * mask_foreign.sum() / mask_foreign.size
+        assert foreign_pct < 10, (
+            f"OWN-net mask shouldn't include the FOREIGN pour: "
+            f"{foreign_pct:.1f}% obstacle, expected near 0%."
+        )
+        # Trace on the OWN net (which doesn't own the zone): the
+        # FOREIGN pour IS an obstacle. Expect a substantial chunk of
+        # F.Cu to be marked obstacle (the 16x6=96 mm² zone is ~48% of
+        # the 200 mm² board).
+        own_pct = 100 * mask_own.sum() / mask_own.size
+        assert own_pct > 20, (
+            f"FOREIGN pour should be visible on the OWN-net mask: "
+            f"{own_pct:.1f}% obstacle, expected ≥ 20% (the zone covers "
+            f"~half the board)."
+        )
+
     def test_resolve_clearance_uses_netclass_not_swig_pyobject(self):
         """Regression: `pcbnew.NETINFO_ITEM.GetNetClass()` returns a raw
         `SwigPyObject` that lacks `.GetClearance()`. The bug silently

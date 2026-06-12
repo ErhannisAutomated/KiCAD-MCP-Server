@@ -298,7 +298,105 @@ def _build_obstacle_mask(
                 x0, y0, g,
             )
 
+    # Zones (pours). A pour on the trace's own net is not an obstacle —
+    # the fill hands off connectivity at refill time. A pour on a foreign
+    # net IS an obstacle. The filled-polygons API already incorporates
+    # clearance against foreign-net items, so we rasterize the actual
+    # filled extent (not the zone outline).
+    _stamp_zones_on_layer(mask, board, layer_id, own_net, x0, y0, g)
+
     return mask
+
+
+def _stamp_zones_on_layer(
+    mask: np.ndarray,
+    board: Any,
+    layer_id: int,
+    own_net: Optional[str],
+    x0: float, y0: float, g: float,
+) -> None:
+    """Rasterize foreign-net zone fills on `layer_id` into `mask`.
+
+    KiCad's `SHAPE_POLY_SET` can represent holes either as separate
+    outlines or as self-touching bridges in the main outline. We
+    rasterize per Outline() (using PIL's polygon fill, which honours
+    the bridge representation correctly) and subtract per Hole() —
+    covering both representations without inspecting which one this
+    particular zone happens to use.
+    """
+    try:
+        n_zones = board.GetAreaCount()
+    except Exception:
+        return
+    if n_zones <= 0:
+        return
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        logger.warning(
+            "_stamp_zones_on_layer: PIL not available — zones will be "
+            "ignored (this used to be the silent default; now it warns)."
+        )
+        return
+
+    ny, nx = mask.shape
+
+    def _verts_for(chain: Any) -> List[Tuple[int, int]]:
+        n = chain.PointCount()
+        out: List[Tuple[int, int]] = []
+        for i in range(n):
+            v = chain.CPoint(i)
+            out.append(_xy_mm_to_px(v.x / SCALE, v.y / SCALE, x0, y0, g))
+        return out
+
+    accumulated: Optional[Image.Image] = None
+    for i in range(n_zones):
+        try:
+            zone = board.GetArea(i)
+        except Exception:
+            continue
+        net = zone.GetNetname() or ""
+        if own_net is not None and net == own_net:
+            continue
+        # Zones can span multiple layers (e.g. F+B for thermal pads);
+        # rasterize only this layer's fill geometry.
+        try:
+            if not zone.IsOnLayer(layer_id):
+                continue
+            poly_set = zone.GetFilledPolysList(layer_id)
+        except Exception:
+            continue
+        if poly_set is None or poly_set.IsEmpty():
+            continue
+
+        if accumulated is None:
+            accumulated = Image.new("L", (nx, ny), 0)
+            draw = ImageDraw.Draw(accumulated)
+        # else draw was bound on the first allocation
+
+        for outline_idx in range(poly_set.OutlineCount()):
+            try:
+                outer = poly_set.Outline(outline_idx)
+            except Exception:
+                continue
+            verts = _verts_for(outer)
+            if len(verts) >= 3:
+                draw.polygon(verts, fill=1)
+            try:
+                n_holes = poly_set.HoleCount(outline_idx)
+            except Exception:
+                n_holes = 0
+            for hole_idx in range(n_holes):
+                try:
+                    hole = poly_set.Hole(outline_idx, hole_idx)
+                except Exception:
+                    continue
+                hole_verts = _verts_for(hole)
+                if len(hole_verts) >= 3:
+                    draw.polygon(hole_verts, fill=0)
+
+    if accumulated is not None:
+        mask |= np.array(accumulated, dtype=bool)
 
 
 # --------------------------------------------------------------------------
@@ -2152,6 +2250,72 @@ def _build_obstacle_polygons(
             if own_net is not None and net == own_net:
                 continue
             polys.append(_pad_polygon(pad))
+
+    # Zones (pours). Same own-net filter as tracks/pads.
+    try:
+        n_zones = board.GetAreaCount()
+    except Exception:
+        n_zones = 0
+    if n_zones > 0:
+        from shapely.geometry import Polygon as _Poly
+        for i in range(n_zones):
+            try:
+                zone = board.GetArea(i)
+            except Exception:
+                continue
+            net = zone.GetNetname() or ""
+            if own_net is not None and net == own_net:
+                continue
+            try:
+                if not zone.IsOnLayer(layer_id):
+                    continue
+                poly_set = zone.GetFilledPolysList(layer_id)
+            except Exception:
+                continue
+            if poly_set is None or poly_set.IsEmpty():
+                continue
+            for outline_idx in range(poly_set.OutlineCount()):
+                try:
+                    outer = poly_set.Outline(outline_idx)
+                except Exception:
+                    continue
+                shell = [
+                    (outer.CPoint(j).x / SCALE, outer.CPoint(j).y / SCALE)
+                    for j in range(outer.PointCount())
+                ]
+                if len(shell) < 3:
+                    continue
+                holes: List[List[Tuple[float, float]]] = []
+                try:
+                    n_holes = poly_set.HoleCount(outline_idx)
+                except Exception:
+                    n_holes = 0
+                for hole_idx in range(n_holes):
+                    try:
+                        hole = poly_set.Hole(outline_idx, hole_idx)
+                    except Exception:
+                        continue
+                    h_pts = [
+                        (hole.CPoint(j).x / SCALE, hole.CPoint(j).y / SCALE)
+                        for j in range(hole.PointCount())
+                    ]
+                    if len(h_pts) >= 3:
+                        holes.append(h_pts)
+                try:
+                    poly = _Poly(shell, holes=holes if holes else None)
+                except Exception:
+                    continue
+                if poly.is_empty:
+                    continue
+                # KiCad's bridged-outline representation creates a
+                # self-touching polygon. Shapely warns; .buffer(0) is
+                # the canonical "clean it up" idiom.
+                if not poly.is_valid:
+                    try:
+                        poly = poly.buffer(0)
+                    except Exception:
+                        continue
+                polys.append(poly)
 
     return polys
 

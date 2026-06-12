@@ -128,7 +128,20 @@ edge bridging its two layer-regions.
 the pour will hand off connectivity at fill time. A pour on a foreign net IS
 an obstacle (with whatever clearance the zone declares). Pre-process: union
 the same-net zones into the trace's "free addition" region, union
-foreign-net zones into the obstacle set.
+foreign-net zones into the obstacle set. **Shipped 2026-06-10** after the
+power_module live test surfaced the gap: tools were ignoring all zones
+which made foreign-net plane fills (e.g. GND on In1.Cu) look like empty
+routing space. `_build_obstacle_mask` (raster path) and
+`_build_obstacle_polygons` (shapely / `mode="exact"` path) both now
+iterate `board.GetArea(i)` with the same `own_net` filter that already
+gates tracks/pads/vias. Zone fill geometry comes from
+`zone.GetFilledPolysList(layer_id)`; raster uses PIL's polygon fill
+(handles KiCad's bridged-outline representation correctly), shapely
+uses `Polygon(shell, holes)` with a `.buffer(0)` clean-up for
+self-touching outlines. Same-net pours stay invisible because the
+`if net == own_net: continue` guard catches them up-front — the
+"trivially reachable via any via candidate" mental model falls out of
+the multilayer logic without any new representation.
 
 **Polygon-exact mode (phase 3).** Same algorithms but on `shapely` polygon
 sets: `unary_union(foreign_polygons).buffer(W/2 + C)` for the obstacle
