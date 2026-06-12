@@ -80,27 +80,41 @@ def _board_bbox_mm(board: Any) -> Tuple[float, float, float, float]:
 # --------------------------------------------------------------------------
 def _resolve_clearance_mm(board: Any, net_name: Optional[str], override_mm: Optional[float]) -> float:
     """Return the clearance in mm: caller override → net's netclass → design
-    default → 0. Mirrors RoutingCommands._resolve_route_clearance, but in mm."""
+    default → 0.
+
+    NOTE: `pcbnew.NETINFO_ITEM.GetNetClass()` returns a raw `SwigPyObject`
+    that lacks `.GetClearance()` — the silent-AttributeError trap that
+    burned this function for the entire Phases 1–4 of the topology
+    project. Use `m_NetSettings.GetEffectiveNetClass(net_name)` instead
+    (returns a proper NETCLASS). Same gotcha is documented in
+    TOPOLOGY_TOOLS_PLAN.md's "bug log".
+    """
     if override_mm is not None:
         return float(override_mm)
     clearance_iu = 0
     if net_name:
         try:
-            nets_map = board.GetNetInfo().NetsByName()
-            if nets_map.has_key(net_name):
-                nc = nets_map[net_name].GetNetClass()
-                if nc is not None:
-                    clearance_iu = int(nc.GetClearance())
-        except Exception:
-            pass
+            ns = board.GetDesignSettings().m_NetSettings
+            nc = ns.GetEffectiveNetClass(net_name)
+            if nc is not None:
+                clearance_iu = int(nc.GetClearance())
+        except Exception as e:
+            logger.warning(
+                f"_resolve_clearance_mm: GetEffectiveNetClass('{net_name}') "
+                f"failed ({type(e).__name__}: {e}); falling back to design "
+                f"default."
+            )
     if clearance_iu <= 0:
         try:
-            bds = board.GetDesignSettings()
-            default_nc = bds.GetDefault() if hasattr(bds, "GetDefault") else None
+            ns = board.GetDesignSettings().m_NetSettings
+            default_nc = ns.GetDefaultNetclass()
             if default_nc is not None:
                 clearance_iu = int(default_nc.GetClearance())
-        except Exception:
-            pass
+        except Exception as e:
+            logger.warning(
+                f"_resolve_clearance_mm: default-netclass lookup failed "
+                f"({type(e).__name__}: {e}); using clearance = 0."
+            )
     return max(0.0, clearance_iu / SCALE)
 
 

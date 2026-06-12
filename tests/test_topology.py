@@ -141,6 +141,43 @@ class TestBfsPath:
 class TestAnalyzeRegionsIntegration:
     SCALE = 1_000_000
 
+    def test_resolve_clearance_uses_netclass_not_swig_pyobject(self):
+        """Regression: `pcbnew.NETINFO_ITEM.GetNetClass()` returns a raw
+        `SwigPyObject` that lacks `.GetClearance()`. The bug silently
+        returned 0 mm for the entire Phases 1–4 of the topology project
+        when run against real boards — every "reachable, bottleneck=W"
+        answer was actually "fits at ZERO clearance". Fix: use
+        `m_NetSettings.GetEffectiveNetClass(net_name)`, which returns a
+        proper NETCLASS. Test verifies the resolver returns a positive
+        clearance for a board whose default netclass has C > 0.
+        """
+        import pcbnew
+        from commands.topology import _resolve_clearance_mm
+
+        # Build a board with a non-zero default-netclass clearance.
+        board = pcbnew.BOARD()
+        ns = board.GetDesignSettings().m_NetSettings
+        default_nc = ns.GetDefaultNetclass()
+        default_nc.SetClearance(int(0.2 * self.SCALE))
+        default_nc.SetTrackWidth(int(0.25 * self.SCALE))
+
+        # Add a net so we can ask for its clearance.
+        net = pcbnew.NETINFO_ITEM(board, "TESTNET")
+        board.Add(net)
+
+        # The resolver must pull the 0.2 mm clearance, NOT silently
+        # return 0 because GetNetClass() handed back a SwigPyObject.
+        c = _resolve_clearance_mm(board, "TESTNET", None)
+        assert c == pytest.approx(0.2), (
+            f"Expected 0.2 mm from default netclass, got {c} mm — "
+            "the silent-AttributeError trap on GetNetClass() is back."
+        )
+
+        # Override path still works.
+        assert _resolve_clearance_mm(board, "TESTNET", 0.05) == pytest.approx(0.05)
+        # Unknown net falls through to default-netclass lookup.
+        assert _resolve_clearance_mm(board, "DOES_NOT_EXIST", None) == pytest.approx(0.2)
+
     def _build_split_board(self):
         """20 × 10 mm board with a single F.Cu track running vertically
         down the middle (x=10) at width 2 mm — splits F.Cu into two
