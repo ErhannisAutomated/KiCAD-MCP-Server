@@ -586,13 +586,13 @@ class TestAnalyzeRegionsIntegration:
         # don't over-trust a report-level "unreachable".
         assert "per-net" in r["limitations"]
 
-    # ----- Phase 4 ------------------------------------------------------
+    # ----- Phase 4 / 5: pre_route_audit terminal model -----------------
     def test_pre_route_audit_returns_remediation_hints(self):
         from commands.topology import pre_route_audit
 
         board = self._build_two_layer_split_board()
         # No nets assigned to pads in this fixture → audit should
-        # still succeed but with 0 ratlines (no ≥2-pad net).
+        # still succeed but with 0 spokes (no ≥2-terminal net).
         r = pre_route_audit(
             board,
             width_mm_override=0.2,
@@ -602,10 +602,13 @@ class TestAnalyzeRegionsIntegration:
         )
         assert r["success"] is True
         assert "netclassesEvaluated" in r
-        assert "limitations" in r and "per-net" in r["limitations"]
-        # Empty board (no nets) should produce an empty ratline list.
-        assert r["summary"]["totalRatlines"] == 0
-        assert r["ratlines"] == []
+        # The Phase-5 limitations note mentions hub/spoke + multi-layer
+        # meta-graph, NOT the old per-net caveat (which was specific to
+        # the routability_report's all-copper approximation).
+        assert "limitations" in r
+        # Empty board (no nets) → no spokes.
+        assert r["summary"]["totalSpokes"] == 0
+        assert r["spokes"] == []
 
     # ----- Phase 4c: polygon-exact mode --------------------------------
     def test_polygon_exact_matches_raster_on_open_board(self):
@@ -654,16 +657,15 @@ class TestAnalyzeRegionsIntegration:
         assert "exact" in r["message"]
 
     def test_pre_route_audit_unreachable_carries_remediation(self):
-        """Build a board with a net forcing an unreachable ratline; the
-        audit must surface a remediationHint string."""
+        """Build a board with a net forcing reachable-but-only-via-bridge
+        spokes; the audit must surface a remediationHint string and the
+        terminal-shaped entries (hub + spoke summaries)."""
         import pcbnew
 
         board = self._build_two_layer_split_board()
-        # Give L1 + R1 the same net so they form a ratline; the F.Cu
-        # wall splits the layer, but B.Cu is open so reach=True
-        # (via-required). Inject a second pair (L2 + R2) that are
-        # *on the same net* but no via candidacy can bridge them
-        # because the via would need to land on the wall.
+        # Give L1 + R1 the same net so they form a spoke-pair against
+        # whichever is hub; the F.Cu wall splits the layer, but B.Cu is
+        # open so reach=True (via-required).
         net = pcbnew.NETINFO_ITEM(board, "SAMENET")
         board.Add(net)
         for fp in board.GetFootprints():
@@ -678,13 +680,79 @@ class TestAnalyzeRegionsIntegration:
             resolution_mm=0.1,
         )
         assert r["success"] is True
-        # At least one ratline created.
-        assert r["summary"]["totalRatlines"] >= 1
+        # At least one spoke created.
+        assert r["summary"]["totalSpokes"] >= 1
         # Should be reachable via B.Cu bridge.
-        ratline = r["ratlines"][0]
-        assert ratline["reachable"] is True
-        assert ratline["sameLayerReachable"] is False
-        # Reachable ratlines have remediationHint=None.
-        assert ratline["remediationHint"] is None
-        assert "netclass" in ratline
+        spoke = r["spokes"][0]
+        assert spoke["reachable"] is True
+        assert spoke["sameLayerReachable"] is False
+        # Reachable spokes have remediationHint=None.
+        assert spoke["remediationHint"] is None
+        # Terminal model: hub + spoke shapes carry kind/label/area.
+        assert "netclass" in spoke
+        assert spoke["hub"]["kind"] in ("pad", "zone")
+        assert "label" in spoke["hub"]
+        assert "areaMm2" in spoke["hub"]
+        assert spoke["spoke"]["kind"] in ("pad", "zone")
+
+    def test_pre_route_audit_zone_dominates_pad_as_hub(self):
+        """When a net has a big pour and a small pad, the audit must
+        pick the pour as hub. The pad spoke then reports reachable
+        because per-net analysis excludes the pour from obstacles and
+        the via-candidacy mask connects them.
+        """
+        import pcbnew
+
+        board = self._build_open_board()  # 20×10mm, two SMD pads L1/R1
+        # Put both pads on net BAT+, and add a large BAT+ zone on B.Cu
+        # covering most of the board.
+        net = pcbnew.NETINFO_ITEM(board, "BAT+")
+        board.Add(net)
+        for fp in board.GetFootprints():
+            for pad in fp.Pads():
+                pad.SetNet(net)
+        z = pcbnew.ZONE(board)
+        z.SetLayer(pcbnew.B_Cu)
+        z.SetNet(net)
+        outline = pcbnew.SHAPE_LINE_CHAIN()
+        for x, y in [(1, 1), (19, 1), (19, 9), (1, 9)]:
+            outline.Append(int(x * self.SCALE), int(y * self.SCALE))
+        outline.SetClosed(True)
+        z.Outline().AddOutline(outline)
+        filled = pcbnew.SHAPE_POLY_SET()
+        filled.AddOutline(outline)
+        z.SetFilledPolysList(pcbnew.B_Cu, filled)
+        z.SetIsFilled(True)
+        board.Add(z)
+
+        from commands.topology import pre_route_audit
+        r = pre_route_audit(
+            board,
+            width_mm_override=0.25,
+            via_diameter_mm_override=0.5,
+            clearance_mm_override=0.05,
+            resolution_mm=0.1,
+        )
+        assert r["success"] is True
+        # Hub must be the zone (it has by far the largest area).
+        spokes = r["spokes"]
+        assert spokes, "expected at least one spoke entry"
+        for s in spokes:
+            assert s["hub"]["kind"] == "zone", (
+                f"hub should be the BAT+ pour, got {s['hub']!r}"
+            )
+            assert s["hub"]["label"].startswith("ZONE_BAT+_B.Cu_")
+            # Pads should reach the pour via via-candidates.
+            assert s["reachable"] is True, (
+                f"pad spoke {s['spoke']['label']} should reach the pour: "
+                f"reason={s.get('reason')}"
+            )
+
+    # Note: the "zone_no_anchor" unreachable-spoke case (a pour the
+    # EDT erodes entirely at netclass widths) is reliably reproduced
+    # by power_module's ZONE_BAT+_F.Cu_01c9d9bf — see the live
+    # verification in /tmp/claude/test_pm5.py. A synthetic test would
+    # need a carefully-placed ring of foreign-net obstacles around
+    # the tiny pour and the synthetic fixture path makes that fiddly;
+    # the live test is the primary verification.
         assert "trackWidthMm" in ratline

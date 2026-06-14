@@ -1887,7 +1887,347 @@ def _remediation_hint(
             "Endpoint pads are on different nets — the ratline shouldn't "
             "exist. Re-check schematic connections."
         )
+    if reason == "spoke_unreachable_from_hub":
+        return (
+            f"This terminal can't reach the net's main hub at netclass "
+            f"'{netclass_name}' (W={w} mm, C={c} mm). Likely missing a "
+            f"stitching via to the main plane, or geometrically isolated "
+            f"by foreign-net copper. Check the cluster grouping for "
+            f"other terminals stuck in the same sub-net."
+        )
     return None
+
+
+# --------------------------------------------------------------------------
+# Phase 5: Net-terminal abstraction (pads + zones treated uniformly)
+# --------------------------------------------------------------------------
+class _Terminal:
+    """A net's terminal — either a pad or a zone. Carries the geometry
+    needed to anchor it into the meta-graph and to choose a hub.
+
+    Per the 2026-06-13 design discussion: zones are first-class
+    terminals (large pads, basically), every spoke is checked against
+    the hub via the existing union-find on the meta-graph, and a
+    zone-spoke that doesn't reach the hub is a legitimate flag (it
+    surfaces the unstitched-bridge-zone case directly).
+    """
+
+    __slots__ = (
+        "uid", "net", "kind", "label",
+        "layer_ids", "area_mm2", "centroid_mm",
+        "_pad", "_zone",
+    )
+
+    def __init__(
+        self,
+        uid: str, net: str, kind: str, label: str,
+        layer_ids: List[int], area_mm2: float,
+        centroid_mm: Tuple[float, float],
+        pad: Optional[Any] = None, zone: Optional[Any] = None,
+    ) -> None:
+        self.uid = uid
+        self.net = net
+        self.kind = kind  # "pad" or "zone"
+        self.label = label  # human-readable for audit output
+        self.layer_ids = layer_ids
+        self.area_mm2 = area_mm2
+        self.centroid_mm = centroid_mm
+        self._pad = pad
+        self._zone = zone
+
+    def __repr__(self) -> str:
+        return f"<Terminal {self.label} ({self.kind}, {self.area_mm2:.2f} mm²)>"
+
+
+def _short_uuid(item: Any) -> str:
+    """First 8 hex chars of an item's KiCad UUID (or 'noid' if absent)."""
+    try:
+        return item.m_Uuid.AsString().replace("-", "")[:8]
+    except Exception:
+        return "noid"
+
+
+def _enumerate_terminals(
+    board: Any,
+    target_layer_ids: List[int],
+    nets_filter: Optional[set] = None,
+) -> Dict[str, List["_Terminal"]]:
+    """Walk the board's pads + zones and return a per-net terminal list.
+
+    Each terminal records the copper layer IDs it's present on (within
+    `target_layer_ids`), its area in mm² (for hub selection), and a
+    centroid (for the centrality tiebreaker among similar-area pads).
+    Zones use the FILLED polygon — un-filled zones are skipped (same
+    as the obstacle rasteriser; un-filled means no copper yet).
+    """
+    target_set = set(int(lid) for lid in target_layer_ids)
+    out: Dict[str, List[_Terminal]] = {}
+
+    # Pads.
+    for fp in board.GetFootprints():
+        ref = fp.GetReference()
+        for pad in fp.Pads():
+            net = pad.GetNetname() or ""
+            if not net:
+                continue
+            if nets_filter is not None and net not in nets_filter:
+                continue
+            layer_ids = [lid for lid in target_set if _pad_is_on_layer(pad, lid)]
+            if not layer_ids:
+                continue
+            sz = pad.GetSize()
+            area_mm2 = (sz.x / SCALE) * (sz.y / SCALE)
+            pos = pad.GetPosition()
+            term = _Terminal(
+                uid=f"PAD_{ref}_{pad.GetNumber()}_{_short_uuid(pad)}",
+                net=net,
+                kind="pad",
+                label=f"{ref}.{pad.GetNumber()}",
+                layer_ids=layer_ids,
+                area_mm2=area_mm2,
+                centroid_mm=(pos.x / SCALE, pos.y / SCALE),
+                pad=pad,
+            )
+            out.setdefault(net, []).append(term)
+
+    # Zones.
+    try:
+        n_zones = board.GetAreaCount()
+    except Exception:
+        n_zones = 0
+    for i in range(n_zones):
+        try:
+            zone = board.GetArea(i)
+        except Exception:
+            continue
+        net = zone.GetNetname() or ""
+        if not net:
+            continue
+        if nets_filter is not None and net not in nets_filter:
+            continue
+        layer_ids: List[int] = []
+        for lid in target_set:
+            try:
+                if not zone.IsOnLayer(lid):
+                    continue
+                poly = zone.GetFilledPolysList(lid)
+                if poly is None or poly.IsEmpty():
+                    continue
+                layer_ids.append(lid)
+            except Exception:
+                continue
+        if not layer_ids:
+            continue
+        # Area: prefer GetFilledArea (nm²), but fall back to the
+        # shoelace area of the filled polygon when it's 0 or fails —
+        # ZONE_FILLER segfaults on Python-constructed boards in tests
+        # so SetFilledPolysList is used directly and the internal
+        # GetFilledArea cache stays 0. We can recompute from the
+        # polygon we already have.
+        area_mm2 = 0.0
+        try:
+            area_mm2 = float(zone.GetFilledArea()) / (SCALE * SCALE)
+        except Exception:
+            area_mm2 = 0.0
+        if area_mm2 <= 0.0:
+            for lid in layer_ids:
+                try:
+                    poly_set = zone.GetFilledPolysList(lid)
+                except Exception:
+                    continue
+                if poly_set is None or poly_set.IsEmpty():
+                    continue
+                for outline_idx in range(poly_set.OutlineCount()):
+                    outer = poly_set.Outline(outline_idx)
+                    n = outer.PointCount()
+                    if n < 3:
+                        continue
+                    # Shoelace formula in mm.
+                    a = 0.0
+                    for j in range(n):
+                        k = (j + 1) % n
+                        p = outer.CPoint(j)
+                        q = outer.CPoint(k)
+                        a += (p.x / SCALE) * (q.y / SCALE)
+                        a -= (q.x / SCALE) * (p.y / SCALE)
+                    area_mm2 += abs(a) / 2.0
+        if area_mm2 <= 0.0:
+            # Final fallback: bbox (over-counts for L-shapes etc., but
+            # the zone is at least *somewhere*).
+            bb = zone.GetBoundingBox()
+            area_mm2 = (bb.GetWidth() / SCALE) * (bb.GetHeight() / SCALE)
+        # Centroid: bbox center is a good-enough representative for hub
+        # tiebreaks. (Polygon centroid would be more accurate but the
+        # bbox suffices for "which hub is most central?")
+        bb = zone.GetBoundingBox()
+        cx_mm = (bb.GetLeft() + bb.GetWidth() / 2.0) / SCALE
+        cy_mm = (bb.GetTop() + bb.GetHeight() / 2.0) / SCALE
+        primary_layer_name = board.GetLayerName(layer_ids[0])
+        term = _Terminal(
+            uid=f"ZONE_{net}_{primary_layer_name}_{_short_uuid(zone)}",
+            net=net,
+            kind="zone",
+            label=f"ZONE_{net}_{primary_layer_name}_{_short_uuid(zone)}",
+            layer_ids=layer_ids,
+            area_mm2=area_mm2,
+            centroid_mm=(cx_mm, cy_mm),
+            zone=zone,
+        )
+        out.setdefault(net, []).append(term)
+
+    return out
+
+
+def _select_hub(terminals: List["_Terminal"]) -> int:
+    """Return the index of the hub terminal in `terminals`.
+
+    Primary criterion: biggest area_mm2 (so a large pour beats any pad).
+    Tiebreaker: most-central terminal — minimum sum of distances to
+    every other terminal. For nets with one zone and many pads the
+    zone wins on area alone; for signal nets with no zone, centrality
+    picks a reasonable "center of mass" pad instead of whoever's first
+    in iteration order.
+    """
+    if not terminals:
+        return -1
+    max_area = max(t.area_mm2 for t in terminals)
+    candidates = [
+        i for i, t in enumerate(terminals)
+        if t.area_mm2 >= max_area - 1e-9
+    ]
+    if len(candidates) == 1:
+        return candidates[0]
+
+    # Centrality tiebreaker.
+    def _sum_dist(i: int) -> float:
+        cx, cy = terminals[i].centroid_mm
+        return sum(
+            math.hypot(cx - terminals[j].centroid_mm[0],
+                       cy - terminals[j].centroid_mm[1])
+            for j in range(len(terminals)) if j != i
+        )
+    return min(candidates, key=_sum_dist)
+
+
+def _rasterize_zone_on_layer(
+    zone: Any,
+    layer_id: int,
+    state: Dict[str, Any],
+) -> Optional[np.ndarray]:
+    """Rasterize a single zone's filled polygon on `layer_id` into a
+    bool mask of `state["mask"]`'s shape. Same algorithm as
+    `_stamp_zones_on_layer` but for one zone — used to find which
+    free-space components the zone overlaps.
+    """
+    try:
+        if not zone.IsOnLayer(layer_id):
+            return None
+        poly_set = zone.GetFilledPolysList(layer_id)
+    except Exception:
+        return None
+    if poly_set is None or poly_set.IsEmpty():
+        return None
+    try:
+        from PIL import Image, ImageDraw
+    except ImportError:
+        return None
+
+    ny, nx = state["mask"].shape
+    g = state["g"]
+    x0 = state["x0"]
+    y0 = state["y0"]
+
+    def _verts(chain: Any) -> List[Tuple[int, int]]:
+        return [
+            _xy_mm_to_px(
+                chain.CPoint(i).x / SCALE, chain.CPoint(i).y / SCALE,
+                x0, y0, g,
+            )
+            for i in range(chain.PointCount())
+        ]
+
+    img = Image.new("L", (nx, ny), 0)
+    draw = ImageDraw.Draw(img)
+    for outline_idx in range(poly_set.OutlineCount()):
+        try:
+            outer = poly_set.Outline(outline_idx)
+        except Exception:
+            continue
+        verts = _verts(outer)
+        if len(verts) >= 3:
+            draw.polygon(verts, fill=1)
+        try:
+            n_holes = poly_set.HoleCount(outline_idx)
+        except Exception:
+            n_holes = 0
+        for hole_idx in range(n_holes):
+            try:
+                hole = poly_set.Hole(outline_idx, hole_idx)
+            except Exception:
+                continue
+            hole_verts = _verts(hole)
+            if len(hole_verts) >= 3:
+                draw.polygon(hole_verts, fill=0)
+    return np.array(img, dtype=bool)
+
+
+def _terminal_meta_nodes(
+    term: "_Terminal",
+    cache: Dict[str, Dict[str, Any]],
+    layer_free: Dict[str, np.ndarray],
+    layer_labels: Dict[str, np.ndarray],
+    target_layers: List[Tuple[int, str]],
+    width_mm: float,
+    clearance_mm: float,
+) -> set:
+    """Return the set of `(layer_name, component_id)` meta-graph nodes
+    a terminal contributes — one per layer for pads (when the pad has
+    a free-space anchor on that layer), one *or more* per layer for
+    zones (every free-space component the zone's filled mask overlaps
+    on that layer).
+    """
+    nodes: set = set()
+    layer_id_to_name = {lid: ln for lid, ln in target_layers}
+    if term.kind == "pad":
+        for lid in term.layer_ids:
+            ln = layer_id_to_name.get(lid)
+            if ln is None or ln not in cache:
+                continue
+            state = cache[ln]
+            halo_px = int(math.ceil(
+                (width_mm / 2 + clearance_mm) / state["g"]
+            ))
+            anchor, _ = _pad_anchor(
+                state, layer_free[ln], term._pad, extra_halo_px=halo_px,
+            )
+            if anchor is None:
+                continue
+            cid = int(layer_labels[ln][anchor])
+            if cid > 0:
+                nodes.add((ln, cid))
+    elif term.kind == "zone":
+        for lid in term.layer_ids:
+            ln = layer_id_to_name.get(lid)
+            if ln is None or ln not in cache:
+                continue
+            state = cache[ln]
+            zone_mask = _rasterize_zone_on_layer(term._zone, lid, state)
+            if zone_mask is None:
+                continue
+            # Intersect with free space — same-net pour is invisible to
+            # the obstacle mask, so the pour's pixels live in whatever
+            # free-space component the layer has there.
+            free = layer_free[ln]
+            overlap = zone_mask & free
+            if not overlap.any():
+                continue
+            labels_arr = layer_labels[ln]
+            unique = np.unique(labels_arr[overlap])
+            for cid in unique:
+                cid_i = int(cid)
+                if cid_i > 0:
+                    nodes.add((ln, cid_i))
+    return nodes
 
 
 def pre_route_audit(
@@ -1915,9 +2255,22 @@ def pre_route_audit(
     single value for all nets (useful for "what if I dropped the
     netclass width to W?" what-if surveys).
 
-    Returns `{summary, ratlines, netclassesEvaluated, limitations}`.
-    Each unreachable ratline carries a `remediationHint` string with
-    the actionable next move.
+    Returns `{summary, spokes, netclassesEvaluated, limitations}`.
+    Each unreachable spoke carries a `remediationHint` string with the
+    actionable next move.
+
+    **Terminal model (2026-06-13).** A "terminal" is a pad OR a zone —
+    both are first-class members of a net. For each net, the audit
+    picks the largest terminal by area as a *hub* (so a same-net plane
+    pour dominates over the pads it serves) and asks "can each other
+    terminal reach the hub?" via the existing multi-layer meta-graph.
+    For plane-connected nets this collapses to "does every pad have a
+    via path to the plane?" which is the engineering question, not
+    "does pad A connect to pad B at netclass W trace width" which the
+    old spanning-star framing forced. An unstitched bridge zone shows
+    up as a real flag (its own spoke fails to reach the main pour),
+    naturally surfacing the missing-stitching-via case without a
+    separate tool call.
     """
     # Enumerate copper layers (same as Phase 3 tools).
     all_enabled = _enabled_copper_layers(board)
@@ -1933,18 +2286,9 @@ def pre_route_audit(
         return {"success": False, "message": "No copper layers found on board"}
     layer_ids = [lid for lid, _ in target]
 
-    # Collect pad pairs per net (same model as routability_report).
-    nets_to_pads: Dict[str, List[Tuple[str, str, Any]]] = {}
-    for fp in board.GetFootprints():
-        for pad in fp.Pads():
-            name = pad.GetNetname() or ""
-            if not name:
-                continue
-            if nets is not None and name not in nets:
-                continue
-            nets_to_pads.setdefault(name, []).append(
-                (fp.GetReference(), pad.GetNumber(), pad)
-            )
+    # Enumerate terminals (pads + zones) grouped by net.
+    nets_filter = set(nets) if nets else None
+    nets_to_terminals = _enumerate_terminals(board, layer_ids, nets_filter)
 
     # Group nets by their netclass — one meta-graph per class.
     try:
@@ -1953,7 +2297,7 @@ def pre_route_audit(
         net_settings = None
     classes_to_nets: Dict[str, List[str]] = {}
     class_to_widths: Dict[str, Dict[str, float]] = {}
-    for net_name in nets_to_pads:
+    for net_name in nets_to_terminals:
         nc_name = "Default"
         if net_settings is not None:
             try:
@@ -1988,9 +2332,6 @@ def pre_route_audit(
                 widths["trackWidthMm"] = float(nc.GetTrackWidth()) / SCALE
                 widths["clearanceMm"] = float(nc.GetClearance()) / SCALE
                 widths["viaDiameterMm"] = float(nc.GetViaDiameter()) / SCALE
-                # Vias inherit the netclass clearance unless KiCad
-                # exposes a separate field; the same value is the safe
-                # default for v1.
                 widths["viaClearanceMm"] = widths["clearanceMm"]
             except Exception:
                 pass
@@ -2005,133 +2346,167 @@ def pre_route_audit(
             widths["viaClearanceMm"] = float(via_clearance_mm_override)
         class_to_widths[nc_name] = widths
 
-    # Build the per-layer cache ONCE (it depends only on the obstacle
-    # set, not on width). Reused across all netclasses.
+    # Build the per-layer cache ONCE (depends only on the obstacle set,
+    # not on width). Reused across all netclasses.
     cache = _compute_layer_cache(board, None, resolution_mm, layer_ids=layer_ids)
 
-    # Per-netclass meta-graph + ratline evaluation.
-    ratlines: List[Dict[str, Any]] = []
+    # Per-netclass meta-graph + per-spoke evaluation.
+    spokes_out: List[Dict[str, Any]] = []
     counts = {
-        "totalRatlines": 0, "reachable": 0, "unreachable": 0,
-        "sameLayer": 0, "viaRequired": 0,
+        "netsEvaluated": 0,
+        "totalSpokes": 0,
+        "reachable": 0,
+        "unreachable": 0,
+        "sameLayer": 0,
+        "viaRequired": 0,
+        "netsWithIsolatedClusters": 0,
     }
     netclasses_evaluated: List[Dict[str, Any]] = []
 
-    def _anchors_for_pad(
-        pad: Any,
-        meta_layer_free: Dict[str, np.ndarray],
-        width_mm: float,
-        clearance_mm: float,
-    ) -> Dict[str, Tuple[int, int]]:
-        out: Dict[str, Tuple[int, int]] = {}
-        for lid, ln in target:
-            if not _pad_is_on_layer(pad, lid):
-                continue
-            state = cache[ln]
-            halo_px = int(math.ceil((width_mm / 2 + clearance_mm) / state["g"]))
-            anchor, _ = _pad_anchor(
-                state, meta_layer_free[ln], pad, extra_halo_px=halo_px,
-            )
-            if anchor is not None:
-                out[ln] = anchor
-        return out
+    def _terminal_summary(term: "_Terminal") -> Dict[str, Any]:
+        return {
+            "uid": term.uid,
+            "kind": term.kind,
+            "label": term.label,
+            "areaMm2": round(term.area_mm2, 4),
+            "layers": [board.GetLayerName(lid) for lid in term.layer_ids],
+        }
+
+    # Caches we lazily build:
+    # - `shared_meta_per_class`: meta-graph at all-copper-as-obstacle
+    #   per netclass — reused across every net in the class that has
+    #   NO same-net zones (the hub will be a pad in that case; the
+    #   all-copper view is fine).
+    # - per-net cache + meta-graph: built when the net has at least
+    #   one zone (the hub is then likely the pour, and we MUST exclude
+    #   own-net copper from obstacles or the pour disappears from the
+    #   meta-graph as foreign-net obstacle).
+    shared_meta_per_class: Dict[str, Dict[str, Any]] = {}
 
     for nc_name, net_names in classes_to_nets.items():
         widths = class_to_widths[nc_name]
-        meta = _build_meta_graph(
-            cache,
-            widths["trackWidthMm"], widths["clearanceMm"],
-            widths["viaDiameterMm"], widths["viaClearanceMm"],
-        )
-        uf = meta["uf"]
-        layer_free = meta["layer_free"]
-        layer_labels = meta["layer_labels"]
-
         nc_counts = {
-            "totalRatlines": 0, "reachable": 0, "unreachable": 0,
-            "sameLayer": 0, "viaRequired": 0,
+            "netsEvaluated": 0,
+            "totalSpokes": 0,
+            "reachable": 0,
+            "unreachable": 0,
+            "sameLayer": 0,
+            "viaRequired": 0,
         }
 
         for net_name in net_names:
-            entries = nets_to_pads.get(net_name, [])
-            if len(entries) < 2:
+            terminals = nets_to_terminals.get(net_name, [])
+            if len(terminals) < 2:
                 continue
-            pairs = [
-                (entries[0], entries[i])
-                for i in range(1, min(len(entries), max_pairs_per_net + 1))
-            ]
-            for (ra, na, pad_a), (rb, nb, pad_b) in pairs:
-                nc_counts["totalRatlines"] += 1
-                counts["totalRatlines"] += 1
-                anchors_a = _anchors_for_pad(
-                    pad_a, layer_free,
+            # Cap spokes per net to bound runtime on large fan-out nets.
+            if len(terminals) > max_pairs_per_net + 1:
+                # Keep all zones (typically few) and trim pads.
+                zones = [t for t in terminals if t.kind == "zone"]
+                pads = [t for t in terminals if t.kind == "pad"]
+                room = max(0, max_pairs_per_net + 1 - len(zones))
+                terminals = zones + pads[:room]
+            nc_counts["netsEvaluated"] += 1
+            counts["netsEvaluated"] += 1
+
+            # Pick the meta-graph this net will use:
+            # - Net has any same-net zones → per-net analysis (the
+            #   pour disappears from the obstacle field as own-net,
+            #   so via candidates can land in it).
+            # - Otherwise → shared all-copper-as-obstacle meta-graph
+            #   for the netclass (cheap, correct for pad-only nets).
+            net_has_zone = any(t.kind == "zone" for t in terminals)
+            if net_has_zone:
+                cache_net = _compute_layer_cache(
+                    board, net_name, resolution_mm, layer_ids=layer_ids,
+                )
+                meta = _build_meta_graph(
+                    cache_net,
+                    widths["trackWidthMm"], widths["clearanceMm"],
+                    widths["viaDiameterMm"], widths["viaClearanceMm"],
+                )
+            else:
+                if nc_name not in shared_meta_per_class:
+                    shared_meta_per_class[nc_name] = _build_meta_graph(
+                        cache,
+                        widths["trackWidthMm"], widths["clearanceMm"],
+                        widths["viaDiameterMm"], widths["viaClearanceMm"],
+                    )
+                cache_net = cache
+                meta = shared_meta_per_class[nc_name]
+            uf = meta["uf"]
+            layer_free = meta["layer_free"]
+            layer_labels = meta["layer_labels"]
+
+            hub_idx = _select_hub(terminals)
+            hub = terminals[hub_idx]
+            hub_nodes = _terminal_meta_nodes(
+                hub, cache_net, layer_free, layer_labels, target,
+                widths["trackWidthMm"], widths["clearanceMm"],
+            )
+            # Map each terminal (by index) to its UF-class root via any
+            # of its meta-graph nodes. Spokes sharing a root with the
+            # hub are reachable.
+            terminal_nodes: List[set] = []
+            terminal_roots: List[set] = []
+            for term in terminals:
+                nodes = _terminal_meta_nodes(
+                    term, cache_net, layer_free, layer_labels, target,
                     widths["trackWidthMm"], widths["clearanceMm"],
                 )
-                anchors_b = _anchors_for_pad(
-                    pad_b, layer_free,
-                    widths["trackWidthMm"], widths["clearanceMm"],
-                )
-                if not anchors_a or not anchors_b:
-                    reason = (
-                        "from_pad_no_escape" if not anchors_a
-                        else "to_pad_no_escape"
-                    )
-                    hint = _remediation_hint(
-                        reason, widths["trackWidthMm"],
-                        widths["clearanceMm"], nc_name,
-                    )
-                    ratlines.append({
-                        "net": net_name, "netclass": nc_name,
-                        "trackWidthMm": widths["trackWidthMm"],
-                        "clearanceMm": widths["clearanceMm"],
-                        "fromRef": ra, "fromPad": na,
-                        "toRef": rb, "toPad": nb,
-                        "reachable": False,
-                        "sameLayerReachable": False,
-                        "reason": reason,
-                        "remediationHint": hint,
-                    })
-                    nc_counts["unreachable"] += 1
-                    counts["unreachable"] += 1
+                terminal_nodes.append(nodes)
+                terminal_roots.append({uf.find(n) for n in nodes})
+            hub_roots = terminal_roots[hub_idx]
+
+            # Spoke evaluation. We also group failed spokes by their UF
+            # roots so the user sees clusters together (e.g. an
+            # unstitched bridge zone + its embraced pads in one entry).
+            failed_groups: Dict[Any, List[Dict[str, Any]]] = {}
+
+            for i, term in enumerate(terminals):
+                if i == hub_idx:
                     continue
-
-                nodes_a = [(ln, int(layer_labels[ln][anc]))
-                           for ln, anc in anchors_a.items()]
-                nodes_b = [(ln, int(layer_labels[ln][anc]))
-                           for ln, anc in anchors_b.items()]
-                reach = False
-                same = False
-                for na_node in nodes_a:
-                    for nb_node in nodes_b:
-                        if uf.find(na_node) == uf.find(nb_node):
-                            reach = True
-                            if na_node == nb_node:
-                                same = True
-                                break
-                    if same:
-                        break
-
-                reason = None if reach else "unreachable_any_layer"
+                counts["totalSpokes"] += 1
+                nc_counts["totalSpokes"] += 1
+                spoke_roots = terminal_roots[i]
+                reach = bool(spoke_roots & hub_roots)
+                # "Same layer" reachability: any meta-graph node is
+                # shared exactly between the spoke and the hub (no via
+                # hop needed). Only meaningful for reachable spokes.
+                same_layer = bool(
+                    reach and (terminal_nodes[i] & hub_nodes)
+                )
+                # Reason + remediation
+                if not spoke_roots:
+                    reason = (
+                        "spoke_no_anchor" if term.kind == "pad"
+                        else "zone_no_anchor"
+                    )
+                elif reach:
+                    reason = None
+                else:
+                    reason = "spoke_unreachable_from_hub"
                 hint = _remediation_hint(
                     reason, widths["trackWidthMm"],
                     widths["clearanceMm"], nc_name,
                 )
-                ratlines.append({
-                    "net": net_name, "netclass": nc_name,
+                entry = {
+                    "net": net_name,
+                    "netclass": nc_name,
                     "trackWidthMm": widths["trackWidthMm"],
                     "clearanceMm": widths["clearanceMm"],
                     "viaDiameterMm": widths["viaDiameterMm"],
-                    "fromRef": ra, "fromPad": na,
-                    "toRef": rb, "toPad": nb,
+                    "hub": _terminal_summary(hub),
+                    "spoke": _terminal_summary(term),
                     "reachable": reach,
-                    "sameLayerReachable": reach and same,
+                    "sameLayerReachable": same_layer,
                     "reason": reason,
                     "remediationHint": hint,
-                })
+                }
+                spokes_out.append(entry)
                 if reach:
                     counts["reachable"] += 1
                     nc_counts["reachable"] += 1
-                    if same:
+                    if same_layer:
                         counts["sameLayer"] += 1
                         nc_counts["sameLayer"] += 1
                     else:
@@ -2140,6 +2515,27 @@ def pre_route_audit(
                 else:
                     counts["unreachable"] += 1
                     nc_counts["unreachable"] += 1
+                    # Pick a representative root for clustering (any
+                    # one of the spoke's roots — they're all in the
+                    # same UF class as each other within this terminal).
+                    if spoke_roots:
+                        key = next(iter(spoke_roots))
+                        failed_groups.setdefault(key, []).append(entry)
+
+            if failed_groups:
+                counts["netsWithIsolatedClusters"] += 1
+                # Attach a `clusterPeers` list onto each unreachable
+                # spoke so the user sees which other terminals are
+                # stuck with it.
+                for group in failed_groups.values():
+                    if len(group) <= 1:
+                        continue
+                    peer_labels = [e["spoke"]["label"] for e in group]
+                    for e in group:
+                        e["clusterPeers"] = [
+                            lbl for lbl in peer_labels
+                            if lbl != e["spoke"]["label"]
+                        ]
 
         netclasses_evaluated.append({
             "netclass": nc_name,
@@ -2154,22 +2550,26 @@ def pre_route_audit(
         "grid": {"resolutionMm": resolution_mm},
         "netclassesEvaluated": netclasses_evaluated,
         "summary": counts,
-        "ratlines": ratlines,
+        "spokes": spokes_out,
         "limitations": (
-            "Uses the all-copper-as-obstacle approximation (same as "
-            "routability_report) — fast and shared per-layer EDT across "
-            "netclasses. A ratline marked unreachable here might still "
-            "route per-net; confirm with check_pad_routability_multilayer "
-            "per-net for any flagged ratline."
+            "Hub = largest-area terminal (pad or zone) per net. Spoke "
+            "= every other terminal. Reachability is asked against the "
+            "multi-layer meta-graph (all-copper-as-obstacle + own-net "
+            "exclusion). Failed spokes grouped by UF-class so an "
+            "isolated cluster of terminals appears together — useful "
+            "for spotting unstitched bridge zones. For per-pair "
+            "queries use check_pad_routability_multilayer."
         ),
         "message": (
-            f"Pre-route audit: {counts['totalRatlines']} ratlines across "
+            f"Pre-route audit: {counts['totalSpokes']} spokes across "
+            f"{counts['netsEvaluated']} nets in "
             f"{len(netclasses_evaluated)} netclass(es). "
             f"{counts['reachable']} reachable "
             f"({counts['sameLayer']} same-layer, "
             f"{counts['viaRequired']} via-required), "
-            f"{counts['unreachable']} UNREACHABLE — see ratlines[] for "
-            f"per-ratline remediation hints."
+            f"{counts['unreachable']} UNREACHABLE "
+            f"({counts['netsWithIsolatedClusters']} net(s) with isolated "
+            f"clusters)."
         ),
     }
 

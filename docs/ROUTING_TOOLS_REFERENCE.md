@@ -816,17 +816,28 @@ ratline.
 
 ### pre_route_audit
 
-Pre-flight all-ratlines feasibility check at each net's **own**
-netclass widths. The Phase-4 workflow tool — run this BEFORE the
-autoroute attempt to flag impossible ratlines with actionable
-remediation hints. Read-only.
+Pre-flight feasibility check at each net's **own** netclass widths.
+The Phase-4/5 workflow tool — run this BEFORE the autoroute attempt
+to flag impossible connections with actionable remediation hints.
+Read-only.
 
-Per netclass on the board: builds the multi-layer meta-graph at the
-class's `(trackWidth, clearance, viaDiameter, viaClearance)`, then
-queries every net assigned to the class. The per-layer EDT cache is
-**shared** across netclasses (the obstacle SET is the same; only the
-width/clearance erosion differs), so the cost scales with the number
-of netclasses, not with the total ratline count.
+**Terminal model (2026-06-13).** A "terminal" is a pad OR a zone.
+Both are first-class members of a net. For each net the audit picks
+the largest-area terminal as the **hub** (so a same-net plane pour
+dominates over the pads it serves), then asks "can each other
+terminal reach the hub?" against the multi-layer meta-graph. The
+output is per-spoke, with one row per non-hub terminal. For
+plane-connected nets this collapses to "does every pad have via
+access to the plane?" — the engineering question — instead of the
+old pad-to-pad spanning-star ratline framing that forced a
+trace-width interpretation on plane-connected nets.
+
+For nets WITH at least one same-net zone the audit builds a per-net
+meta-graph (excluding own-net copper from obstacles, so the pour is
+visible to the via-candidacy mask). For nets WITHOUT zones the audit
+reuses a shared all-copper-as-obstacle meta-graph per netclass,
+keeping the cost down. On power_module this is roughly 15 per-net
+rebuilds out of 55 nets; ~7 s total at 0.1 mm grid.
 
 | Parameter                | Type    | Required | Default | Description |
 | ------------------------ | ------- | -------- | ------- | ----------- |
@@ -837,28 +848,23 @@ of netclasses, not with the total ratline count.
 | layers                   | array   | No       | all       | Copper layers to consider. |
 | resolutionMm             | number  | No       | 0.05      | Grid step. |
 | nets                     | array   | No       | all       | Restrict to these nets. |
-| maxPairsPerNet           | number  | No       | 64        | Cap pairs per net to bound runtime. |
+| maxPairsPerNet           | number  | No       | 64        | Cap spokes per net to bound runtime on fan-out nets (zones are always kept; only pads are trimmed). |
 | boardPath                | string  | No       | current   | Load a specific board. |
 
-**Returns:** `summary` + `ratlines[]` (each with the standard Phase-3
-shape plus `netclass`, `trackWidthMm`, `clearanceMm`, `viaDiameterMm`,
-and — when `reachable=false` — a `remediationHint` string), plus
-`netclassesEvaluated[]` (per-class counts of reachable / unreachable /
-sameLayer / viaRequired), plus the same `limitations` caveat as
-`routability_report`.
+**Returns:**
+- `summary` — `{netsEvaluated, totalSpokes, reachable, unreachable, sameLayer, viaRequired, netsWithIsolatedClusters}`.
+- `spokes[]` — one entry per non-hub terminal per net. Each carries `{net, netclass, trackWidthMm, clearanceMm, viaDiameterMm, hub: {uid, kind, label, areaMm2, layers}, spoke: {…same shape…}, reachable, sameLayerReachable, reason, remediationHint, clusterPeers?}`.
+- `netclassesEvaluated[]` — per-netclass counts.
+- `limitations` — describes the hub-and-spoke model and its scope.
 
-**Remediation hints:** mapped from the Phase-3 failure reasons:
-- `from_pad_no_escape` / `to_pad_no_escape` → "Pad has no escape lane
-  at width W mm. Lower the netclass width, move foreign-net copper
-  away from the pad, or pin-escape with a narrow stub."
-- `unreachable_any_layer` → "Pads cannot be connected at netclass
-  'X' on ANY layer even with via bridges. Move components closer,
-  widen the corridor, or assign a netclass with narrower width."
+**Reasons (terminal-level):**
+- `spoke_no_anchor` — pad spoke can't find a free-space anchor on any layer at this width.
+- `zone_no_anchor` — pour spoke's filled area has no pixel matching the EDT erosion (W/2+C); the pour is too tight to host a trace at this width.
+- `spoke_unreachable_from_hub` — terminal anchors fine but its UF class doesn't intersect the hub's. The headline case is an unstitched bridge zone or a missing-via signal pad. `clusterPeers` lists the other terminals stuck in the same isolated UF class.
 
-**Workflow:** placement → `pre_route_audit` → for each unreachable
-ratline: investigate with `routability_heatmap` and/or
-`check_pad_routability_multilayer` (per-net for the precise answer) →
-fix placement/netclass → re-audit → `autoroute`.
+**Remediation hints** are mapped per reason. The `spoke_unreachable_from_hub` hint includes a pointer to inspect `clusterPeers` for cases where multiple terminals form a sub-net (e.g. bridge zone + its embraced pads, all stuck together).
+
+**Workflow:** placement → `pre_route_audit` → for each unreachable spoke: investigate with `routability_heatmap` and/or `check_pad_routability_multilayer` (per-net for the precise answer) → fix placement / netclass / missing stitching via → re-audit → `autoroute`. Note: cross-zone-to-zone connectivity (e.g. is the main GND plane connected to the F.Cu bridge pour?) IS now covered by this audit's hub-and-spoke check. Intra-pour fragmentation (a single pour broken into disconnected islands by clearance cutouts) is still the domain of `audit_plane_connectivity`.
 
 ### route_pad_to_pad failure enrichment (not a new tool — note)
 

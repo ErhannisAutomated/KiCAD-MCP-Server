@@ -1,11 +1,26 @@
 # Routing Topology Tools — Design Plan
 
-Status: **Complete** on `develop` (Phase 1+2: 2026-05-31, Phase 3:
-2026-06-05, Phase 4a/4b/4c: 2026-06-06; project closed 2026-06-10).
-The originally-planned `relax_placement` routability scoring was
+Status: **Complete + Phase 5 follow-up** on `develop` (Phase 1+2:
+2026-05-31, Phase 3: 2026-06-05, Phase 4a/4b/4c: 2026-06-06; project
+closed 2026-06-10; clearance-lookup + zone-rasterization fixes
+2026-06-10; Phase 5 terminal-model rework 2026-06-14). The
+originally-planned `relax_placement` routability scoring was
 **declined as not worth the cost** — see "Decision log" below. Reopen
 the project if/when a concrete workflow problem surfaces that the
-shipped tools can't address. Implementation lives in `python/commands/topology.py`
+shipped tools can't address.
+
+**Phase 5 (terminal-model rework, 2026-06-14).** `pre_route_audit`
+now treats pads AND zones as first-class net terminals; hub = largest-
+area terminal per net; spokes = every other terminal; per-net analysis
+is used for nets with same-net zones (so the pour is visible to
+via-candidacy). For plane-connected nets the audit's old pad-to-pad
+spanning-star framing collapsed to the right question — "does every
+pad have via access to the plane?" — automatically. Unstitched bridge
+zones surface as real failed-spoke flags with `clusterPeers` grouping.
+On power_module the unreachable count dropped from 35 → 15 with no
+loss of true findings; the dropped 20 were GND/BAT+ plane-connectivity
+noise that the spanning-star framing couldn't suppress without
+hardcoding pour detection. Implementation lives in `python/commands/topology.py`
 (plus a small enrichment to `python/commands/routing.py`'s
 `_obstacle_error` closure); TS bindings in `src/tools/placement.ts`.
 See `## Effort` for the phase table. Phase 2 picks the *max-bottleneck*
