@@ -90,3 +90,78 @@ class TestAddLayerInnerCopper:
         assert r_top["success"] and r_bot["success"]
         assert board.GetLayerName(pcbnew.F_Cu) == "TOP"
         assert board.GetLayerName(pcbnew.B_Cu) == "BOT"
+
+
+class TestAddLayerAutoSaves:
+    """Regression for the 2026-06-14 no-flush bug: add_layer mutates
+    self.board in memory but used to NOT auto-save, so kicad-cli or a
+    fresh pcbnew.LoadBoard would still see the pre-add state until
+    save_project was called explicitly. Caught on power_module v4
+    (#?) where stacked add_layer + export_dsn produced a DSN with no
+    inner copper.
+
+    The fix: add "add_layer" to KiCADInterface._BOARD_MUTATING_COMMANDS
+    so the existing auto-save plumbing kicks in after the command
+    runs. This fast test pins the membership; the integration test
+    below verifies the on-disk state actually updates.
+    """
+
+    def test_add_layer_is_in_board_mutating_commands(self) -> None:
+        from kicad_interface import KiCADInterface
+
+        assert "add_layer" in KiCADInterface._BOARD_MUTATING_COMMANDS, (
+            "add_layer must be in _BOARD_MUTATING_COMMANDS so the "
+            "kicad_interface dispatch path auto-saves the board. "
+            "Without this, out-of-band readers (kicad-cli, fresh "
+            "LoadBoard) see stale layer state until save_project."
+        )
+
+
+@pytest.mark.skipif(
+    not _real_pcbnew_available(),
+    reason="real pcbnew not available (test stub in use)",
+)
+class TestAddLayerFlushIntegration:
+    """End-to-end: dispatch add_layer through KiCADInterface, then
+    open the file fresh and verify the layer is there. Without the
+    auto-save fix this fails — fresh LoadBoard returns the empty
+    2-layer stack."""
+
+    def test_dispatch_path_persists_inner_layers(self, tmp_path) -> None:
+        import pcbnew
+
+        from kicad_interface import KiCADInterface
+
+        board_path = tmp_path / "flush_test.kicad_pcb"
+        b = pcbnew.BOARD()
+        b.SetFileName(str(board_path))
+        pcbnew.SaveBoard(str(board_path), b)
+
+        iface = KiCADInterface()
+        iface.board = b
+        iface._update_command_handlers()
+
+        r1 = iface.handle_command(
+            "add_layer",
+            {"name": "In1.Cu", "type": "signal", "position": "inner", "number": 1},
+        )
+        assert r1["success"], r1
+        r2 = iface.handle_command(
+            "add_layer",
+            {"name": "In2.Cu", "type": "signal", "position": "inner", "number": 2},
+        )
+        assert r2["success"], r2
+
+        # Fresh load from disk — this is the path kicad-cli and any
+        # external consumer takes. Without auto-save it returns the
+        # pre-add state (copper count 2, no inner layers).
+        fresh = pcbnew.LoadBoard(str(board_path))
+        assert fresh.GetCopperLayerCount() == 4
+        assert fresh.IsLayerEnabled(pcbnew.In1_Cu)
+        assert fresh.IsLayerEnabled(pcbnew.In2_Cu)
+        assert fresh.GetLayerName(pcbnew.In1_Cu) == "In1.Cu"
+        assert fresh.GetLayerName(pcbnew.In2_Cu) == "In2.Cu"
+        # F.Silkscreen (id 5) must still hold its default name.
+        # Confirms the stride-fix is still in place and an inner
+        # layer didn't get renamed into a silkscreen slot.
+        assert fresh.GetLayerName(5) == "F.Silkscreen"

@@ -202,22 +202,39 @@ BOARD_TOOLS = [
     },
     {
         "name": "add_layer",
-        "title": "Add Custom Layer",
-        "description": "Adds a new custom layer to the board stack (e.g., User.1, User.Comments).",
+        "title": "Add Layer",
+        "description": (
+            "Adds an inner copper layer (or renames the top/bottom copper layer). "
+            "Auto-saves: the change is visible to kicad-cli and fresh LoadBoard "
+            "without an explicit save_project call."
+        ),
         "inputSchema": {
             "type": "object",
             "properties": {
-                "layerName": {
+                "name": {
                     "type": "string",
-                    "description": "Name of the layer to add",
+                    "description": "Layer name (e.g. 'In1.Cu', 'GND_PLANE')",
                 },
-                "layerType": {
+                "type": {
                     "type": "string",
-                    "enum": ["signal", "power", "mixed", "jumper"],
-                    "description": "Type of layer (for copper layers)",
+                    "enum": ["copper", "technical", "user", "signal"],
+                    "description": "Layer type (defaults to signal)",
+                },
+                "position": {
+                    "type": "string",
+                    "enum": ["top", "bottom", "inner"],
+                    "description": "Position in the stackup",
+                },
+                "number": {
+                    "type": "integer",
+                    "description": (
+                        "Inner-layer ordinal (1=In1.Cu, 2=In2.Cu, ..., max 30). "
+                        "Required when position='inner'. Maps to PCB_LAYER_ID via "
+                        "In1_Cu + 2*(N-1)."
+                    ),
                 },
             },
-            "required": ["layerName"],
+            "required": ["name", "position"],
         },
     },
     {

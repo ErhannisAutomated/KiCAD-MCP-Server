@@ -60,12 +60,22 @@ export function registerBoardTools(server: McpServer, callKicadScript: CommandFu
   // ------------------------------------------------------
   server.tool(
     "add_layer",
-    "Add a new copper or technical layer to the PCB stackup.",
+    "Add a new copper or technical layer to the PCB stackup. " +
+      "Inner layers are enabled by raising the copper layer count and naming the " +
+      "next available In*.Cu slot. Changes auto-save to disk (no explicit " +
+      "save_project required for visibility to kicad-cli / fresh LoadBoard).",
     {
-      name: z.string().describe("Layer name"),
+      name: z.string().describe("Layer name (e.g. 'In1.Cu', 'GND_PLANE')"),
       type: z.enum(["copper", "technical", "user", "signal"]).describe("Layer type"),
       position: z.enum(["top", "bottom", "inner"]).describe("Layer position"),
-      number: z.number().optional().describe("Layer number (for inner layers)"),
+      number: z
+        .number()
+        .optional()
+        .describe(
+          "Inner-layer ordinal (1=In1.Cu, 2=In2.Cu, ..., max 30). Required " +
+            "when position='inner'. This is NOT the KiCad PCB_LAYER_ID; the " +
+            "tool maps ordinal N to layer id In1_Cu + 2*(N-1).",
+        ),
     },
     async ({ name, type, position, number }) => {
       logger.debug(`Adding ${type} layer: ${name}`);

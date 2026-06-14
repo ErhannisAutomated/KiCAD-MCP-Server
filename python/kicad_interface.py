@@ -668,6 +668,7 @@ class KiCADInterface:
         "copy_routing_pattern",
         "add_net",
         "add_board_outline",
+        "add_layer",
         "add_mounting_hole",
         "add_text",
         "add_board_text",
