@@ -1895,6 +1895,17 @@ def _remediation_hint(
             f"by foreign-net copper. Check the cluster grouping for "
             f"other terminals stuck in the same sub-net."
         )
+    if reason == "zone_no_anchor":
+        return (
+            f"This pour can't host a trace at netclass '{netclass_name}' "
+            f"(W={w} mm, C={c} mm) — the EDT erosion (W/2 + C ≈ "
+            f"{round(width_mm / 2 + clearance_mm, 3)} mm) is wider than "
+            f"the pour's clear interior. The pour is too tight to be a "
+            f"meaningful terminal at this netclass; either rely on its "
+            f"stitching vias (audit doesn't model existing-via-to-pour "
+            f"shorting) or check whether the netclass widths are right "
+            f"for this geometry."
+        )
     return None
 
 
@@ -2290,6 +2301,24 @@ def pre_route_audit(
     nets_filter = set(nets) if nets else None
     nets_to_terminals = _enumerate_terminals(board, layer_ids, nets_filter)
 
+    # Count existing same-net copper per net (tracks + vias). Used to
+    # annotate the audit output so an "unreachable" flag on a net that
+    # IS already routed is interpretable as "no fresh single-layer
+    # path from this placement" rather than "no connection exists."
+    # The DRC unconnected_items list is the right tool for "is this
+    # currently connected?"; the audit answers "could this be routed
+    # from scratch at netclass widths?".
+    existing_copper_by_net: Dict[str, Dict[str, int]] = {}
+    for t in board.Tracks():
+        net = t.GetNetname() or ""
+        if not net:
+            continue
+        entry = existing_copper_by_net.setdefault(net, {"tracks": 0, "vias": 0})
+        if t.Type() == pcbnew.PCB_VIA_T:
+            entry["vias"] += 1
+        else:
+            entry["tracks"] += 1
+
     # Group nets by their netclass — one meta-graph per class.
     try:
         net_settings = board.GetDesignSettings().m_NetSettings
@@ -2499,9 +2528,31 @@ def pre_route_audit(
                     "spoke": _terminal_summary(term),
                     "reachable": reach,
                     "sameLayerReachable": same_layer,
+                    "existingCopper": existing_copper_by_net.get(
+                        net_name, {"tracks": 0, "vias": 0}
+                    ),
                     "reason": reason,
                     "remediationHint": hint,
                 }
+                # If the net is already routed AND the audit reports
+                # unreachable, append a note so the framing reads
+                # right when this output is re-read later: it means
+                # "no fresh single-layer path from this placement,"
+                # not "no connection exists."
+                ec = entry["existingCopper"]
+                if not reach and (ec["tracks"] + ec["vias"]) > 0:
+                    existing_note = (
+                        f"NOTE: this net already has {ec['tracks']} "
+                        f"tracks + {ec['vias']} vias on the board. The "
+                        "audit's 'unreachable' reflects 'no fresh path "
+                        "from this placement,' not 'no connection.' "
+                        "For 'is this currently connected?' use the "
+                        "DRC ratsnest; for 'could a fresh route fit at "
+                        "netclass widths?' the audit is authoritative."
+                    )
+                    entry["remediationHint"] = (
+                        hint + " " + existing_note if hint else existing_note
+                    )
                 spokes_out.append(entry)
                 if reach:
                     counts["reachable"] += 1

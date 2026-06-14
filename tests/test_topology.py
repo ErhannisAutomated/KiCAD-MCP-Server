@@ -694,6 +694,53 @@ class TestAnalyzeRegionsIntegration:
         assert "label" in spoke["hub"]
         assert "areaMm2" in spoke["hub"]
         assert spoke["spoke"]["kind"] in ("pad", "zone")
+        # Phase 5e: existingCopper is always present.
+        assert "existingCopper" in spoke
+        assert "tracks" in spoke["existingCopper"]
+        assert "vias" in spoke["existingCopper"]
+
+    def test_pre_route_audit_appends_existing_copper_note(self):
+        """When a net has same-net tracks/vias AND the audit reports
+        the spoke unreachable, the remediation hint must include the
+        'this net is already routed' framing note so re-reading the
+        output later doesn't conflate 'no fresh path' with 'no
+        connection.'"""
+        import pcbnew
+
+        board = self._build_split_board()  # 20x10 board, F.Cu wall x=10
+        # Both pads on the same net + an existing track of the same
+        # net (so the count is non-zero).
+        net = pcbnew.NETINFO_ITEM(board, "SIGNAL")
+        board.Add(net)
+        for fp in board.GetFootprints():
+            for pad in fp.Pads():
+                pad.SetNet(net)
+        extra = pcbnew.PCB_TRACK(board)
+        extra.SetStart(pcbnew.VECTOR2I(int(2 * self.SCALE), int(8 * self.SCALE)))
+        extra.SetEnd(pcbnew.VECTOR2I(int(4 * self.SCALE), int(8 * self.SCALE)))
+        extra.SetWidth(int(0.2 * self.SCALE))
+        extra.SetLayer(pcbnew.F_Cu)
+        extra.SetNet(net)
+        board.Add(extra)
+
+        from commands.topology import pre_route_audit
+        r = pre_route_audit(
+            board,
+            width_mm_override=0.2,
+            via_diameter_mm_override=0.6,
+            clearance_mm_override=0.05,
+            resolution_mm=0.1,
+            # Restrict layers to F.Cu so the wall actually separates
+            # the pads (B.Cu would let them route via).
+            layers=["F.Cu"],
+        )
+        assert r["success"] is True
+        unreachable = [s for s in r["spokes"] if not s["reachable"]]
+        assert unreachable, "expected the wall to make at least one spoke unreachable"
+        s = unreachable[0]
+        assert s["existingCopper"]["tracks"] >= 1
+        assert "this net already has" in (s["remediationHint"] or "")
+        assert "ratsnest" in (s["remediationHint"] or "")
 
     def test_pre_route_audit_zone_dominates_pad_as_hub(self):
         """When a net has a big pour and a small pad, the audit must

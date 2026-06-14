@@ -853,7 +853,7 @@ rebuilds out of 55 nets; ~7 s total at 0.1 mm grid.
 
 **Returns:**
 - `summary` — `{netsEvaluated, totalSpokes, reachable, unreachable, sameLayer, viaRequired, netsWithIsolatedClusters}`.
-- `spokes[]` — one entry per non-hub terminal per net. Each carries `{net, netclass, trackWidthMm, clearanceMm, viaDiameterMm, hub: {uid, kind, label, areaMm2, layers}, spoke: {…same shape…}, reachable, sameLayerReachable, reason, remediationHint, clusterPeers?}`.
+- `spokes[]` — one entry per non-hub terminal per net. Each carries `{net, netclass, trackWidthMm, clearanceMm, viaDiameterMm, hub: {uid, kind, label, areaMm2, layers}, spoke: {…same shape…}, reachable, sameLayerReachable, existingCopper: {tracks, vias}, reason, remediationHint, clusterPeers?}`. `existingCopper` counts same-net tracks+vias already on the board so an `unreachable` flag on an already-routed net is interpretable as "no fresh single-layer path from this placement," not "no connection." When the count is non-zero AND the spoke is unreachable, the `remediationHint` appends a note pointing at the DRC ratsnest for the actual-connectivity question.
 - `netclassesEvaluated[]` — per-netclass counts.
 - `limitations` — describes the hub-and-spoke model and its scope.
 
