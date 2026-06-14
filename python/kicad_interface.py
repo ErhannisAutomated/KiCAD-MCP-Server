@@ -370,6 +370,10 @@ class KiCADInterface:
             "copy_routing_pattern": self.routing_commands.copy_routing_pattern,
             "get_nets_list": self.routing_commands.get_nets_list,
             "create_netclass": self.routing_commands.create_netclass,
+            # Alias: add_net_class TS schema (in design-rules.ts) maps
+            # to the same handler — it was schema-exposed but never
+            # wired before, so calls returned "Unknown command."
+            "add_net_class": self.routing_commands.create_netclass,
             "add_copper_pour": self.routing_commands.add_copper_pour,
             "route_differential_pair": self.routing_commands.route_differential_pair,
             "refill_zones": self._handle_refill_zones,
