@@ -184,7 +184,7 @@ _Source: `src/tools/schematic.ts`_
 | `delete_schematic_wire`           | Delete wire segment                                                                     | Routed (schematic) |
 | `add_schematic_net_label`         | Add net label to schematic                                                              | Direct             |
 | `delete_schematic_net_label`      | Delete net label                                                                        | Routed (schematic) |
-| `add_no_connect`                  | Add no-connect flag (X marker) to an unconnected pin                                   | Direct             |
+| `add_no_connect`                  | Add no-connect flag (X marker) to an unconnected pin. Idempotent — repeats at the same position return `status: "deduplicated"` (#?, 2026-06-14). | Direct             |
 | `move_schematic_net_label`        | Move net label to new position                                                          | Routed (schematic) |
 | `connect_to_net`                  | Connect component pin to named net                                                      | Direct             |
 | `connect_pins`                    | Connect N pins to a shared net (label/wire/auto); autorouter with tee detection         | Direct             |
@@ -356,6 +356,19 @@ _Source: `src/tools/freerouting.ts`_
 
 ---
 
+## Diagnostics (2 tools)
+
+_Source: `src/tools/placement.ts`; new registry category 2026-06-14._
+
+Silent-corruption detection + recovery for layout state DRC won't catch (pad-rotation drift, footprint overlap, stacked pads). Companion pair: `check_pcb_integrity` flags, `repair_pad_rotations` fixes.
+
+| Tool                    | Description                                                                                                                                                                                                | Access     |
+| ----------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ---------- |
+| `check_pcb_integrity`   | Audit-only: pad_rotation / footprint_overlap / stacked_pads subchecks. Catches the 2026-05-14 apply_positions silent-corruption class.                                                                       | Additional |
+| `repair_pad_rotations`  | Audit + optional repair for stale pad orientations from regex-style footprint rewrites. Cross-instance majority vote with rel-zero tie-break; mass-corruption flagged as `suspect_single_instance` (force=true). Dry-run by default. | Additional |
+
+---
+
 ## UI Management (2 tools)
 
 _Source: `src/tools/ui.ts`_
@@ -387,9 +400,9 @@ Registriert via `registerRouterTools()` in `src/server.ts`. Ermöglichen Tool-Di
 | -------------------- | ------- | ---------------------------------------- |
 | Direct               | 21      | Always visible                           |
 | Routed               | 72      | Always visible (registered directly)     |
-| Additional           | 44      | Always visible, registered directly      |
+| Additional           | 46      | Always visible, registered directly      |
 | Router/Discovery     | 3       | Tool-Discovery (`router.ts`, registered) |
-| **Total registered** | **137** | Verifiziert via VS Code MCP Discovery    |
+| **Total registered** | **139** | Verifiziert via VS Code MCP Discovery    |
 
 ## Summary by Category
 
@@ -409,12 +422,13 @@ Registriert via `registerRouterTools()` in `src/server.ts`. Ermöglichen Tool-Di
 | Datasheet            | 2          |
 | JLCPCB Integration   | 5          |
 | Freerouting          | 4          |
+| Diagnostics          | 2          |
 | UI Management        | 2          |
 | Router / Discovery   | 3          |
-| **Total registered** | **137**    |
+| **Total registered** | **139**    |
 
-> **Verified:** VS Code MCP Discovery Log meldet **137** registrierte Tools.
+> **Verified:** VS Code MCP Discovery Log meldet **137** registrierte Tools (pre-2026-06-14 count; +2 with the new Diagnostics category = **139**).
 
 ## Token Impact
 
-Alle 137 registrierten Tools sind stets für den LLM sichtbar. Die Discovery-Tools in `router.ts` ermöglichen dem Modell, Tools nach Kategorie oder Stichwort zu durchsuchen.
+Alle 139 registrierten Tools sind stets für den LLM sichtbar. Die Discovery-Tools in `router.ts` ermöglichen dem Modell, Tools nach Kategorie oder Stichwort zu durchsuchen.

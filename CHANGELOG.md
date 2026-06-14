@@ -4,6 +4,94 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### New tool: `repair_pad_rotations` — recovery for stale pad orientations (develop, 2026-06-14, commit 76cdb44)
+
+Companion to `check_pcb_integrity`'s `pad_rotation` subcheck: the
+existing tool flags the silent-corruption symptom (footprint outline
+rotated, pad SHAPES still at the pre-rotation angle), this one fixes
+it. Triggering incident was the 2026-05-14 `apply_positions.py`
+recovery script — regex-rewrote `(at X Y rot)` headers without going
+through pcbnew's API, leaving 57 of 71 footprints with shape/centre
+desync invisible to DRC.
+
+- **Detection**: per-footprint `rel = (pad_rot - fp_rot) % 360`
+  fingerprint. Cross-instance majority vote groups instances of the
+  same lib_id by fingerprint equivalence. **Rel-zero tie-break**:
+  with size ties, the bucket closest to rel=0 wins as reference
+  (library convention is overwhelmingly rel=0, and without this bias
+  a 50/50 split could pick the stale instance and propagate the
+  corruption during repair).
+- **Mass-corruption handling**: when ALL N instances of a lib_id
+  share a uniform non-zero rel (the actual apply_positions.py
+  scenario where majority vote sees consensus on a wrong state),
+  every member of the reference bucket gets flagged
+  `suspect_single_instance` requiring `force=true` to repair. Single
+  isolated footprints with uniform non-zero rel get the same
+  treatment.
+- **Repair**: dry-run by default. Confirmed-stale auto-repair; suspect
+  needs `force=true`. For each repair,
+  `pad.SetOrientationDegrees(fp_rot + ref_rel[num])` preserves any
+  legitimate library per-pad rotation offset. Added to
+  `_BOARD_MUTATING_COMMANDS` so non-dry-run runs auto-save.
+- **Discoverability**: new `"diagnostics"` registry category bundles
+  `check_pcb_integrity` (which was previously missing from the
+  registry — fixed in passing) + `repair_pad_rotations`.
+- Engine in `python/commands/repair_pad_rotations.py`. Tests
+  `tests/test_repair_pad_rotations.py` (15 unit, 6 integration).
+
+### Fix: `add_layer` auto-saves so out-of-band consumers see new layers (develop, 2026-06-14, commit b175484)
+
+`add_layer` was missing from `_BOARD_MUTATING_COMMANDS`, so its
+`SetCopperLayerCount`/`SetLayerName`/`SetLayerType` calls only
+mutated `self.board` in memory. `kicad-cli`, fresh `pcbnew.LoadBoard`,
+and any other out-of-band consumer saw stale state until an explicit
+`save_project`. Verified end-to-end: 2× `add_layer` through dispatch
+→ fresh `LoadBoard` returned copper count 2 + no inner layers; after
+the fix → count 4 + In1.Cu/In2.Cu at the correct ids.
+
+Schema clarifications (both `src/tools/board.ts` and
+`python/schemas/tool_schemas.py` — agent-discoverable surfaces):
+- `number` is the inner-layer ordinal (1=In1.Cu, 2=In2.Cu, max 30),
+  NOT the PCB_LAYER_ID. The `In1_Cu + 2*(N-1)` mapping is now
+  documented in-description.
+- Auto-save guarantee called out so callers don't add a redundant
+  `save_project` for visibility.
+- Python schema replaced with the four properties the handler
+  actually expects (was stale — only `layerName` + `layerType`).
+
+Regression test in `tests/test_add_layer.py`: fast membership
+assertion + real-pcbnew integration through dispatch + fresh
+LoadBoard.
+
+### Fix: `add_no_connect` idempotent by position (develop, 2026-06-14, commit a411969)
+
+Defence-in-depth for a previously-reported "3 parallel calls → 6 NCs"
+observation. Investigation found the TS server serialises every MCP
+call through `requestQueue` + a single Python stdio pipe
+(`src/server.ts:537-714`), so a Python-side read-modify-write race is
+structurally impossible via the MCP path; controlled experiments
+(3 batched-parallel, 3 sequential, 10 batched-parallel) all produced
+exactly N NCs. The original report was most consistent with one-off
+MCP framework retry — only retry predicts `> N` (a race predicts
+`≤ N`).
+
+- `WireManager.add_no_connect` now dedupes by position within
+  `NO_CONNECT_DEDUPE_TOLERANCE_MM = 0.01` mm (well under the 1.27 mm
+  pin grid). Returns `(bool, status)` where status is
+  `"added" | "deduplicated" | "failed"`.
+- Handler surfaces `status` in the response; message rewrites when
+  deduped (`"...already present at ... (skipped)"`).
+- TS schema description in `src/tools/schematic.ts` mentions
+  idempotency so agents discovering the tool see the contract.
+- Two other callers updated to the tuple signature:
+  `commands/autoplacer.py:2021` (only counts true `"added"`) and the
+  `wire_manager.py` smoke-test print.
+- Regression test `tests/test_add_no_connect_idempotent.py` — 6
+  tests covering same-position dedupe, sub-tolerance jitter,
+  distinct-positions sequential, ThreadPoolExecutor burst (loose
+  `1 ≤ count ≤ N` since the function does NOT claim Python
+  thread-safety), and the handler `status` field surface.
+
 ### New tool: `scrub_region` — region-scoped copper cleanup (develop, 2026-05-30, #251)
 
 Geometric region cleanup for stale copper left after a re-placement or
