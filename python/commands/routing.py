@@ -3847,20 +3847,30 @@ class RoutingCommands:
             }
 
     def create_netclass(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Create or update a netclass via direct .kicad_pro JSON editing.
+        """Create or update a netclass via the pcbnew NET_SETTINGS API.
 
-        The KiCad 9 pcbnew SWIG API for adding non-default netclasses
-        is broken — `board.GetNetClasses().Find(name)` AttributeError'd
-        on the upper-case method (the netclasses_map exposes lower-case
-        `find`), and even `m_NetSettings.GetNetclasses()[name] = nc`
-        succeeds in-place but doesn't propagate to
-        `GetAllNetClasses()` / the saved `.kicad_pro`. The file-edit
-        path mirrors what the KiCad GUI does (netclass settings live in
-        `net_settings.classes` of `.kicad_pro`) and survives Save +
-        reload correctly. Also accepts both the `create_netclass` TS
-        schema's params (traceWidth) and `add_net_class` TS schema's
-        params (trackWidth, uvia_diameter, diff_pair_*) so a single
-        impl serves both tools.
+        The old impl called `board.GetNetClasses().Find(name)` —
+        AttributeError, because the SWIG-wrapped `netclasses_map`
+        exposes lower-case `find` (it's std::map iteration sugar). The
+        proper KiCad-9 path is
+        `board.GetDesignSettings().m_NetSettings.SetNetclass(name, NETCLASS)`
+        for create-or-replace and
+        `m_NetSettings.GetNetClassByName(name).Set*(...)` for in-place
+        update (mutations persist because the SWIG accessor returns
+        the live shared_ptr). Net→class patterns go through
+        `SetNetclassPatternAssignment(pattern, classname)`.
+
+        Save propagates everything to `.kicad_pro` (no JSON edit
+        needed); the SETTINGS_MANAGER quirk that bit `open_project`
+        (commit 0f3fb93) is invisible here because we don't reload —
+        we keep the in-memory `self.board` whose NET_SETTINGS we just
+        edited.
+
+        Both TS schemas dispatch here. Accepts the union of their
+        param names:
+          - `create_netclass` (routing.ts): traceWidth
+          - `add_net_class` (design-rules.ts): trackWidth + snake_case
+            uvia_diameter / diff_pair_width / diff_pair_gap.
         """
         try:
             if not self.board:
@@ -3878,60 +3888,9 @@ class RoutingCommands:
                     "errorDetails": "name parameter is required",
                 }
 
-            board_file = self.board.GetFileName()
-            if not board_file:
-                return {
-                    "success": False,
-                    "message": "Board has no file path",
-                    "errorDetails": "create_netclass needs a saved board to find the .kicad_pro alongside it",
-                }
-            import json
-            from pathlib import Path
-            board_path = Path(board_file)
-            proj_path = board_path.with_suffix(".kicad_pro")
-            if not proj_path.exists():
-                return {
-                    "success": False,
-                    "message": f"Project file not found: {proj_path}",
-                    "errorDetails": "Expected a .kicad_pro alongside the .kicad_pcb",
-                }
-
-            with proj_path.open() as f:
-                proj = json.load(f)
-            ns = proj.setdefault("net_settings", {})
-            classes = ns.setdefault("classes", [])
-            default_template = next(
-                (c for c in classes if c.get("name") == "Default"), {}
-            )
-
-            # Find existing entry or build a new one templated off Default.
-            existing_idx = next(
-                (i for i, c in enumerate(classes) if c.get("name") == name),
-                None,
-            )
-            if existing_idx is not None:
-                entry = classes[existing_idx]
-                action = "updated"
-            else:
-                entry = dict(default_template)  # inherit all required fields
-                entry["name"] = name
-                # Priority: lower value = higher precedence in KiCad's
-                # netclass resolution. Default carries an INT_MAX
-                # sentinel (always-applies last-resort fallback); user
-                # classes use small positive numbers (typical: 10, 20).
-                # Pick a value above the existing user-class max so the
-                # new class doesn't silently override, but below the
-                # Default sentinel so its patterns still apply.
-                NON_DEFAULT_SENTINEL = 2 ** 30  # below INT_MAX, above any real priority
-                user_prios = [
-                    c.get("priority", NON_DEFAULT_SENTINEL)
-                    for c in classes
-                    if c.get("name") != "Default"
-                    and c.get("priority", NON_DEFAULT_SENTINEL) < NON_DEFAULT_SENTINEL
-                ]
-                entry["priority"] = (max(user_prios) + 10) if user_prios else 10
-                classes.append(entry)
-                action = "created"
+            ns = self.board.GetDesignSettings().m_NetSettings
+            existing = ns.HasNetclass(name)
+            action = "updated" if existing else "created"
 
             # Accept both schemas' param names.
             def _first(*keys: str) -> Optional[float]:
@@ -3941,77 +3900,109 @@ class RoutingCommands:
                         return float(v)
                 return None
 
-            field_map = {
+            # Build the (key → mm value) map from input params. None
+            # means "leave field alone" on update; for new netclasses
+            # the unspecified fields use NETCLASS's compiled-in defaults
+            # (clearance/track 0.2 mm, via 0.6 mm, etc.).
+            field_inputs = {
                 "clearance": _first("clearance"),
-                "track_width": _first("trackWidth", "traceWidth"),
-                "via_diameter": _first("viaDiameter"),
-                "via_drill": _first("viaDrill"),
-                "microvia_diameter": _first("uviaDiameter", "uvia_diameter"),
-                "microvia_drill": _first("uviaDrill", "uvia_drill"),
-                "diff_pair_width": _first("diffPairWidth", "diff_pair_width"),
-                "diff_pair_gap": _first("diffPairGap", "diff_pair_gap"),
+                "trackWidth": _first("trackWidth", "traceWidth"),
+                "viaDiameter": _first("viaDiameter"),
+                "viaDrill": _first("viaDrill"),
+                "microviaDiameter": _first("uviaDiameter", "uvia_diameter"),
+                "microviaDrill": _first("uviaDrill", "uvia_drill"),
+                "diffPairWidth": _first("diffPairWidth", "diff_pair_width"),
+                "diffPairGap": _first("diffPairGap", "diff_pair_gap"),
             }
-            applied = {}
-            for key, value in field_map.items():
-                if value is not None:
-                    entry[key] = value
-                    applied[key] = value
+            scale = 1_000_000  # mm → nm
 
-            # Net → netclass patterns. KiCad uses pattern-string matching;
-            # the simplest case is a literal net name as the pattern.
-            nets = list(params.get("nets") or [])
-            patterns = ns.setdefault("netclass_patterns", [])
-            existing_patterns = {
-                (p.get("netclass"), p.get("pattern")) for p in patterns
+            if existing:
+                nc = ns.GetNetClassByName(name)
+            else:
+                nc = pcbnew.NETCLASS(name)
+                # Priority: lower value = higher precedence. Default
+                # carries an INT_MAX sentinel ("last-resort fallback");
+                # user classes use small positive numbers (~10/20).
+                # Pick `max(user_priorities) + 10` so the new class
+                # doesn't silently override existing user choices but
+                # still beats Default. Skip Default's INT_MAX in the max.
+                all_classes = self.board.GetAllNetClasses()
+                user_prios = []
+                for cls_name, cls in all_classes.items():
+                    if str(cls_name) == "Default":
+                        continue
+                    try:
+                        p = cls.GetPriority()
+                        if 0 <= p < 2 ** 30:
+                            user_prios.append(p)
+                    except Exception:
+                        pass
+                nc.SetPriority((max(user_prios) + 10) if user_prios else 10)
+
+            # Set fields requested by the caller. setters expect nm.
+            applied = {}
+            setters = {
+                "clearance": ("SetClearance", "GetClearance"),
+                "trackWidth": ("SetTrackWidth", "GetTrackWidth"),
+                "viaDiameter": ("SetViaDiameter", "GetViaDiameter"),
+                "viaDrill": ("SetViaDrill", "GetViaDrill"),
+                "microviaDiameter": ("SetuViaDiameter", "GetuViaDiameter"),
+                "microviaDrill": ("SetuViaDrill", "GetuViaDrill"),
+                "diffPairWidth": ("SetDiffPairWidth", "GetDiffPairWidth"),
+                "diffPairGap": ("SetDiffPairGap", "GetDiffPairGap"),
             }
+            for key, mm in field_inputs.items():
+                if mm is None:
+                    continue
+                getattr(nc, setters[key][0])(int(mm * scale))
+                applied[key] = mm
+
+            if not existing:
+                ns.SetNetclass(name, nc)
+
+            # Net→class patterns. KiCad uses string-pattern matching;
+            # the simplest case is a literal net name.
+            # SetNetclassPatternAssignment(pattern, classname) is
+            # idempotent — calling it twice with the same pair is
+            # safe (the second call is a no-op update).
+            nets = list(params.get("nets") or [])
             new_patterns = []
             for net_name in nets:
-                pair = (name, net_name)
-                if pair not in existing_patterns:
-                    patterns.append({"netclass": name, "pattern": net_name})
-                    new_patterns.append(net_name)
+                ns.SetNetclassPatternAssignment(net_name, name)
+                new_patterns.append(net_name)
 
-            # Write JSON back.
-            with proj_path.open("w") as f:
-                json.dump(proj, f, indent=2)
-
-            # Reload the board so subsequent same-session calls see the
-            # new netclass. Same pattern as commit 0f3fb93's
-            # open_project — drop the SETTINGS_MANAGER cache first,
-            # otherwise pcbnew returns the stale in-memory project.
+            # Refresh effective-class cache so subsequent queries
+            # (e.g. _resolve_clearance_mm) see the changes.
             try:
-                sm = pcbnew.GetSettingsManager()
-                proj_obj = sm.GetProject(str(proj_path))
-                if proj_obj is not None:
-                    sm.UnloadProject(proj_obj, False)
-                self.board = pcbnew.LoadBoard(str(board_path))
-            except Exception as reload_err:
-                logger.warning(
-                    f"create_netclass: reload after JSON edit failed "
-                    f"({reload_err}); .kicad_pro is already saved, but "
-                    "subsequent same-session pcbnew queries may see "
-                    "the stale board until open_project is called."
-                )
+                ns.RecomputeEffectiveNetclasses()
+            except Exception:
+                pass
+
+            # Persist to disk (writes .kicad_pcb AND drives the
+            # .kicad_pro write through SETTINGS_MANAGER).
+            board_path = self.board.GetFileName()
+            if board_path:
+                self.board.Save(board_path)
+
+            # Read back the resulting netclass values for the response.
+            nc_final = ns.GetNetClassByName(name)
+            result_class = {
+                "name": name,
+                "priority": nc_final.GetPriority(),
+            }
+            for key, (_, getter) in setters.items():
+                try:
+                    result_class[key] = getattr(nc_final, getter)() / scale
+                except Exception:
+                    pass
 
             return {
                 "success": True,
                 "message": f"Netclass {action}: {name}",
                 "action": action,
-                "netClass": {
-                    "name": name,
-                    **{
-                        k: entry.get(k)
-                        for k in (
-                            "clearance", "track_width", "via_diameter",
-                            "via_drill", "microvia_diameter",
-                            "microvia_drill", "diff_pair_width",
-                            "diff_pair_gap", "priority",
-                        )
-                    },
-                },
+                "netClass": result_class,
                 "fieldsApplied": applied,
                 "netsPatternsAdded": new_patterns,
-                "projectPath": str(proj_path),
             }
         except Exception as e:
             logger.error(f"Error creating net class: {e}", exc_info=True)

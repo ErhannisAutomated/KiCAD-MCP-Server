@@ -1,17 +1,23 @@
 """Regression tests for create_netclass / add_net_class.
 
-The KiCad 9 pcbnew SWIG API for adding non-default netclasses is
-broken — both the upper-case `netclasses_map.Find(name)` (lower-case
-exists) and the dict-style `m_NetSettings.GetNetclasses()[name] = nc`
-fail to propagate to GetAllNetClasses or the saved .kicad_pro. The
-file-edit path is the only reliable approach, and these tests pin
-that behaviour:
+The old impl called `board.GetNetClasses().Find(name)` which raised
+because the SWIG `netclasses_map` exposes lower-case `find`. The
+correct pcbnew-9 path is
+`board.GetDesignSettings().m_NetSettings.SetNetclass(name, NETCLASS)`
+for create-or-replace; in-place update mutates the NETCLASS returned
+by `GetNetClassByName` (the SWIG shared_ptr accessor returns the
+live object). Patterns go through
+`SetNetclassPatternAssignment(pattern, classname)`. Save persists
+everything to `.kicad_pro` through the SETTINGS_MANAGER without us
+having to touch the JSON.
 
-- create_netclass writes the entry to net_settings.classes
-- update path is in-place (same priority, only changed fields applied)
-- patterns are added to net_settings.netclass_patterns
-- both `create_netclass` (traceWidth schema) and `add_net_class`
-  (trackWidth + snake_case schema) dispatch to the same impl
+These tests pin:
+- create writes the new netclass to `.kicad_pro` after Save
+- update is in-place (only changed fields apply; others preserved)
+- nets-arg produces `netclass_patterns` entries
+- both `create_netclass` (routing.ts traceWidth schema) and
+  `add_net_class` (design-rules.ts trackWidth + snake_case
+  uvia_diameter / diff_pair_* schema) dispatch to the same impl
 """
 from __future__ import annotations
 
@@ -38,8 +44,9 @@ def _real_pcbnew_available() -> bool:
     reason="needs real pcbnew swig module",
 )
 class TestCreateNetclassJsonEdit:
-    """Verifies the JSON-file-edit path against blink_555 (smallest
-    project with a real .kicad_pro)."""
+    """Verifies create_netclass / add_net_class against blink_555
+    (smallest project with a real .kicad_pro). Class name retained
+    for git-history continuity with the earlier JSON-edit impl."""
 
     @pytest.fixture
     def tmp_project(self):
