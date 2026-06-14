@@ -188,6 +188,25 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
+  // repair_pad_rotations — companion to check_pcb_integrity's pad_rotation check
+  server.tool(
+    "repair_pad_rotations",
+    "Audit and (optionally) repair pad orientations after a regex-style footprint rewrite that bypassed pcbnew.FOOTPRINT.SetOrientationDegrees(). Symptom: footprint outline rotated correctly but pad SHAPES still pointing at the pre-edit angle (pad CENTRES moved, pad SHAPES didn't) — invisible to DRC/ratsnest, catastrophic for routing (stacked USB-C pads, HTSSOP pad rows pointed into the body). DRY-RUN BY DEFAULT. Detection uses cross-instance majority vote: footprints whose per-pad rel-rotation fingerprint disagrees with the majority instance of the same lib_id are flagged 'confirmed_stale'. Single-instance footprints with non-zero uniform pad offsets are listed under 'suspect_single_instance' and require force=true (verify the library footprint's pad-rotation pattern before forcing). Companion to check_pcb_integrity which only flags; this tool also fixes.",
+    {
+      dryRun: z.boolean().optional().describe("Default true: audit only, no mutation."),
+      force: z.boolean().optional().describe("With dryRun=false: also repair suspect_single_instance footprints and non-uniform-drift mismatches. Assumes the user has verified the library footprint is rel=0."),
+      refs: z.array(z.string()).optional().describe("Scope audit/repair to specific footprint references (e.g. ['U1', 'U3']). Default: every footprint on the board."),
+      tolerance: z.number().optional().describe("Angle tolerance in degrees for treating two rotations as equal. Default 0.5°."),
+      boardPath: z.string().optional().describe("Path to the .kicad_pcb. Defaults to the currently-loaded board."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("repair_pad_rotations", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // analyze_routable_regions — Phase 1 of TOPOLOGY_TOOLS_PLAN.md
   server.tool(
     "analyze_routable_regions",

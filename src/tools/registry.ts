@@ -129,6 +129,12 @@ export const toolCategories: ToolCategory[] = [
     description: "Freerouting autorouter: automatic PCB routing via Specctra DSN/SES",
     tools: ["autoroute", "export_dsn", "import_ses", "check_freerouting", "scrub_region"],
   },
+  {
+    name: "diagnostics",
+    description:
+      "Silent-corruption detection + recovery for layout state DRC won't catch (pad rotation drift, footprint overlap, stacked pads)",
+    tools: ["check_pcb_integrity", "repair_pad_rotations"],
+  },
 ];
 
 /**

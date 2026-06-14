@@ -237,6 +237,7 @@ try:
     from commands.library_symbol import SymbolLibraryCommands, SymbolLibraryManager
     from commands.project import ProjectCommands
     from commands.routing import RoutingCommands
+    from commands.repair_pad_rotations import RepairPadRotationsCommands
     from commands.scrub_region import ScrubRegionCommands
     from commands.schematic import SchematicManager
     from commands.symbol_creator import SymbolCreator
@@ -286,6 +287,7 @@ class KiCADInterface:
         self.routing_commands = RoutingCommands(self.board)
         self.freerouting_commands = FreeroutingCommands(self.board)
         self.scrub_region_commands = ScrubRegionCommands(self.board)
+        self.repair_pad_rotations_commands = RepairPadRotationsCommands(self.board)
         self.design_rule_commands = DesignRuleCommands(self.board)
         self.export_commands = ExportCommands(self.board)
         self.library_commands = LibraryCommands(self.footprint_library)
@@ -501,6 +503,9 @@ class KiCADInterface:
             "check_freerouting": self.freerouting_commands.check_freerouting,
             # Region-scoped copper cleanup
             "scrub_region": self.scrub_region_commands.scrub_region,
+            # Recovery from regex-style footprint rewrites that bypassed
+            # pcbnew.FOOTPRINT.SetOrientationDegrees()
+            "repair_pad_rotations": self.repair_pad_rotations_commands.repair_pad_rotations,
             # Routing-topology analysis (Phases 1+2+3+4 of TOPOLOGY_TOOLS_PLAN)
             "analyze_routable_regions": self._handle_analyze_routable_regions,
             "check_pad_routability": self._handle_check_pad_routability,
@@ -674,6 +679,9 @@ class KiCADInterface:
         "add_board_text",
         "add_copper_pour",
         "refill_zones",
+        # repair_pad_rotations only mutates when dryRun=False, but auto-save
+        # is a no-op when nothing changed, so unconditional inclusion is fine.
+        "repair_pad_rotations",
         "import_svg_logo",
         "sync_schematic_to_board",
         "connect_passthrough",
@@ -707,6 +715,7 @@ class KiCADInterface:
         self.export_commands.board = self.board
         self.freerouting_commands.board = self.board
         self.scrub_region_commands.board = self.board
+        self.repair_pad_rotations_commands.board = self.board
 
     # Schematic command handlers
     def _handle_create_schematic(self, params: Dict[str, Any]) -> Dict[str, Any]:
