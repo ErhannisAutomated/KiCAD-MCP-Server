@@ -18,8 +18,32 @@ class BoardOutlineCommands:
         """Initialize with optional board instance"""
         self.board = board
 
+    def _existing_edge_segments(self) -> list:
+        """Return all existing Edge.Cuts drawing items on the board."""
+        edge_layer = self.board.GetLayerID("Edge.Cuts")
+        return [d for d in self.board.GetDrawings() if d.GetLayer() == edge_layer]
+
+    def _remove_edge_segments(self) -> int:
+        """Delete every Edge.Cuts drawing. Returns the count removed.
+        Uses RemoveNative (per the 5fc25b3 SWIG-corruption lesson —
+        BOARD.Remove() can leave the BOARD's SWIG type state corrupt
+        after large batches)."""
+        existing = self._existing_edge_segments()
+        for d in existing:
+            self.board.RemoveNative(d)
+        return len(existing)
+
     def add_board_outline(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Add a board outline to the PCB"""
+        """Add a board outline to the PCB.
+
+        By default, KEEPS any existing Edge.Cuts segments — the
+        semantic is "add a shape," matching cutout / multi-outline
+        boards. Pass `replace=true` (or call `set_board_size`, which
+        defaults to replace) to wipe existing Edge.Cuts first.
+        Without this guard, calling both tools produced overlapping
+        rectangles + DRC self-intersections — the long-standing
+        bug noted in `mcp_server_issues.md`.
+        """
         try:
             if not self.board:
                 return {
@@ -34,6 +58,7 @@ class BoardOutlineCommands:
             inner = params.get("params", params)
 
             shape = params.get("shape", "rectangle")
+            replace = bool(params.get("replace", inner.get("replace", False)))
             width = inner.get("width")
             height = inner.get("height")
             radius = inner.get("radius")
@@ -44,6 +69,11 @@ class BoardOutlineCommands:
                 shape = "rounded_rectangle"
             points = inner.get("points", [])
             unit = inner.get("unit", "mm")
+
+            existing_count = len(self._existing_edge_segments())
+            removed = 0
+            if existing_count > 0 and replace:
+                removed = self._remove_edge_segments()
 
             # Position: accept top-left corner (x/y) or center (centerX/centerY).
             # Default: top-left at (0,0) so the board occupies positive coordinate space
@@ -180,9 +210,22 @@ class BoardOutlineCommands:
                         edge_layer,
                     )
 
+            # Build a message that names what happened with existing
+            # geometry so a caller seeing the result understands
+            # whether they have one outline now or multiple stacked.
+            msg = f"Added board outline: {shape}"
+            if removed > 0:
+                msg += f" (replaced {removed} existing Edge.Cuts segment(s))"
+            elif existing_count > 0:
+                msg += (
+                    f" (kept {existing_count} existing Edge.Cuts "
+                    "segment(s) — pass replace=true to wipe them first)"
+                )
             return {
                 "success": True,
-                "message": f"Added board outline: {shape}",
+                "message": msg,
+                "edgeCutsBefore": existing_count,
+                "edgeCutsRemoved": removed,
                 "outline": {
                     "shape": shape,
                     "width": width,

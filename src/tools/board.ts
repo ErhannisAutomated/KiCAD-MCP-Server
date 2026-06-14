@@ -25,18 +25,23 @@ export function registerBoardTools(server: McpServer, callKicadScript: CommandFu
   // ------------------------------------------------------
   server.tool(
     "set_board_size",
-    "Set the PCB board dimensions (width and height) in the specified unit.",
+    "Set the PCB board dimensions (width and height). By default REPLACES any existing Edge.Cuts geometry — that's the natural reading of 'set the size.' Pass `replace: false` to stack a second outline instead (rarely useful; use `add_board_outline` for cutouts). The response carries `edgeCutsBefore` and `edgeCutsRemoved` counts so the caller sees what was wiped.",
     {
       width: z.number().describe("Board width"),
       height: z.number().describe("Board height"),
       unit: z.enum(["mm", "inch"]).describe("Unit of measurement"),
+      replace: z
+        .boolean()
+        .optional()
+        .describe("If true (default), delete any existing Edge.Cuts segments before drawing the new rectangle. Set false to add a second outline on top (almost certainly not what you want)."),
     },
-    async ({ width, height, unit }) => {
+    async ({ width, height, unit, replace }) => {
       logger.debug(`Setting board size to ${width}x${height} ${unit}`);
       const result = await callKicadScript("set_board_size", {
         width,
         height,
         unit,
+        replace,
       });
 
       return {
@@ -155,11 +160,15 @@ export function registerBoardTools(server: McpServer, callKicadScript: CommandFu
   // ------------------------------------------------------
   server.tool(
     "add_board_outline",
-    "Draw the PCB board outline (Edge.Cuts layer) as a rectangle, rounded rectangle, circle or polygon.",
+    "Draw the PCB board outline (Edge.Cuts layer) as a rectangle, rounded rectangle, circle or polygon. By default KEEPS existing Edge.Cuts segments (so you can compose an outer outline + cutouts); pass `replace: true` to wipe existing geometry first. Use `set_board_size` for the common 'this should be the board size' case — it defaults to replace=true. The response carries `edgeCutsBefore` and `edgeCutsRemoved` counts so the caller sees exactly what happened.",
     {
       shape: z
         .enum(["rectangle", "circle", "polygon", "rounded_rectangle"])
         .describe("Shape of the outline"),
+      replace: z
+        .boolean()
+        .optional()
+        .describe("If true, delete any existing Edge.Cuts segments before adding the new shape. Default false — multi-call usage (outer + cutouts) works without surprises."),
       params: z
         .object({
           // For rectangle / rounded_rectangle
