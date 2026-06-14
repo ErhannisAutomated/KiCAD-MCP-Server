@@ -2423,12 +2423,17 @@ class KiCADInterface:
                     "message": "Provide either position [x, y] or componentRef + pinNumber",
                 }
 
-            success = WireManager.add_no_connect(Path(schematic_path), position)
+            success, status = WireManager.add_no_connect(Path(schematic_path), position)
             if success:
+                if status == "deduplicated":
+                    message = f"No-connect already present at {position} (skipped)"
+                else:
+                    message = f"Added no-connect flag at {position}"
                 result = {
                     "success": True,
-                    "message": f"Added no-connect flag at {position}",
+                    "message": message,
                     "actual_position": position,
+                    "status": status,
                 }
                 if snapped_to_pin:
                     result["snapped_to_pin"] = snapped_to_pin

@@ -2018,7 +2018,8 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
         if key in nc_seen:
             continue
         nc_seen.add(key)
-        if _WM.add_no_connect(schematic_path, list(wp)):
+        ok, status = _WM.add_no_connect(schematic_path, list(wp))
+        if ok and status == "added":
             nc_added += 1
 
     crossings = _scan_unrelated_wire_crossings(schematic_path)

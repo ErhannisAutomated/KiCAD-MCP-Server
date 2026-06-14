@@ -33,6 +33,7 @@ _SYM_TYPE = Symbol("type")
 _SYM_UUID = Symbol("uuid")
 _SYM_SHEET_INSTANCES = Symbol("sheet_instances")
 _SYM_JUNCTION = Symbol("junction")
+_SYM_NO_CONNECT = Symbol("no_connect")
 _SYM_LIB_SYMBOLS = Symbol("lib_symbols")
 _SYM_LIB_ID = Symbol("lib_id")
 _SYM_MIRROR = Symbol("mirror")
@@ -939,34 +940,61 @@ class WireManager:
             logger.info(f"sync_junctions: added {added}, removed {removed}")
         return added, removed
 
-    @staticmethod
-    def add_no_connect(schematic_path: Path, position: List[float]) -> bool:
-        """
-        Add a no-connect flag to the schematic
+    # Tolerance (mm) for considering two no_connect positions identical.
+    # Pin grid is 1.27 mm; 0.01 mm is well below any legitimate distinct-pin
+    # spacing while absorbing float round-trip noise from sexpdata.
+    NO_CONNECT_DEDUPE_TOLERANCE_MM = 0.01
 
-        Args:
-            schematic_path: Path to .kicad_sch file
-            position: [x, y] coordinates for no-connect flag
+    @staticmethod
+    def add_no_connect(schematic_path: Path, position: List[float]) -> Tuple[bool, str]:
+        """
+        Add a no-connect flag to the schematic.
+
+        Idempotent: if a no_connect already exists within
+        NO_CONNECT_DEDUPE_TOLERANCE_MM of `position`, returns
+        (True, "deduplicated") without modifying the file. This guards
+        against duplicate-call sources (framework retries, agent loops)
+        that historically produced 2× NCs per intended call.
 
         Returns:
-            True if successful, False otherwise
+            (True, "added")        — new NC written
+            (True, "deduplicated") — NC already present at this position
+            (False, "failed")      — error (logged)
         """
         try:
-            # Read schematic
             with open(schematic_path, "r", encoding="utf-8") as f:
                 sch_content = f.read()
 
             sch_data = sexpdata.loads(sch_content)
 
-            # Create no_connect S-expression
-            # Format: (no_connect (at x y) (uuid ...))
+            tol = WireManager.NO_CONNECT_DEDUPE_TOLERANCE_MM
+            px, py = float(position[0]), float(position[1])
+            for item in sch_data:
+                if not (isinstance(item, list) and len(item) > 0 and item[0] == _SYM_NO_CONNECT):
+                    continue
+                for sub in item[1:]:
+                    if (
+                        isinstance(sub, list)
+                        and len(sub) >= 3
+                        and sub[0] == _SYM_AT
+                    ):
+                        try:
+                            ex, ey = float(sub[1]), float(sub[2])
+                        except (TypeError, ValueError):
+                            continue
+                        if abs(ex - px) <= tol and abs(ey - py) <= tol:
+                            logger.info(
+                                f"Skipping duplicate no-connect at {position} "
+                                f"(existing at [{ex}, {ey}])"
+                            )
+                            return True, "deduplicated"
+
             no_connect_sexp = [
-                Symbol("no_connect"),
-                [Symbol("at"), position[0], position[1]],
-                [Symbol("uuid"), str(uuid.uuid4())],
+                _SYM_NO_CONNECT,
+                [_SYM_AT, position[0], position[1]],
+                [_SYM_UUID, str(uuid.uuid4())],
             ]
 
-            # Find insertion point
             sheet_instances_index = None
             for i, item in enumerate(sch_data):
                 if isinstance(item, list) and len(item) > 0 and item[0] == _SYM_SHEET_INSTANCES:
@@ -975,26 +1003,24 @@ class WireManager:
 
             if sheet_instances_index is None:
                 logger.error("No sheet_instances section found in schematic")
-                return False
+                return False, "failed"
 
-            # Insert no_connect
             sch_data.insert(sheet_instances_index, no_connect_sexp)
             logger.info(f"Injected no-connect at {position}")
 
-            # Write back
             with open(schematic_path, "w", encoding="utf-8") as f:
                 output = sexpdata.dumps(sch_data)
                 f.write(output)
 
             logger.info(f"Successfully added no-connect to {schematic_path.name}")
-            return True
+            return True, "added"
 
         except Exception as e:
             logger.error(f"Error adding no-connect: {e}")
             import traceback
 
             logger.error(traceback.format_exc())
-            return False
+            return False, "failed"
 
     @staticmethod
     def delete_wire(
@@ -1420,8 +1446,8 @@ if __name__ == "__main__":
 
     # Test 4: Add no-connect
     print("\n[4/4] Testing no-connect creation...")
-    success = WireManager.add_no_connect(test_path, [127, 50.8])
-    print(f"  {'✓' if success else '✗'} No-connect: {success}")
+    success, status = WireManager.add_no_connect(test_path, [127, 50.8])
+    print(f"  {'✓' if success else '✗'} No-connect ({status}): {success}")
 
     # Verify with kicad-skip
     print("\n[Verification] Loading with kicad-skip...")

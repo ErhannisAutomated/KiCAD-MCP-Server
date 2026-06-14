@@ -590,7 +590,9 @@ edit_schematic_component and set its value to an empty string.`,
     "Add a no-connect flag (X marker) to a pin that is intentionally left unconnected. " +
       "This suppresses ERC 'Pin not connected' errors for unused pins. " +
       "PREFERRED: supply componentRef + pinNumber to snap to the exact pin endpoint. " +
-      "Alternatively supply position [x, y] in mm matching the pin endpoint exactly.",
+      "Alternatively supply position [x, y] in mm matching the pin endpoint exactly. " +
+      "Idempotent: calling twice at the same position is a no-op (response.status " +
+      "is 'added' on first call, 'deduplicated' on repeats).",
     {
       schematicPath: z.string().describe("Path to the schematic file"),
       position: z
