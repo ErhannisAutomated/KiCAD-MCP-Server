@@ -2757,7 +2757,7 @@ SCHEMATIC_TOOLS = [
     {
         "name": "get_schematic_pin_locations",
         "title": "Get Schematic Pin Locations",
-        "description": "Returns the exact absolute coordinates of all pins on a schematic component. Use this BEFORE placing net labels with add_schematic_net_label to get the correct x/y position for each pin endpoint.",
+        "description": "Returns the exact absolute coordinates of all pins on a schematic component. Use this BEFORE placing net labels with add_schematic_net_label to get the correct x/y position for each pin endpoint. Each pin entry also includes name and angle (in degrees: 0=East, 90=North, 180=West, 270=South — the OUTWARD direction the pin's wire stub should travel) so you can plan routing without trial-and-error.",
         "inputSchema": {
             "type": "object",
             "properties": {

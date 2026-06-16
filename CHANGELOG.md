@@ -4,6 +4,19 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Discoverability: pin angle documented in get_schematic_pin_locations schemas (develop, 2026-06-16)
+
+`get_schematic_pin_locations` has returned an `angle` field for every
+pin since commit 1270a0d (2026-05-06), but neither the Python tool
+schema nor the TS server.tool description mentioned it — so agents
+discovering the tool didn't know the angle was available without
+reading the source. Both schemas now document the field (0=East,
+90=North, 180=West, 270=South — the OUTWARD direction the pin's wire
+stub should travel) so routing can be planned without trial-and-error.
+
+Touches `python/schemas/tool_schemas.py` and `src/tools/schematic.ts`
+descriptions only. No behaviour change.
+
 ### Removal: `set_layer_constraints` — broken since added, removed (develop, 2026-06-16)
 
 The tool was schema-exposed in `src/tools/design-rules.ts` and listed in

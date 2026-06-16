@@ -857,7 +857,7 @@ edit_schematic_component and set its value to an empty string.`,
   // Get pin locations for a schematic component
   server.tool(
     "get_schematic_pin_locations",
-    "Returns the exact x/y coordinates of every pin on a schematic component. Use this before add_schematic_net_label to place labels correctly on pin endpoints.",
+    "Returns the exact x/y coordinates of every pin on a schematic component, plus pin name and angle (0=East, 90=North, 180=West, 270=South — the OUTWARD direction). Use this before add_schematic_net_label to place labels correctly on pin endpoints; the angle lets you plan wire routing without trial-and-error.",
     {
       schematicPath: z.string().describe("Path to the schematic file"),
       reference: z.string().describe("Component reference designator (e.g. U1, R1, J2)"),
