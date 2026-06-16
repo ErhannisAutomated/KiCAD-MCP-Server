@@ -4,6 +4,22 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Removal: `set_layer_constraints` — broken since added, removed (develop, 2026-06-16)
+
+The tool was schema-exposed in `src/tools/design-rules.ts` and listed in
+the `drc` registry category, but had no Python dispatch entry — calling it
+returned `"Unknown command: set_layer_constraints"`. KiCAD 9's
+per-layer DRC constraints live in the `.kicad_dru` rules file (not on
+`m_NetSettings`, which carries netclass-wide rules only), so the schema's
+stated capability cannot be delivered through the API path it implied.
+Rather than ship a half-implemented `.kicad_dru` emitter whose effect
+DRC tests can't verify in-process, the schema, registry entry, and three
+doc references are removed. Users needing per-layer constraints should
+hand-edit `<board>.kicad_dru` (or use KiCAD's Custom Rules dialog) — the
+canonical KiCAD path.
+
+Tool count 139 → 138.
+
 ### New tool: `repair_pad_rotations` — recovery for stale pad orientations (develop, 2026-06-14, commit 76cdb44)
 
 Companion to `check_pcb_integrity`'s `pad_rotation` subcheck: the

@@ -1,7 +1,7 @@
 # KiCAD MCP Server - Complete Tool Inventory
 
 **Version:** 2.2.0-alpha
-**Total Tools:** 141
+**Total Tools:** 140
 **Last Updated:** 2026-05-31
 
 ## How Tools Are Organized
@@ -122,7 +122,7 @@ _Source: `src/tools/routing.ts`_
 
 ---
 
-## Design Rules and DRC (8 tools)
+## Design Rules and DRC (7 tools)
 
 _Source: `src/tools/design-rules.ts`_
 
@@ -133,7 +133,6 @@ _Source: `src/tools/design-rules.ts`_
 | `run_drc`               | Run design rule check                                       | Routed (drc) |
 | `add_net_class`         | Add net class with custom rules                             | Routed (drc) |
 | `assign_net_to_class`   | Assign net to a net class                                   | Routed (drc) |
-| `set_layer_constraints` | Set layer-specific constraints                              | Routed (drc) |
 | `check_clearance`       | Check clearance between two items                           | Routed (drc) |
 | `get_drc_violations`    | Get DRC violation list (filter by severity / type / net); pass `summaryOnly=true` for counts only, or `limit`+`offset` to page through large reports (#237) | Routed (drc) |
 
@@ -402,7 +401,7 @@ Registriert via `registerRouterTools()` in `src/server.ts`. Ermöglichen Tool-Di
 | Routed               | 72      | Always visible (registered directly)     |
 | Additional           | 46      | Always visible, registered directly      |
 | Router/Discovery     | 3       | Tool-Discovery (`router.ts`, registered) |
-| **Total registered** | **139** | Verifiziert via VS Code MCP Discovery    |
+| **Total registered** | **138** | Verifiziert via VS Code MCP Discovery    |
 
 ## Summary by Category
 
@@ -412,7 +411,7 @@ Registriert via `registerRouterTools()` in `src/server.ts`. Ermöglichen Tool-Di
 | Board Management     | 12         |
 | Component Management | 16         |
 | Routing              | 13         |
-| Design Rules / DRC   | 8          |
+| Design Rules / DRC   | 7          |
 | Export               | 8          |
 | Schematic            | 43         |
 | Footprint Libraries  | 4          |

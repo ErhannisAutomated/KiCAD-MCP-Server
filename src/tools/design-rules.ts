@@ -202,40 +202,6 @@ export function registerDesignRuleTools(server: McpServer, callKicadScript: Comm
   );
 
   // ------------------------------------------------------
-  // Set Layer Constraints Tool
-  // ------------------------------------------------------
-  server.tool(
-    "set_layer_constraints",
-    "Set per-layer design rule constraints (minimum track width, clearance and via dimensions).",
-    {
-      layer: z.string().describe("Layer name (e.g., 'F.Cu')"),
-      minTrackWidth: z.number().optional().describe("Minimum track width for this layer (mm)"),
-      minClearance: z.number().optional().describe("Minimum clearance for this layer (mm)"),
-      minViaDiameter: z.number().optional().describe("Minimum via diameter for this layer (mm)"),
-      minViaDrill: z.number().optional().describe("Minimum via drill size for this layer (mm)"),
-    },
-    async ({ layer, minTrackWidth, minClearance, minViaDiameter, minViaDrill }) => {
-      logger.debug(`Setting constraints for layer: ${layer}`);
-      const result = await callKicadScript("set_layer_constraints", {
-        layer,
-        minTrackWidth,
-        minClearance,
-        minViaDiameter,
-        minViaDrill,
-      });
-
-      return {
-        content: [
-          {
-            type: "text",
-            text: JSON.stringify(result),
-          },
-        ],
-      };
-    },
-  );
-
-  // ------------------------------------------------------
   // Check Clearance Tool
   // ------------------------------------------------------
   server.tool(

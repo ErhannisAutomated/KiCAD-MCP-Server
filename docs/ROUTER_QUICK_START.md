@@ -48,12 +48,12 @@ File export for fabrication and documentation
 - export_gerber, export_pdf, export_svg, export_3d
 - export_bom, export_netlist, export_position_file, export_vrml
 
-### 4. drc (8 tools)
+### 4. drc (7 tools)
 
 Design rule checking and electrical validation
 
 - set_design_rules, get_design_rules, run_drc
-- add_net_class, assign_net_to_class, set_layer_constraints
+- add_net_class, assign_net_to_class
 - check_clearance, get_drc_violations
 
 ### 5. schematic (8 tools)

@@ -116,7 +116,7 @@ Generate output files for fabrication and documentation.
 - `export_position_file` - Export component positions
 - `export_vrml` - Export VRML 3D model
 
-#### 4. `drc` - Design Rules & Validation (9 tools)
+#### 4. `drc` - Design Rules & Validation (7 tools)
 
 Design rule checking and electrical validation.
 
@@ -127,7 +127,6 @@ Design rule checking and electrical validation.
 - `run_drc` - Run design rule check
 - `add_net_class` - Add net class
 - `assign_net_to_class` - Assign net to class
-- `set_layer_constraints` - Set layer constraints
 - `check_clearance` - Check clearance between items
 - `get_drc_violations` - Get DRC violations
 
