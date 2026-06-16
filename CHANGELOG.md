@@ -4,6 +4,26 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Fix: board freshness check now fires without boardPath (develop, 2026-06-16)
+
+Follow-up to the freshness check shipped earlier today. The original
+gate required the caller to pass `boardPath` matching
+`self.board.GetFileName()` before reloading. Diagnostic tools like
+`run_drc`, `get_drc_violations`, and `query_traces` don't take a
+boardPath — and `run_drc` saves `self.board` to disk before invoking
+kicad-cli (so kicad-cli sees the current in-memory mutations).
+
+Combined effect: a `run_drc` call after the user had hand-routed and
+saved in KiCad would silently overwrite their saved file with the
+cached stale `self.board`. Hit live on power_module 2026-06-16 —
+the user's hand-routing session was clobbered (recoverable from git).
+
+Fix: `_ensure_board_fresh` now uses `self.board.GetFileName()` as the
+file to check whenever the caller doesn't pass `boardPath` (and still
+honours the path-match guard when they do). One existing test that
+codified the buggy "no boardPath = no check" behaviour was rewritten
+to assert the correct semantics; the integration suite is unchanged.
+
 ### Fix: out-of-band board edits now auto-reload self.board (develop, 2026-06-16)
 
 Closes the long-standing "self.board invisible to out-of-band file edits"

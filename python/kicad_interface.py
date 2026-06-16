@@ -735,25 +735,35 @@ class KiCADInterface:
         """Reload self.board if the on-disk file is newer than the cached
         copy. Called before dispatching any command.
 
-        Triggers only when (a) a board is currently loaded, (b) the caller
-        passed a boardPath that matches self.board.GetFileName() — i.e. they
-        intend to operate on that exact file — and (c) the on-disk mtime is
-        newer than the mtime we recorded at the last load/save.
+        Triggers when a board is currently loaded and the on-disk file at
+        self.board.GetFileName() is newer than the mtime we recorded at the
+        last load/save. If the caller passes a boardPath, it must match the
+        loaded board's filename (callers targeting a DIFFERENT file route
+        through a per-command load path).
 
         Avoids the "self.board invisible to out-of-band file edits" class of
-        bugs (kicad-cli reruns, hand-edits, KiCAD GUI saves) without forcing
-        callers to re-issue open_project after every external change.
+        bugs (kicad-cli reruns, hand-edits, KiCAD GUI saves, recovery via
+        git restore) without forcing callers to re-issue open_project after
+        every external change. The bug worth not repeating: diagnostic
+        tools like run_drc / get_drc_violations don't take a boardPath,
+        but they DO save self.board before invoking kicad-cli — without
+        this check firing on the no-boardPath path, that save would clobber
+        any out-of-band edits silently. (Hit on 2026-06-16 during the
+        power_module hand-off.)
         """
         if self.board is None or self._board_disk_mtime is None:
-            return
-        board_path = params.get("boardPath") if isinstance(params, dict) else None
-        if not board_path:
             return
         try:
             in_memory_path = self.board.GetFileName()
         except Exception:
             return
-        if not in_memory_path or os.path.abspath(board_path) != os.path.abspath(in_memory_path):
+        if not in_memory_path:
+            return
+        # If the caller passed an explicit boardPath, it must match the
+        # currently-loaded board. Mismatches mean they want a DIFFERENT
+        # file loaded — that's not our job here; another handler will deal.
+        board_path = params.get("boardPath") if isinstance(params, dict) else None
+        if board_path and os.path.abspath(board_path) != os.path.abspath(in_memory_path):
             return
         try:
             disk_mtime = os.path.getmtime(in_memory_path)

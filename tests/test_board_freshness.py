@@ -66,15 +66,31 @@ class TestEnsureBoardFreshUnit:
         # No baseline → cannot decide. Don't crash, don't reload.
         ki._ensure_board_fresh("get_board_info", {"boardPath": str(pcb)})
 
-    def test_boardpath_missing_from_params_is_noop(self, tmp_path):
+    def test_boardpath_missing_uses_loaded_board_path(self, tmp_path, monkeypatch):
+        """Diagnostic tools (run_drc, get_drc_violations) don't take a
+        boardPath but they DO save self.board before invoking kicad-cli.
+        The freshness check MUST fire on this path or those saves clobber
+        out-of-band edits. (Bug hit 2026-06-16 — run_drc reverted a
+        GUI-saved hand-routing pass.)"""
         ki = self._ki()
         pcb = tmp_path / "x.kicad_pcb"
         pcb.write_text("(kicad_pcb)")
         ki.board = _StubBoard(str(pcb))
-        ki._board_disk_mtime = os.path.getmtime(pcb)
-        # No boardPath in params → caller isn't claiming a board file;
-        # nothing to compare against.
-        ki._ensure_board_fresh("get_board_info", {})
+        ki._board_disk_mtime = os.path.getmtime(pcb) - 100  # cached < disk
+
+        called = {"loaded": False}
+
+        def _fake_load(path):
+            called["loaded"] = True
+            return _StubBoard(path)
+
+        import pcbnew as _pcbnew
+
+        monkeypatch.setattr(_pcbnew, "LoadBoard", _fake_load)
+        # No boardPath in params — the check must still fire because the
+        # loaded board has a filename and disk is newer than cache.
+        ki._ensure_board_fresh("run_drc", {})
+        assert called["loaded"], "expected reload when disk is newer than cache"
 
     def test_boardpath_mismatch_is_noop(self, tmp_path):
         ki = self._ki()
