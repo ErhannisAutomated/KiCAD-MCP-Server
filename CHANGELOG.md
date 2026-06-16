@@ -4,6 +4,25 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Discoverability: list_schematic_labels surfaces connected_pins in text output (develop, 2026-06-16)
+
+The handler has enriched every label with `connected_pins` (a list of
+`{component, pin}` dicts for every pin on the net) since commit a4214de
+(2026-05-06). Two surfaces still hid it from agents:
+
+- The TS server.tool description didn't mention the field, so the
+  capability was invisible at discovery time.
+- The TS text wrapper dropped the field from the rendered output, so
+  MCP clients reading only the text saw `[type] name at (x, y)` with
+  no connectivity info — the agent had to parse the raw JSON response
+  to find pins.
+
+Description now documents the field. The text wrapper appends
+` — pins: U1.3, U2.5, +N more` to each label line (capped at 8 entries
+to keep large schematics readable). One regression test added in
+`tests/test_schematic_labels.py` pins the field's presence so a future
+refactor can't silently drop it.
+
 ### Discoverability: pin angle documented in get_schematic_pin_locations schemas (develop, 2026-06-16)
 
 `get_schematic_pin_locations` has returned an `angle` field for every

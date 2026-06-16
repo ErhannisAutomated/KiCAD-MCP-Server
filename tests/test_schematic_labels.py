@@ -175,6 +175,19 @@ class TestListSchematicLabelsFilters:
         assert "labels" in result
         assert "count" in result
 
+    def test_each_label_carries_connected_pins(self) -> None:
+        """Every returned label should expose a connected_pins list (possibly empty),
+        so callers can inspect net membership without a second round-trip."""
+        extra = _label_sexp("NET1", 5, 5) + "\n" + _global_label_sexp("GND", 20, 20)
+        tmp = _make_temp_schematic(extra)
+        result = self._ki()._handle_list_schematic_labels({"schematicPath": str(tmp)})
+        assert result["success"] is True
+        labels = result["labels"]
+        assert len(labels) == 2
+        for lbl in labels:
+            assert "connected_pins" in lbl, f"label missing connected_pins: {lbl}"
+            assert isinstance(lbl["connected_pins"], list)
+
 
 # ===========================================================================
 # TestMoveSchematicNetLabelSchema (unit)

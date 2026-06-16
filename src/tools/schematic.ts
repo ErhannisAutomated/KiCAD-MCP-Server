@@ -1074,6 +1074,9 @@ edit_schematic_component and set its value to an empty string.`,
   server.tool(
     "list_schematic_labels",
     "List all net labels, global labels, and power flags in the schematic. " +
+      "Each label entry includes its name (which IS the net name in KiCAD), " +
+      "type, position, and connected_pins ([{component, pin}, ...]) — the " +
+      "component pins reachable via wire/label BFS across all sheets. " +
       "Optionally filter by label name (netName) and/or label type (labelType).",
     {
       schematicPath: z.string().describe("Path to the .kicad_sch file"),
@@ -1099,9 +1102,17 @@ edit_schematic_component and set its value to an empty string.`,
             content: [{ type: "text", text: "No labels found in schematic." }],
           };
         }
-        const lines = labels.map(
-          (l: any) => `  [${l.type}] ${l.name} at (${l.position.x}, ${l.position.y})`,
-        );
+        const lines = labels.map((l: any) => {
+          const pins = Array.isArray(l.connected_pins) ? l.connected_pins : [];
+          const pinSummary =
+            pins.length === 0
+              ? ""
+              : ` — pins: ${pins
+                  .slice(0, 8)
+                  .map((p: any) => `${p.component}.${p.pin}`)
+                  .join(", ")}${pins.length > 8 ? `, +${pins.length - 8} more` : ""}`;
+          return `  [${l.type}] ${l.name} at (${l.position.x}, ${l.position.y})${pinSummary}`;
+        });
         return {
           content: [
             {
