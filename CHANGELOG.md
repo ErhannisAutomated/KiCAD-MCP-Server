@@ -4,6 +4,24 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Improvement: list_schematic_components is now a bulk pin-location query (develop, 2026-06-16)
+
+Per the standing backlog item ("must call `get_schematic_pin_locations`
+once per component — a single call accepting a list of refs would save
+many round-trips"). Two small additions to the existing tool, no new
+tool added:
+
+- Each pin entry now carries `angle` alongside `number`, `name`,
+  `position` (0=East, 90=North, 180=West, 270=South — the OUTWARD
+  direction, computed via `PinLocator.get_pin_angle`).
+- New `filter.references: string[]` option restricts the result to a
+  caller-supplied list of refs. Composes with `libId` and
+  `referencePrefix`. Empty list = no filter (returns all), to match how
+  an LLM would expect an unset filter to behave.
+
+TS schema description updated to document the bulk-query shape. 4
+integration tests in `tests/test_list_schematic_components_bulk_pins.py`.
+
 ### Discoverability: list_schematic_labels surfaces connected_pins in text output (develop, 2026-06-16)
 
 The handler has enriched every label with `connected_pins` (a list of

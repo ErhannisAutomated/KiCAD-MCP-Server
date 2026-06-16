@@ -942,7 +942,7 @@ edit_schematic_component and set its value to an empty string.`,
   // List all components in schematic
   server.tool(
     "list_schematic_components",
-    "List all components in a schematic with their references, values, positions, and pins. Essential for inspecting what's on the schematic before making edits.",
+    "List all components in a schematic with their references, values, positions, and pins. Each pin entry includes number, position (x/y), name, and angle (0=East / 90=North / 180=West / 270=South, the OUTWARD direction). Use filter.references to target specific refs — much cheaper than N calls to get_schematic_pin_locations on large schematics. Essential for inspecting what's on the schematic before making edits.",
     {
       schematicPath: z.string().describe("Path to the .kicad_sch file"),
       filter: z
@@ -952,13 +952,19 @@ edit_schematic_component and set its value to an empty string.`,
             .string()
             .optional()
             .describe("Filter by reference prefix (e.g., 'R', 'C', 'U')"),
+          references: z
+            .array(z.string())
+            .optional()
+            .describe(
+              "Restrict to this explicit list of component refs (e.g. ['R1','U2','C3']). Bulk pin-location query: returns each ref's pins in one call.",
+            ),
         })
         .optional()
         .describe("Optional filters"),
     },
     async (args: {
       schematicPath: string;
-      filter?: { libId?: string; referencePrefix?: string };
+      filter?: { libId?: string; referencePrefix?: string; references?: string[] };
     }) => {
       const result = await callKicadScript("list_schematic_components", args);
       if (result.success) {

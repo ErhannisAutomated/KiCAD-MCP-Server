@@ -3048,6 +3048,12 @@ class KiCADInterface:
             filter_params = params.get("filter", {})
             lib_id_filter = filter_params.get("libId", "")
             ref_prefix_filter = filter_params.get("referencePrefix", "")
+            ref_list_filter = filter_params.get("references")
+            ref_set = (
+                {r for r in ref_list_filter if isinstance(r, str)}
+                if isinstance(ref_list_filter, (list, tuple)) and ref_list_filter
+                else None
+            )
 
             locator = PinLocator()
             components = []
@@ -3066,6 +3072,8 @@ class KiCADInterface:
                 if lib_id_filter and lib_id_filter not in lib_id:
                     continue
                 if ref_prefix_filter and not ref.startswith(ref_prefix_filter):
+                    continue
+                if ref_set is not None and ref not in ref_set:
                     continue
 
                 value = symbol.property.Value.value if hasattr(symbol.property, "Value") else ""
@@ -3098,6 +3106,9 @@ class KiCADInterface:
                             }
                             if pin_num in pins_def:
                                 pin_info["name"] = pins_def[pin_num].get("name", pin_num)
+                                pin_info["angle"] = (
+                                    locator.get_pin_angle(sch_file, ref, pin_num) or 0
+                                )
                             pin_list.append(pin_info)
                         comp["pins"] = pin_list
                 except Exception:
