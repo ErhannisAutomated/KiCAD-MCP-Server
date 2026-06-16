@@ -260,6 +260,11 @@ class KiCADInterface:
     def __init__(self) -> None:
         """Initialize the interface and command handlers"""
         self.board = None
+        # mtime of the on-disk file at the moment self.board was last
+        # loaded/saved. Used by _ensure_board_fresh to detect out-of-band
+        # edits (kicad-cli, hand scripts, KiCAD GUI saves) so the next
+        # command operates on the current file, not stale in-memory state.
+        self._board_disk_mtime: Optional[float] = None
         self.project_filename = None
         self.use_ipc = USE_IPC_BACKEND
         self.ipc_backend = ipc_backend
@@ -554,6 +559,10 @@ class KiCADInterface:
         logger.info(f"Handling command: {command}")
         logger.debug(f"Command parameters: {params}")
 
+        # If the caller is referencing a board we have cached and the file
+        # on disk has been modified out-of-band, reload before dispatch.
+        self._ensure_board_fresh(command, params)
+
         try:
             # Check if we can use IPC for this command (real-time UI sync)
             if self.use_ipc and self.ipc_board_api and command in self.IPC_CAPABLE_COMMANDS:
@@ -598,6 +607,11 @@ class KiCADInterface:
                         # Get board from the project commands handler
                         self.board = self.project_commands.board
                         self._update_command_handlers()
+                        if self.board:
+                            try:
+                                self._record_board_disk_mtime(self.board.GetFileName())
+                            except Exception:
+                                pass
                     elif command in self._BOARD_MUTATING_COMMANDS:
                         # If the handler signalled that it wrote to disk
                         # itself (e.g. delete_trace's bulk-strip via
@@ -615,6 +629,7 @@ class KiCADInterface:
                                 )
                                 self.board = pcbnew.LoadBoard(board_path)
                                 self._update_command_handlers()
+                                self._record_board_disk_mtime(board_path)
                         else:
                             # Auto-save after every board mutation via SWIG.
                             # Prevents data loss if Claude hits context limit before
@@ -701,8 +716,68 @@ class KiCADInterface:
                 if board_path:
                     pcbnew.SaveBoard(board_path, self.board)
                     logger.debug(f"Auto-saved board to: {board_path}")
+                    self._record_board_disk_mtime(board_path)
         except Exception as e:
             logger.warning(f"Auto-save failed: {e}")
+
+    def _record_board_disk_mtime(self, board_path: Optional[str]) -> None:
+        """Cache the current on-disk mtime of board_path so the next
+        _ensure_board_fresh call can detect out-of-band writes."""
+        if not board_path:
+            self._board_disk_mtime = None
+            return
+        try:
+            self._board_disk_mtime = os.path.getmtime(board_path)
+        except OSError:
+            self._board_disk_mtime = None
+
+    def _ensure_board_fresh(self, command: str, params: Dict[str, Any]) -> None:
+        """Reload self.board if the on-disk file is newer than the cached
+        copy. Called before dispatching any command.
+
+        Triggers only when (a) a board is currently loaded, (b) the caller
+        passed a boardPath that matches self.board.GetFileName() — i.e. they
+        intend to operate on that exact file — and (c) the on-disk mtime is
+        newer than the mtime we recorded at the last load/save.
+
+        Avoids the "self.board invisible to out-of-band file edits" class of
+        bugs (kicad-cli reruns, hand-edits, KiCAD GUI saves) without forcing
+        callers to re-issue open_project after every external change.
+        """
+        if self.board is None or self._board_disk_mtime is None:
+            return
+        board_path = params.get("boardPath") if isinstance(params, dict) else None
+        if not board_path:
+            return
+        try:
+            in_memory_path = self.board.GetFileName()
+        except Exception:
+            return
+        if not in_memory_path or os.path.abspath(board_path) != os.path.abspath(in_memory_path):
+            return
+        try:
+            disk_mtime = os.path.getmtime(in_memory_path)
+        except OSError:
+            return
+        # Tolerate the same mtime exactly; only reload when strictly newer
+        # than what we last saw. (Equal mtimes are common when an external
+        # tool finishes writing inside the same second we last saved.)
+        if disk_mtime <= self._board_disk_mtime:
+            return
+        logger.info(
+            "Out-of-band edit detected for %s (disk mtime %.3f > cached %.3f); "
+            "reloading before %s",
+            in_memory_path,
+            disk_mtime,
+            self._board_disk_mtime,
+            command,
+        )
+        try:
+            self.board = pcbnew.LoadBoard(in_memory_path)
+            self._board_disk_mtime = disk_mtime
+            self._update_command_handlers()
+        except Exception as reload_err:
+            logger.warning(f"Out-of-band reload failed: {reload_err}")
 
     def _update_command_handlers(self) -> None:
         """Update board reference in all command handlers"""
@@ -800,6 +875,7 @@ class KiCADInterface:
                 try:
                     self.board = pcbnew.LoadBoard(board_path)
                     self._update_command_handlers()
+                    self._record_board_disk_mtime(board_path)
                     logger.info("Board reloaded from boardPath")
                 except Exception as e:
                     logger.error(f"Failed to reload board from boardPath: {e}")
@@ -5095,6 +5171,7 @@ class KiCADInterface:
             if board_path:
                 self.board = pcbnew.LoadBoard(board_path)
                 self._update_command_handlers()
+                self._record_board_disk_mtime(board_path)
             elif self.board:
                 board_path = self.board.GetFileName() if not board_path else board_path
             else:
@@ -5533,6 +5610,7 @@ class KiCADInterface:
                     self.board = pcbnew.LoadBoard(pcb_path)
                     # Propagate updated board reference to all command handlers
                     self._update_command_handlers()
+                    self._record_board_disk_mtime(pcb_path)
                     logger.info("Reloaded board into pcbnew after SVG logo import")
                 except Exception as reload_err:
                     logger.warning(
@@ -5723,6 +5801,7 @@ print("ok")
                     # Reload board after subprocess modified it
                     self.board = pcbnew.LoadBoard(board_path)
                     self._update_command_handlers()
+                    self._record_board_disk_mtime(board_path)
                     logger.info("Zone fill subprocess succeeded")
                     return {
                         "success": True,

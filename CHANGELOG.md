@@ -4,6 +4,31 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Fix: out-of-band board edits now auto-reload self.board (develop, 2026-06-16)
+
+Closes the long-standing "self.board invisible to out-of-band file edits"
+issue (caught on power_module v5, 2026-05-14, where a direct-Python
+`pcbnew.LoadBoard + Save` followed by `export_dsn` re-emitted the OLD
+geometry and freerouting routed against stale state). Until now the
+workaround was to call `open_project` again after any external write.
+
+Now `KiCADInterface.handle_command` runs `_ensure_board_fresh` before
+every dispatch. When (a) `self.board` is loaded, (b) the caller passes a
+`boardPath` that matches `self.board.GetFileName()`, and (c) the file's
+on-disk mtime is strictly newer than the mtime we recorded at the last
+load/save, the board is reloaded and command handlers are refreshed
+before the handler runs.
+
+- `_board_disk_mtime` tracks the disk timestamp at every load/save site:
+  `open_project`/`create_project` success, the `_reload_required`
+  branch, `_auto_save_board`, the `sync_schematic_to_board` reload, the
+  SVG-logo post-import reload, and the `refill_zones` subprocess reload.
+- Equal mtimes are tolerated (within-second writes are common); only
+  strictly newer disk mtimes trigger the reload.
+- 7 unit tests (decision logic with a stub board) + 1 wiring regression
+  test (`handle_command` must call `_ensure_board_fresh`) + 1 integration
+  test gated on real pcbnew, in `tests/test_board_freshness.py`.
+
 ### Improvement: list_schematic_components is now a bulk pin-location query (develop, 2026-06-16)
 
 Per the standing backlog item ("must call `get_schematic_pin_locations`
