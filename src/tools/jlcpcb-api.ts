@@ -6,6 +6,32 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
 
+// The local parts DB has no auto-refresh. When the Python side flags the
+// snapshot as stale (older than its STALE_AGE_DAYS threshold), append a
+// one-line warning telling the user how to refresh it.
+function staleWarning(result: any): string {
+  if (!result || !result.db_stale) return "";
+  const age = result.db_age_days != null ? `${result.db_age_days} days old` : "stale";
+  return (
+    `\n\n⚠️ JLCPCB DB snapshot is ${age} — stock/pricing may be outdated. ` +
+    `Refresh by running the download_jlcpcb_database tool (force=true).`
+  );
+}
+
+// Note when results came from the broader OR/relevance path (any term matched,
+// ranked by how many query terms each part contains) so the caller treats them
+// as recall rather than exact matches.
+function matchModeNote(result: any): string {
+  if (result && result.match_mode_used === "or") {
+    return (
+      `\n\n🔎 Matched in OR/relevance mode (any query term, ranked by term ` +
+      `coverage then stock) — results are broad; verify each is what you meant. ` +
+      `Use match_mode="and" to require all terms.`
+    );
+  }
+  return "";
+}
+
 export function registerJLCPCBApiTools(server: McpServer, callKicadScript: Function) {
   // Download JLCPCB parts database
   server.tool(
@@ -96,6 +122,13 @@ Use this to find components with exact specifications and cost optimization.`,
         .describe(
           "Result ordering. 'stock_desc' (default) prefers high-stock parts as a proxy for ongoing availability; 'stock_asc' surfaces low-stock parts (e.g., to flag risk); 'none' uses unspecified DB order.",
         ),
+      match_mode: z
+        .enum(["auto", "and", "or"])
+        .optional()
+        .default("auto")
+        .describe(
+          "How a multi-word `query` is matched. 'and' = every word must appear (precise; best for exact specs/part numbers). 'or' = match ANY word then re-rank by how many query terms each part contains (recall; best for FUNCTION searches like 'buck boost converter' or 'usb pd' that 'and' drops to zero). 'auto' (default) tries 'and' first and falls back to 'or' only if 'and' finds nothing. The response reports match_mode_used.",
+        ),
     },
     async (args: any) => {
       const result = await callKicadScript("search_jlcpcb_parts", args);
@@ -130,7 +163,9 @@ Use this to find components with exact specifications and cost optimization.`,
               type: "text",
               text:
                 `Found ${result.count} JLCPCB parts:\n\n${partsList}\n\n` +
-                `💡 Basic parts have free assembly. Extended parts charge $3 setup fee per unique part.`,
+                `💡 Basic parts have free assembly. Extended parts charge $3 setup fee per unique part.` +
+                matchModeNote(result) +
+                staleWarning(result),
             },
           ],
         };
@@ -186,7 +221,8 @@ Use this to find components with exact specifications and cost optimization.`,
                 `Stock: ${p.stock}\n` +
                 (p.datasheet ? `Datasheet: ${p.datasheet}\n` : "") +
                 priceTable +
-                footprints,
+                footprints +
+                staleWarning(result),
             },
           ],
         };

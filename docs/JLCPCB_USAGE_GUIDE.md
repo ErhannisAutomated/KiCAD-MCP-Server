@@ -230,6 +230,39 @@ C25744: RC0603FR-0710KP - 10kΩ ±1% 0.1W [Basic] - $0.002/ea (12000 in stock)
 💡 Basic parts have free assembly. Extended parts charge $3 setup fee per unique part.
 ```
 
+#### Searching by function (`match_mode`)
+
+JLCPCB descriptions are spec-strings, so a multi-word **functional** query
+(`"buck boost converter"`, `"usb pd"`) can match zero parts under strict
+AND. The `match_mode` parameter controls this:
+
+- `match_mode: "and"` — every word must appear (precise; best for exact
+  specs and part numbers like `BQ7692003`).
+- `match_mode: "or"` — match ANY word, then re-rank by how many **distinct
+  query terms** each part contains (stock as tiebreak). Best for function
+  searches; e.g. `"buck boost converter"` surfaces real DC-DC converter ICs.
+- `match_mode: "auto"` (default) — try AND first, fall back to OR only if
+  AND finds nothing. Never worse than the old behaviour.
+
+```
+search_jlcpcb_parts({
+  query: "buck boost converter",
+  match_mode: "or"        // or omit for "auto"
+})
+```
+
+The response reports `match_mode_used`; when it's `or`, the result list is
+broader (recall) — verify each hit is what you meant.
+
+> **Note:** function searches still depend on the word actually appearing in
+> JLCPCB's description. Terms it omits (e.g. "controller", "sink") won't
+> match even in OR mode — search by part number or a spec token instead.
+
+> **Staleness:** the local DB has no auto-refresh. If it's older than ~2
+> weeks, `search_jlcpcb_parts` / `get_jlcpcb_part` append a "⚠️ DB is N days
+> old" warning — refresh with `download_jlcpcb_database` (or the
+> `download_jlcpcb.py` script).
+
 #### Get Part Details with Pricing
 
 ```

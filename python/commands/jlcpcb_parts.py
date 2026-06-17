@@ -425,6 +425,15 @@ class JLCPCBPartsManager:
         "none": "",
     }
 
+    # Free-text matching strategies for `search_parts(match_mode=...)`.
+    _MATCH_MODES = ("auto", "and", "or")
+
+    # OR-mode pulls a recall pool from FTS, then re-ranks it in Python, so keep
+    # the pool bounded: limit*FACTOR, clamped to [MIN, MAX].
+    _OR_POOL_FACTOR = 20
+    _OR_POOL_MIN = 300
+    _OR_POOL_MAX = 1000
+
     def search_parts(
         self,
         query: Optional[str] = None,
@@ -435,7 +444,9 @@ class JLCPCBPartsManager:
         in_stock: bool = True,
         limit: int = 20,
         order_by: str = "stock_desc",
-    ) -> List[Dict]:
+        match_mode: str = "auto",
+        return_meta: bool = False,
+    ):
         """
         Search for parts with filters
 
@@ -450,76 +461,148 @@ class JLCPCBPartsManager:
             order_by: One of "stock_desc" (default), "stock_asc", "none".
                 "stock_desc" surfaces high-volume parts first as a proxy for ongoing
                 availability. Unknown values raise ValueError.
+            match_mode: How a multi-token `query` is matched. One of:
+                "and" — every token must match (precise; the legacy behaviour),
+                "or"  — match ANY token, then re-rank by how many DISTINCT query
+                        terms each part contains (recall; rescues function-style
+                        queries like "buck boost converter" that AND drops to 0),
+                "auto" (default) — try AND first; if it finds nothing, fall back
+                        to the ranked OR. Unknown values raise ValueError.
+            return_meta: When True, return (rows, meta) where meta includes
+                "match_mode_used" ("and"/"or"/"none"). Default False returns just
+                the rows (back-compat).
 
         Returns:
-            List of matching parts
+            List of matching parts, or (rows, meta) when return_meta=True.
         """
         if order_by not in self._ORDER_BY_CLAUSES:
             raise ValueError(
                 f"Invalid order_by={order_by!r}; expected one of "
                 f"{sorted(self._ORDER_BY_CLAUSES)}"
             )
+        if match_mode not in self._MATCH_MODES:
+            raise ValueError(
+                f"Invalid match_mode={match_mode!r}; expected one of "
+                f"{sorted(self._MATCH_MODES)}"
+            )
 
         cursor = self.conn.cursor()
-
-        # Build query
-        sql_parts = ["SELECT * FROM components WHERE 1=1"]
-        params = []
-
-        if query:
-            # Use FTS for text search
-            # First rewrite ASCII unit suffixes ("150ohms" → "150Ω") so the
-            # query lands on tokens that actually exist in the index.
-            normalized_query = self._normalize_query_units(query)
-            # Add prefix wildcard to each term for partial matching
-            # (e.g., "BQ25895" becomes "BQ25895*" so FTS matches "BQ25895RTWR")
-            fts_query = " ".join(
-                f"{term}*" if not term.endswith("*") else term
-                for term in normalized_query.strip().split()
-            )
-            sql_parts.append("""
-                AND lcsc IN (
-                    SELECT lcsc FROM components_fts
-                    WHERE components_fts MATCH ?
-                )
-            """)
-            params.append(fts_query)
-
-        if category:
-            sql_parts.append("AND category LIKE ?")
-            params.append(f"%{category}%")
-
-        if package:
-            sql_parts.append("AND package LIKE ?")
-            params.append(f"%{package}%")
-
-        if library_type:
-            sql_parts.append("AND library_type = ?")
-            params.append(library_type)
-
-        if manufacturer:
-            sql_parts.append("AND manufacturer LIKE ?")
-            params.append(f"%{manufacturer}%")
-
-        if in_stock:
-            sql_parts.append("AND stock > 0")
-
         order_clause = self._ORDER_BY_CLAUSES[order_by]
-        if order_clause:
-            sql_parts.append(order_clause)
+        filters = (category, package, library_type, manufacturer, in_stock)
 
-        sql_parts.append("LIMIT ?")
-        params.append(limit)
+        # Tokenise the free-text query. Rewrite ASCII unit suffixes
+        # ("150ohms" → "150Ω") first so tokens land on what's actually indexed.
+        tokens = []
+        if query:
+            tokens = [t for t in self._normalize_query_units(query).strip().split() if t]
 
-        sql = " ".join(sql_parts)
+        # No text query: plain filtered select (legacy behaviour, unchanged).
+        if not tokens:
+            filt_sql, filt_params = self._build_filter_clause("", *filters)
+            sql = f"SELECT * FROM components WHERE 1=1 {filt_sql} {order_clause} LIMIT ?"
+            rows = self._run_search(cursor, sql, filt_params + [limit])
+            return (rows, {"match_mode_used": "none"}) if return_meta else rows
 
+        # Text query present → AND / OR / auto.
+        if match_mode == "and":
+            rows = self._search_and(cursor, tokens, filters, order_clause, limit)
+            used = "and"
+        elif match_mode == "or":
+            rows = self._search_or(cursor, tokens, filters, limit)
+            used = "or"
+        else:  # auto: precise AND first, ranked OR only if AND finds nothing
+            rows = self._search_and(cursor, tokens, filters, order_clause, limit)
+            if rows:
+                used = "and"
+            else:
+                rows = self._search_or(cursor, tokens, filters, limit)
+                used = "or"
+
+        return (rows, {"match_mode_used": used}) if return_meta else rows
+
+    def _build_filter_clause(
+        self, alias, category, package, library_type, manufacturer, in_stock
+    ) -> Tuple[str, List[Any]]:
+        """Shared WHERE fragment for the non-FTS filters.
+
+        `alias` qualifies the columns (e.g. "c") when the query joins
+        components_fts; pass "" for a bare `components` query.
+        """
+        p = f"{alias}." if alias else ""
+        parts: List[str] = []
+        params: List[Any] = []
+        if category:
+            parts.append(f"AND {p}category LIKE ?")
+            params.append(f"%{category}%")
+        if package:
+            parts.append(f"AND {p}package LIKE ?")
+            params.append(f"%{package}%")
+        if library_type:
+            parts.append(f"AND {p}library_type = ?")
+            params.append(library_type)
+        if manufacturer:
+            parts.append(f"AND {p}manufacturer LIKE ?")
+            params.append(f"%{manufacturer}%")
+        if in_stock:
+            parts.append(f"AND {p}stock > 0")
+        return " ".join(parts), params
+
+    def _run_search(self, cursor, sql: str, params: List[Any]) -> List[Dict]:
+        """Execute a search query, returning row dicts (or [] on error)."""
         try:
             cursor.execute(sql, params)
-            rows = cursor.fetchall()
-            return [dict(row) for row in rows]
+            return [dict(row) for row in cursor.fetchall()]
         except Exception as e:
             logger.error(f"Search error: {e}")
             return []
+
+    def _search_and(self, cursor, tokens, filters, order_clause, limit) -> List[Dict]:
+        """Strict AND: every token must match (prefix). Ordered by order_by."""
+        match = " ".join(f"{t}*" for t in tokens)
+        filt_sql, filt_params = self._build_filter_clause("", *filters)
+        sql = (
+            "SELECT * FROM components WHERE 1=1 "
+            "AND lcsc IN (SELECT lcsc FROM components_fts WHERE components_fts MATCH ?) "
+            f"{filt_sql} {order_clause} LIMIT ?"
+        )
+        return self._run_search(cursor, sql, [match] + filt_params + [limit])
+
+    def _search_or(self, cursor, tokens, filters, limit) -> List[Dict]:
+        """OR recall + relevance re-rank.
+
+        FTS OR-match builds a recall pool (ordered by stock so coverage ties keep
+        the high-stock-first convention), then we re-rank in Python by the number
+        of DISTINCT query terms found in mfr_part + description + category.
+
+        bm25 was tried and rejected here: its document-length normalisation
+        penalises JLCPCB's verbose IC spec-strings, burying the right parts (e.g.
+        "buck boost converter" returned random short-description parts instead of
+        the actual DC-DC converter ICs). Distinct-term coverage matches intent
+        far better and keeps the stock heuristic as the natural tiebreak.
+        """
+        match = " OR ".join(f"{t}*" for t in tokens)
+        pool = min(max(limit * self._OR_POOL_FACTOR, self._OR_POOL_MIN), self._OR_POOL_MAX)
+        filt_sql, filt_params = self._build_filter_clause("c", *filters)
+        sql = (
+            "SELECT c.* FROM components_fts JOIN components c "
+            "ON c.rowid = components_fts.rowid "
+            f"WHERE components_fts MATCH ? {filt_sql} "
+            "ORDER BY c.stock DESC LIMIT ?"
+        )
+        rows = self._run_search(cursor, sql, [match] + filt_params + [pool])
+
+        toks = {t.lower() for t in tokens}
+
+        def coverage(row: Dict) -> int:
+            hay = (
+                f"{row.get('mfr_part', '')} {row.get('description', '')} "
+                f"{row.get('category', '')}"
+            ).lower()
+            return sum(1 for t in toks if t in hay)
+
+        # Stable sort keeps the SQL stock-desc order within equal coverage.
+        rows.sort(key=coverage, reverse=True)
+        return rows[:limit]
 
     def get_part_info(self, lcsc_number: str) -> Optional[Dict]:
         """
@@ -571,6 +654,22 @@ class JLCPCBPartsManager:
             "in_stock": in_stock,
             "db_path": self.db_path,
         }
+
+    # The local parts snapshot has no auto-refresh. Surface a staleness
+    # warning past this age so the user knows to re-download (every ~2 weeks).
+    STALE_AGE_DAYS = 14
+
+    def get_db_age_days(self) -> Optional[float]:
+        """Age of the local DB file in days (by mtime), or None if unknown.
+
+        Cheap (a single stat), so it's safe to call on every search. Used to
+        warn when the snapshot is stale — see STALE_AGE_DAYS.
+        """
+        try:
+            mtime = os.path.getmtime(self.db_path)
+            return (datetime.now().timestamp() - mtime) / 86400.0
+        except OSError:
+            return None
 
     def map_package_to_footprint(self, package: str) -> List[str]:
         """

@@ -6580,13 +6580,14 @@ print("ok")
             in_stock = params.get("in_stock", True)
             limit = params.get("limit", 20)
             order_by = params.get("order_by", "stock_desc")
+            match_mode = params.get("match_mode", "auto")
 
             # Adjust library_type filter
             if library_type == "All":
                 library_type = None
 
             try:
-                parts = self.jlcpcb_parts.search_parts(
+                parts, meta = self.jlcpcb_parts.search_parts(
                     query=query,
                     category=category,
                     package=package,
@@ -6595,6 +6596,8 @@ print("ok")
                     in_stock=in_stock,
                     limit=limit,
                     order_by=order_by,
+                    match_mode=match_mode,
+                    return_meta=True,
                 )
             except ValueError as ve:
                 return {"success": False, "message": str(ve)}
@@ -6607,7 +6610,16 @@ print("ok")
                     except:
                         part["price_breaks"] = []
 
-            return {"success": True, "parts": parts, "count": len(parts)}
+            age = self.jlcpcb_parts.get_db_age_days()
+            stale = age is not None and age > self.jlcpcb_parts.STALE_AGE_DAYS
+            return {
+                "success": True,
+                "parts": parts,
+                "count": len(parts),
+                "match_mode_used": meta.get("match_mode_used"),
+                "db_age_days": round(age, 1) if age is not None else None,
+                "db_stale": stale,
+            }
 
         except Exception as e:
             logger.error(f"Error searching JLCPCB parts: {e}", exc_info=True)
@@ -6627,7 +6639,15 @@ print("ok")
             # Get suggested KiCAD footprints
             footprints = self.jlcpcb_parts.map_package_to_footprint(part.get("package", ""))
 
-            return {"success": True, "part": part, "footprints": footprints}
+            age = self.jlcpcb_parts.get_db_age_days()
+            stale = age is not None and age > self.jlcpcb_parts.STALE_AGE_DAYS
+            return {
+                "success": True,
+                "part": part,
+                "footprints": footprints,
+                "db_age_days": round(age, 1) if age is not None else None,
+                "db_stale": stale,
+            }
 
         except Exception as e:
             logger.error(f"Error getting JLCPCB part: {e}", exc_info=True)

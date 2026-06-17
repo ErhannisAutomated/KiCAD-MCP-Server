@@ -4,6 +4,38 @@ All notable changes to the KiCAD MCP Server project are documented here.
 
 ## [Unreleased]
 
+### Feature: `search_jlcpcb_parts` gains `match_mode` (AND/OR/auto) (develop, 2026-06-17)
+
+JLCPCB descriptions are spec-strings, so a multi-word *functional* query
+(`"buck boost converter"`, `"usb pd"`) under the old strict-AND matching
+(every token required) collapsed to zero hits. New `match_mode` parameter:
+
+- `and` — every token must match (the previous behaviour).
+- `or` — match ANY token, then re-rank by the number of **distinct query
+  terms** found in mfr_part + description + category, with stock as the
+  tiebreak (preserving the stock-desc convention). bm25 was tried and
+  rejected — its document-length normalisation buries JLCPCB's verbose IC
+  descriptions; distinct-term coverage matches intent far better.
+- `auto` (default) — AND first, OR fallback only when AND returns nothing,
+  so existing exact/spec/part-number searches never regress.
+
+Verified on the live DB: `"buck boost converter"` → MC34063, `"usb pd"` →
+IP6525/IP6518/CH221K, MPN `"BQ7692003"` → exact part via AND. The handler
+returns `match_mode_used`; the TS tool surfaces it (a note when OR ran) and
+exposes the `match_mode` enum param. `search_parts` also gained an internal
+`return_meta` flag. Tests: `tests/test_jlcpcb_search_match_mode.py` (9).
+Known gap (separate, data-side): function words JLCPCB omits from its
+descriptions still can't match — needs the category-keyword + synonym work.
+
+### Feature: stale-DB warning on JLCPCB search/get-part (develop, 2026-06-17)
+
+The local parts DB has no auto-refresh and silently goes stale. Rather than
+auto-download, `search_jlcpcb_parts` and `get_jlcpcb_part` now compute the
+DB file age (`JLCPCBPartsManager.get_db_age_days()`, a cheap stat) and, past
+`STALE_AGE_DAYS` (14), return `db_age_days` + `db_stale`; the TS tools append
+a "⚠️ DB is N days old — refresh with download_jlcpcb_database" line. Tests:
+`tests/test_jlcpcb_db_staleness.py` (3).
+
 ### Fix: board freshness check now fires without boardPath (develop, 2026-06-16)
 
 Follow-up to the freshness check shipped earlier today. The original
