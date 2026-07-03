@@ -27,7 +27,7 @@ import re
 import uuid as uuid_lib
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 import sexpdata
 from sexpdata import Symbol
@@ -414,6 +414,13 @@ class Session:
     # (component_key, pin_number) for a pin that had a no_connect
     # marker on it in the source schematic.
     no_connects: List[Tuple[str, str]] = field(default_factory=list)
+    # Net-name set for nets that carried a `global_label` on the
+    # source sheet.  `_STRIPPED_TYPES` removes globals along with
+    # everything else during apply; `rewire_session` re-lays plain
+    # labels via connect_pins(auto) but has no idea which were
+    # cross-sheet — this set lets rewire re-promote one representative
+    # label back to a global_label so cross-sheet nets stay driven.
+    global_nets: Set[str] = field(default_factory=set)
     params: Params = field(default_factory=Params)
     iteration: int = 0
     temperature: float = 30.0
@@ -699,6 +706,11 @@ def load_session(schematic_path: Path) -> Session:
         if at is None:
             continue
         label_positions.append(((round(at[0], 2), round(at[1], 2)), top[1]))
+        # Remember cross-sheet nets so rewire can re-promote one label
+        # per net back to a global_label after connect_pins(auto) has
+        # laid the wires + plain labels.
+        if str(head) == "global_label":
+            sess.global_nets.add(str(top[1]))
 
     # World pin positions, per component (key includes unit so multi-
     # unit components don't collide on the same dict key).
@@ -2022,6 +2034,35 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
         if ok and status == "added":
             nc_added += 1
 
+    # Re-promote one label per captured global net back to a
+    # `global_label` so cross-sheet plumbing survives the rewire.
+    # Attach at a representative pin's world position (deterministic:
+    # the first pin in the net that resolves to a valid component).
+    # Without this, ERC would see BAT+/GND/VBUS_9V/etc. as
+    # sheet-local and mark power-input pins as undriven.
+    globals_restored = 0
+    for name in sess.global_nets:
+        net = sess.nets.get(name)
+        if net is None or not net.pins:
+            continue
+        anchor = None
+        for comp_key, pn in net.pins:
+            comp = sess.components.get(comp_key)
+            if comp is None:
+                continue
+            wp = comp.world_pin_xy(pn)
+            if wp is not None:
+                anchor = wp
+                break
+        if anchor is None:
+            continue
+        ok = _WM.add_label(
+            schematic_path, name, [anchor[0], anchor[1]],
+            label_type="global_label",
+        )
+        if ok:
+            globals_restored += 1
+
     crossings = _scan_unrelated_wire_crossings(schematic_path)
 
     return {
@@ -2031,6 +2072,7 @@ def rewire_session(sess: Session, schematic_path: Path) -> Dict[str, Any]:
         "pins_connected": pins_connected,
         "pins_skipped": skipped,
         "no_connects_added": nc_added,
+        "globals_restored": globals_restored,
         "unrelated_crossings": crossings,
         "method": "connect_pins(auto)",
         "per_net": per_net,

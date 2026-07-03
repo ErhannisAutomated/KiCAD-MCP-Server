@@ -810,6 +810,85 @@ class TestNoConnectPreservation:
             ), f"expected no_connect at ~(200, 96.19), got {ncs}"
 
 
+    def test_apply_restores_global_label_after_rewire(self):
+        """After autoplace + apply + rewire, a net that carried a
+        `global_label` on the source sheet must still carry a
+        `global_label` in the output.  Regression: apply strips ALL
+        label types (`_STRIPPED_TYPES` includes global_label), and
+        rewire_session's connect_pins(auto) only lays plain labels —
+        so pre-fix, cross-sheet nets like BAT+/GND/VBUS_9V dropped
+        their global marker and every downstream sheet's power-input
+        pins showed up as ERC "undriven"."""
+        from commands.autoplacer import (
+            apply_to_schematic, load_session, rewire_session,
+        )
+        import sexpdata as _sd
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = Path(tmp) / "global.kicad_sch"
+            R_LIB = textwrap.dedent("""\
+                (lib_symbols
+                  (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0))
+                    (symbol "R_1_1"
+                      (pin passive line (at 0 3.81 270) (length 1.27)
+                        (name "~") (number "1"))
+                      (pin passive line (at 0 -3.81 90) (length 1.27)
+                        (name "~") (number "2"))
+                    )
+                  )
+                )
+            """)
+            # Two resistors, both pin-1 tied to net BAT+.  Net BAT+
+            # carries BOTH a plain (label) and a (global_label) — real
+            # sheets always do this because the global marker is added
+            # once (at the "export point"), while connect_pins stubs
+            # every participating pin with a plain label.
+            sch.write_text(textwrap.dedent(f"""\
+                (kicad_sch (version 20250114) (generator "test")
+                  (uuid 11111111-2222-3333-4444-555555555555)
+                  {R_LIB}
+                  (symbol (lib_id "Device:R") (at 100 100 0) (unit 1)
+                    (property "Reference" "R1" (at 100 100 0))
+                    (instances (project "test" (path "/" (reference "R1") (unit 1))))
+                  )
+                  (symbol (lib_id "Device:R") (at 140 100 0) (unit 1)
+                    (property "Reference" "R2" (at 140 100 0))
+                    (instances (project "test" (path "/" (reference "R2") (unit 1))))
+                  )
+                  (label "BAT+" (at 100 96.19 0)
+                    (effects (font (size 1.27 1.27)))
+                    (uuid 22222222-2222-2222-2222-222222222222))
+                  (label "BAT+" (at 140 96.19 0)
+                    (effects (font (size 1.27 1.27)))
+                    (uuid 33333333-3333-3333-3333-333333333333))
+                  (global_label "BAT+" (at 100 90 0)
+                    (effects (font (size 1.27 1.27)))
+                    (uuid 44444444-4444-4444-4444-444444444444))
+                  (sheet_instances (path "/" (page "1")))
+                )
+            """))
+            sess = load_session(sch)
+            assert "BAT+" in sess.global_nets, (
+                f"load_session must capture global_label nets; "
+                f"got {sess.global_nets}"
+            )
+            apply_to_schematic(sess, target_path=None, strip_connections=True)
+            # Post-strip sanity: no global_label in the file yet.
+            assert "(global_label" not in sch.read_text()
+            rewire_session(sess, sch)
+
+            text = sch.read_text()
+            sexp = _sd.loads(text)
+            globals_found = [
+                str(top[1]) for top in sexp
+                if isinstance(top, list) and top and str(top[0]) == "global_label"
+            ]
+            assert "BAT+" in globals_found, (
+                f"rewire_session must re-promote BAT+ back to global_label; "
+                f"found globals: {globals_found}"
+            )
+
+
 @pytest.mark.unit
 class TestPageCentering:
     def test_centers_bbox_on_page(self):
