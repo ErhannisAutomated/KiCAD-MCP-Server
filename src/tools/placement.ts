@@ -393,6 +393,46 @@ export function registerPlacementTools(server: McpServer, callKicadScript: Funct
     },
   );
 
+  // autoplace_schematic — schematic-side counterpart to relax_placement.
+  // One-shot: load session, apply param overrides, run the four-stage
+  // anneal recipe (cluster -> spread -> polarize -> settle), commit
+  // positions + rewire back to the .kicad_sch. For a preview without
+  // mutating the file, pass dryRun=true (and optionally previewPath to
+  // dump the annealed positions to a sibling file).
+  server.tool(
+    "autoplace_schematic",
+    "Force-directed schematic autoplacer (four-stage anneal: cluster -> spread -> polarize -> settle). Loads a .kicad_sch into the shared placement engine, runs the BMS-tuned staged recipe, and (by default) commits new component positions + regenerates wires. Use for dense sheets where hand-placement creates label-stub collisions on tightly-packed pins (BQ76920 + sense-R + differential caps was the driving case). Compact profile (defaults kick in when omitted): repulsionK=200, attractionK=0.4, polarityK=0.2, rotationK=4.0, initialTemperature=25. Pass dryRun=true to inspect the recipe's final max_force before committing; add previewPath to write the annealed positions to a sibling .kicad_sch for visual review.",
+    {
+      schematicPath: z.string().describe("Path to the .kicad_sch to autoplace."),
+      dryRun: z.boolean().optional().describe("Run the recipe but do NOT apply positions to the file. Default false."),
+      rewire: z.boolean().optional().describe("Regenerate wires after applying positions. Default true. Ignored when dryRun=true."),
+      previewPath: z.string().optional().describe("With dryRun=true, write the annealed positions to this sibling .kicad_sch for visual review."),
+      repulsionK: z.number().optional().describe("Params override: base body-repulsion strength (default from engine, compact profile uses 200)."),
+      attractionK: z.number().optional().describe("Params override: pinwise spring attraction strength (default from engine, compact profile uses 0.4)."),
+      polarityK: z.number().optional().describe("Params override: polarity bias strength (default from engine, compact profile uses 0.2). NOTE: this tunes the Params object BEFORE the recipe runs; use polarityKRecipe to override the recipe's own polarity_k at stage 3."),
+      rotationK: z.number().optional().describe("Params override: rotation torque strength (default from engine, compact profile uses 4.0)."),
+      initialTemperature: z.number().optional().describe("Params override: starting temperature in mm (default from engine, compact profile uses 25)."),
+      clusterIters: z.number().optional().describe("Recipe override: stage-1 cluster (springs-only) iteration count."),
+      spreadStages: z.number().optional().describe("Recipe override: stage-2 spread stage count (repulsion ramps geometrically over N stages)."),
+      polarizeStages: z.number().optional().describe("Recipe override: stage-3 polarize stage count (repulsion steps down while polarity turns on)."),
+      settleIters: z.number().optional().describe("Recipe override: stage-4 settle iteration count (natural temperature decay, no clamp)."),
+      itersPerStage: z.number().optional().describe("Recipe override: iterations per spread/polarize stage."),
+      stepTemperature: z.number().optional().describe("Recipe override: clamped per-step temperature during stages 1-3."),
+      baseAttractionK: z.number().optional().describe("Recipe override: attraction strength used across all stages."),
+      baseRotationK: z.number().optional().describe("Recipe override: rotation torque strength used across all stages."),
+      repulsionBase: z.number().optional().describe("Recipe override: starting repulsion strength for the spread ramp."),
+      repulsionGrowth: z.number().optional().describe("Recipe override: geometric growth factor for the spread ramp."),
+      polarityKRecipe: z.number().optional().describe("Recipe override: polarity bias strength set at the start of stage 3."),
+      polarityTorqueK: z.number().optional().describe("Recipe override: polarity torque strength set at the start of stage 3."),
+    },
+    async (args: any) => {
+      const result = await callKicadScript("autoplace_schematic", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // place_near
   server.tool(
     "place_near",

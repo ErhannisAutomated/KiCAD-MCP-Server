@@ -475,6 +475,7 @@ class KiCADInterface:
             "autoplacer_state": self._handle_autoplacer_state,
             "autoplacer_preview": self._handle_autoplacer_preview,
             "autoplacer_apply": self._handle_autoplacer_apply,
+            "autoplace_schematic": self._handle_autoplace_schematic,
             "diagnose_chains": self._handle_diagnose_chains,
             "compare_netlists": self._handle_compare_netlists,
             "find_unrelated_wire_crossings": self._handle_find_unrelated_wire_crossings,
@@ -4490,6 +4491,147 @@ class KiCADInterface:
             return PLACER.apply(schematic_path, rewire=rewire)
         except Exception as e:
             logger.error(f"Error in autoplacer_apply: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
+
+    def _handle_autoplace_schematic(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """One-shot schematic autoplacer: load session, apply param
+        overrides, run the staged-anneal recipe, and (unless dryRun)
+        commit positions back to the file with rewire.
+
+        Wraps the autoplacer_load + autoplacer_set_params +
+        autoplacer_recipe + autoplacer_apply flow into a single call.
+        For finer control (per-batch iteration, live viz), use the
+        primitives individually.
+
+        Recipe overrides (all optional): clusterIters, spreadStages,
+        polarizeStages, settleIters, itersPerStage, stepTemperature,
+        baseAttractionK, baseRotationK, repulsionBase, repulsionGrowth,
+        polarityKRecipe, polarityTorqueK.
+
+        Params-style tuning (all optional): repulsionK, attractionK,
+        polarityK, rotationK, initialTemperature. These are ALSO
+        translated into equivalent recipe overrides so they take
+        effect through the anneal (since run_staged_anneal overwrites
+        the Params object mid-run, setting them via set_params alone
+        would not propagate). Translation:
+          - attractionK  -> base_attraction_k (unless baseAttractionK
+                            already set)
+          - rotationK    -> base_rotation_k   (unless baseRotationK)
+          - polarityK    -> polarity_k        (unless polarityKRecipe)
+          - repulsionK   -> repulsion_base such that the spread ramp
+                            peaks near repulsionK at spreadStages-1
+                            with the effective repulsion_growth
+                            (unless repulsionBase already set)
+
+        The BMS-tuned compact profile is: repulsionK=200,
+        attractionK=0.4, polarityK=0.2, rotationK=4.0,
+        initialTemperature=25.
+        """
+        try:
+            from commands.autoplacer import PLACER
+
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+
+            dry_run = bool(params.get("dryRun", False))
+            rewire = bool(params.get("rewire", True))
+            preview_path = params.get("previewPath")
+
+            load_res = PLACER.load(schematic_path)
+
+            param_key_map = {
+                "repulsionK": "repulsion_k",
+                "attractionK": "attraction_k",
+                "polarityK": "polarity_k",
+                "rotationK": "rotation_k",
+                "initialTemperature": "initial_temperature",
+            }
+            param_overrides: Dict[str, Any] = {}
+            for camel, snake in param_key_map.items():
+                if camel in params:
+                    param_overrides[snake] = params[camel]
+            if param_overrides:
+                PLACER.set_params(schematic_path, **param_overrides)
+
+            recipe_key_map = {
+                "clusterIters": "cluster_iters",
+                "spreadStages": "spread_stages",
+                "polarizeStages": "polarize_stages",
+                "settleIters": "settle_iters",
+                "itersPerStage": "iters_per_stage",
+                "stepTemperature": "step_temperature",
+                "baseAttractionK": "base_attraction_k",
+                "baseRotationK": "base_rotation_k",
+                "repulsionBase": "repulsion_base",
+                "repulsionGrowth": "repulsion_growth",
+                "polarityKRecipe": "polarity_k",
+                "polarityTorqueK": "polarity_torque_k",
+            }
+            recipe_overrides: Dict[str, Any] = {}
+            for camel, snake in recipe_key_map.items():
+                if camel in params:
+                    recipe_overrides[snake] = params[camel]
+
+            # Bridge: if a Params-style knob was passed but the equivalent
+            # recipe knob was not, propagate so run_staged_anneal honors
+            # the user's compact-profile intent instead of resetting mid-run.
+            if "attractionK" in params and "base_attraction_k" not in recipe_overrides:
+                recipe_overrides["base_attraction_k"] = float(params["attractionK"])
+            if "rotationK" in params and "base_rotation_k" not in recipe_overrides:
+                recipe_overrides["base_rotation_k"] = float(params["rotationK"])
+            if "polarityK" in params and "polarity_k" not in recipe_overrides:
+                recipe_overrides["polarity_k"] = float(params["polarityK"])
+            if "repulsionK" in params and "repulsion_base" not in recipe_overrides:
+                from commands.autoplacer import _RECIPE_DEFAULTS
+                spread_stages = int(
+                    recipe_overrides.get("spread_stages", _RECIPE_DEFAULTS["spread_stages"])
+                )
+                growth = float(
+                    recipe_overrides.get("repulsion_growth", _RECIPE_DEFAULTS["repulsion_growth"])
+                )
+                if spread_stages > 0 and growth > 0:
+                    peak_exp = max(spread_stages - 1, 0)
+                    recipe_overrides["repulsion_base"] = float(params["repulsionK"]) / (
+                        growth ** peak_exp if peak_exp > 0 else 1.0
+                    )
+
+            recipe_res = PLACER.recipe(schematic_path, **recipe_overrides)
+
+            if dry_run:
+                if preview_path:
+                    from commands.autoplacer import snap_positions
+                    sess = PLACER.get(schematic_path)
+                    if sess is not None:
+                        snap_positions(sess)
+                    preview_res = PLACER.preview(
+                        schematic_path, preview_path, strip_connections=False
+                    )
+                    return {
+                        "success": True,
+                        "loaded": load_res,
+                        "recipe": recipe_res,
+                        "preview": preview_res,
+                        "dry_run": True,
+                    }
+                return {
+                    "success": True,
+                    "loaded": load_res,
+                    "recipe": recipe_res,
+                    "dry_run": True,
+                }
+
+            apply_res = PLACER.apply(schematic_path, rewire=rewire)
+            return {
+                "success": True,
+                "loaded": load_res,
+                "recipe": recipe_res,
+                "apply": apply_res,
+            }
+        except Exception as e:
+            logger.error(f"Error in autoplace_schematic: {e}")
             import traceback
             logger.error(traceback.format_exc())
             return {"success": False, "message": str(e)}
