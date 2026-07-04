@@ -129,6 +129,13 @@ for t2 in range(11):
 # %% Cell 4 — polarize stage (repulsion steps down, polarity turns on)
 # Polarity biases V+/GND-facing pins to their preferred edges.
 # Repulsion drops one notch per stage; polarity + torque switch on.
+#
+# NOTE: the default duration below (2 stages × 10 iters = 20 iters) mirrors
+# the shipped `_RECIPE_DEFAULTS`; user feedback is that this often isn't
+# long enough for polarity to align V+/GND pins.  Bump `range(2)` to
+# range(4) or higher if V+/GND-facing components are still misoriented.
+# `polarity_torque_k=3.0` sets the strength of the alignment push — try
+# 5.0 or 6.0 if 3.0 doesn't drive the alignment fast enough.
 
 for t2 in range(2):
     rep = 0.05 * 2 ** (10 - t2)
@@ -165,11 +172,52 @@ print(f"Settled: bbox {bbox()[0]:.1f} x {bbox()[1]:.1f}, "
       f"max_force {PLACER.get(target).last_max_force:.2f}")
 
 
+# %% Cell 5b — try rotation_snap_strength for tighter cardinal alignment (optional)
+# The default schedule doesn't include a 90°-snap TORQUE during physics —
+# `rotation_snap_strength` is 0.0 by default, so components can settle at
+# 335.1°, 126.3°, etc.  `polarity_torque_k` pushes V+/GND-carrying pins
+# toward 90°/270° but it's a soft alignment force; unrelated components
+# stay at whatever the spring dynamics landed on.
+#
+# The rotation IS snapped at `apply()` time (via `snap_positions`), so the
+# final file always has cardinal rotations.  But if you want to see the
+# 90°-aligned state in the viz BEFORE committing (e.g. to check whether
+# a certain component ended up facing the "wrong" way), turn on
+# rotation_snap_strength here and iterate a bit more.
+
+PLACER.set_params(target,
+                  repulsion_k=25,        # low-ish so snap can pull without fighting spread
+                  attraction_k=0.2,
+                  polarity_k=0.2,
+                  rotation_k=4.0,
+                  polarity_torque_k=3.0,
+                  rotation_snap_strength=30.0,   # useful range 10..100; 2 is too weak
+                  rotation_snap_period=90.0,
+                  initial_temperature=50.0)
+
+for _ in range(60):
+    PLACER.iterate(target, n=1)
+    viz.update()
+
+sess = PLACER.get(target)
+off_cardinal = sum(1 for c in sess.components.values()
+                   if abs(c.rotation - round(c.rotation / 90) * 90) > 5.0)
+print(f"After snap-force pass: {off_cardinal}/{len(sess.components)} components still >5° "
+      f"off cardinal in viz (all get hard-snapped to 0/90/180/270 during apply anyway).")
+# Data point from charger sheet (19 comp): strength=0 → 17/19 off; strength=10 → 2/19;
+# strength=30 → 1/19; strength=100 → 0/19.  Same convergence in 60 vs 200 iters, so
+# the extra length only helps at very low strengths (where it also barely helps at all).
+
+
 # %% Cell 6 — write result to disk + reroute
-# preview() = positions only, keeps old wiring (visually noisy but useful
-# for checking coord placement without waiting on rewire).
-# apply(rewire=True) = strips + re-lays wires, labels, and (with the recent
-# fix) restores global_labels.
+# preview() = positions only, RAW physics rotations (e.g. 335.1°).  KiCad
+# refuses to open a file with non-cardinal rotations, so `/tmp/p.kicad_sch`
+# is for inspecting coordinates programmatically, not for opening in the
+# KiCad GUI.  Use apply() for a file KiCad can load.
+#
+# apply(rewire=True) = snaps rotation to 0/90/180/270, snaps position to
+# 1.27mm grid, strips + re-lays wires, labels, and (with the recent fixes)
+# restores global_labels + finds pins even at off-grid coords.
 
 PLACER.preview(target, "/tmp/p.kicad_sch")           # positions-only snapshot
 result = PLACER.apply(target, rewire=True)          # commit + reroute
