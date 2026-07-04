@@ -713,13 +713,18 @@ def load_session(schematic_path: Path) -> Session:
             sess.global_nets.add(str(top[1]))
 
     # World pin positions, per component (key includes unit so multi-
-    # unit components don't collide on the same dict key).
+    # unit components don't collide on the same dict key).  Coords are
+    # kept unrounded because walk_wire_chain (below) is coordinate-exact
+    # — even 0.005 mm rounding on a pin like Q_NMOS.G at y=95.885 breaks
+    # the chain lookup and the pin's net gets dropped.  Label direct-
+    # match uses ±0.5 mm tolerance so precision loss on that path is a
+    # non-issue.
     pin_world: Dict[Tuple[str, str], Tuple[float, float]] = {}
     for comp in sess.components.values():
         for pn in comp.pins:
             wp = comp.world_pin_xy(pn)
             if wp is not None:
-                pin_world[(comp.key, pn)] = (round(wp[0], 2), round(wp[1], 2))
+                pin_world[(comp.key, pn)] = (wp[0], wp[1])
 
     # Net discovery uses the same T-junction-aware wire-graph BFS the
     # rewire path uses (`wire_connectivity.walk_wire_chain`).  The

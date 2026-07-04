@@ -810,6 +810,93 @@ class TestNoConnectPreservation:
             ), f"expected no_connect at ~(200, 96.19), got {ncs}"
 
 
+    def test_load_session_finds_pins_at_off_grid_coords(self):
+        """Regression: load_session Pass 2 must survive when a pin's
+        world coord lands off a 0.01 mm grid (e.g. Device:Q_NMOS's G
+        pin at y = origin ± 5.08 mm from an origin that's already on
+        the standard 1.27 mm grid at .885).  Pre-fix, pin_world was
+        stored as ``(round(wp[0], 2), round(wp[1], 2))`` which shifted
+        95.885 → 95.89, and walk_wire_chain is coordinate-exact — so
+        every Q_NMOS gate (and every other pin on a symbol whose
+        origin snapped to a 2-decimal boundary) had its net dropped
+        from the session.  Symptom on buckboost: HDRV1/LDRV1/HDRV2/
+        LDRV2/RT/COMP/COMP_MID all showed up with 1 pin instead of 2
+        after load_session, and rewire could only label the one
+        surviving pin per net.  After autoplace, every FET gate and
+        several passive-to-IC signal legs came out unconnected."""
+        from commands.autoplacer import load_session
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = Path(tmp) / "offgrid.kicad_sch"
+            # An N-FET with G on the left at (origin_x - 5.08, origin_y).
+            # Place at origin (185.42, 95.885) — the origin_y itself is
+            # off-grid, so wp for G is at y=95.885 exactly.
+            Q_LIB = textwrap.dedent("""\
+                (lib_symbols
+                  (symbol "Device:Q_NMOS" (pin_names (offset 1.016))
+                    (symbol "Q_NMOS_0_1"
+                      (rectangle (start -1.27 -1.27) (end 1.27 1.27)
+                        (stroke (width 0.254) (type default))
+                        (fill (type none)))
+                    )
+                    (symbol "Q_NMOS_1_1"
+                      (pin input line (at -5.08 0 0) (length 2.54)
+                        (name "G") (number "G"))
+                      (pin passive line (at 2.54 -5.08 90) (length 2.54)
+                        (name "S") (number "S"))
+                      (pin passive line (at 2.54 5.08 270) (length 2.54)
+                        (name "D") (number "D"))
+                    )
+                  )
+                  (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0))
+                    (symbol "R_1_1"
+                      (pin passive line (at 0 3.81 270) (length 1.27)
+                        (name "~") (number "1"))
+                      (pin passive line (at 0 -3.81 90) (length 1.27)
+                        (name "~") (number "2"))
+                    )
+                  )
+                )
+            """)
+            sch.write_text(textwrap.dedent(f"""\
+                (kicad_sch (version 20250114) (generator "test")
+                  (uuid 11111111-2222-3333-4444-555555555555)
+                  {Q_LIB}
+                  (symbol (lib_id "Device:Q_NMOS") (at 185.42 95.885 0) (unit 1)
+                    (property "Reference" "Q1" (at 185.42 95.885 0))
+                    (instances (project "test" (path "/" (reference "Q1") (unit 1))))
+                  )
+                  (symbol (lib_id "Device:R") (at 170 100 0) (unit 1)
+                    (property "Reference" "R1" (at 170 100 0))
+                    (instances (project "test" (path "/" (reference "R1") (unit 1))))
+                  )
+                  (wire (pts (xy 180.34 95.885) (xy 177.8 95.885))
+                    (stroke (width 0) (type default))
+                    (uuid 22222222-2222-2222-2222-222222222222))
+                  (label "HDRV1" (at 177.8 95.885 0)
+                    (effects (font (size 1.27 1.27)))
+                    (uuid 33333333-3333-3333-3333-333333333333))
+                  (wire (pts (xy 170 96.19) (xy 170 93.65))
+                    (stroke (width 0) (type default))
+                    (uuid 44444444-4444-4444-4444-444444444444))
+                  (label "HDRV1" (at 170 93.65 0)
+                    (effects (font (size 1.27 1.27)))
+                    (uuid 55555555-5555-5555-5555-555555555555))
+                  (sheet_instances (path "/" (page "1")))
+                )
+            """))
+            sess = load_session(sch)
+            assert "HDRV1" in sess.nets, (
+                f"HDRV1 not discovered; sess.nets={list(sess.nets)}"
+            )
+            pins = {(k, p) for k, p in sess.nets["HDRV1"].pins}
+            assert ("Q1__u1", "G") in pins, (
+                f"Q1.G at off-grid y=95.885 must be found on HDRV1; got {pins}"
+            )
+            assert ("R1__u1", "1") in pins, (
+                f"R1.1 must be found on HDRV1; got {pins}"
+            )
+
     def test_apply_restores_global_label_after_rewire(self):
         """After autoplace + apply + rewire, a net that carried a
         `global_label` on the source sheet must still carry a
