@@ -17,6 +17,106 @@ from typing import Dict, List, Optional, Tuple
 logger = logging.getLogger("kicad_interface")
 
 
+def _find_parent_project_sheet(sub_sheet_path: Path) -> Optional[Path]:
+    """Given a sub-sheet .kicad_sch, return the parent project's root
+    .kicad_sch (the one named after the .kicad_pro) if this file
+    appears to be a child of it, else None.
+
+    Heuristic: walk up looking for a .kicad_pro; the root .kicad_sch
+    shares its stem.  If the target IS that root file, we're not a
+    sub-sheet — return None (caller falls back to standalone).
+    """
+    for ancestor in [sub_sheet_path.parent, *sub_sheet_path.parents]:
+        pros = list(ancestor.glob("*.kicad_pro"))
+        if not pros:
+            continue
+        root_sch = ancestor / f"{pros[0].stem}.kicad_sch"
+        if not root_sch.exists():
+            return None
+        if root_sch.resolve() == sub_sheet_path.resolve():
+            return None  # sub_sheet_path IS the root — standalone from here
+        return root_sch
+    return None
+
+
+def _sheet_uuid_in_root(root_sch: Path, sub_sheet_filename: str) -> Optional[Tuple[str, str]]:
+    """Read root_sch, find the (sheet ...) block whose Sheetfile matches
+    sub_sheet_filename (basename), and return (root_sch's own uuid,
+    that sheet's uuid).  Returns None if the sheet isn't referenced by
+    root or root has no top-level uuid.
+
+    Text-mode parse to match how the rest of this module operates.  The
+    (sheet ...) block layout KiCad writes is:
+        (sheet (at ...) (size ...) ... (uuid "<sheet_uuid>")
+               (property "Sheetname" "..." ...)
+               (property "Sheetfile" "<child.kicad_sch>" ...) ...)
+    We find the Sheetfile line first, then walk backwards to the
+    nearest (uuid "...") on the way to the enclosing (sheet.
+    """
+    content = root_sch.read_text(encoding="utf-8")
+
+    root_uuid_match = re.search(r"\(uuid\s+\"?([0-9a-fA-F-]+)\"?\)", content)
+    if not root_uuid_match:
+        return None
+    root_uuid = root_uuid_match.group(1)
+
+    # Find every (property "Sheetfile" "<name>" ...) whose <name> matches
+    # the sub-sheet basename (exact match; paths with directories are
+    # possible but less common — we handle both by comparing basename).
+    target = Path(sub_sheet_filename).name
+    for m in re.finditer(
+        r'\(property\s+"Sheetfile"\s+"([^"]+)"', content
+    ):
+        if Path(m.group(1)).name != target:
+            continue
+        # Walk backwards from this match to find the enclosing
+        # (sheet_uuid).  Look for the most recent (uuid "...") before
+        # this property that lies inside a (sheet ...) block.
+        prefix = content[: m.start()]
+        # Find the last "(uuid ..." in prefix that occurs after the
+        # last "(sheet " opener — that's the sheet's own uuid.
+        last_sheet_open = prefix.rfind("(sheet ")
+        if last_sheet_open == -1:
+            continue
+        uuid_match = re.search(
+            r"\(uuid\s+\"?([0-9a-fA-F-]+)\"?\)",
+            prefix[last_sheet_open:],
+        )
+        if uuid_match:
+            return (root_uuid, uuid_match.group(1))
+    return None
+
+
+def _resolve_instance_path(sch_path: Path, content: str) -> Tuple[str, str]:
+    """Return (project_name, hier_path_string) for the placed-symbol
+    (instances (project ...)) block on sch_path.
+
+    Standalone / can't-find-parent → project = own stem, path = /own_uuid.
+    Sub-sheet with matching parent → project = parent's stem,
+        path = /parent_root_uuid/this_sheet_uuid_in_parent.
+
+    ``content`` is the current text of ``sch_path`` (so we can extract
+    its own root uuid as the standalone fallback without re-reading).
+    """
+    parent_sch = _find_parent_project_sheet(sch_path)
+    if parent_sch is not None:
+        pair = _sheet_uuid_in_root(parent_sch, sch_path.name)
+        if pair is not None:
+            root_uuid, sheet_uuid = pair
+            return (parent_sch.stem, f"/{root_uuid}/{sheet_uuid}")
+        # Parent project exists but doesn't reference this sub-sheet
+        # (unusual; e.g. hand-added sub-sheet before wiring it in).
+        # Fall through to standalone so KiCad at least renders locally.
+
+    root_uuid_match = re.search(r"\(uuid\s+\"?([0-9a-fA-F-]+)\"?\)", content)
+    if not root_uuid_match:
+        raise ValueError(
+            f"Could not find root sheet UUID in {sch_path}; "
+            "schematic file appears malformed."
+        )
+    return (sch_path.stem, f"/{root_uuid_match.group(1)}")
+
+
 class DynamicSymbolLoader:
     """
     Dynamically loads symbols from KiCad library files and injects them into schematics.
@@ -416,18 +516,17 @@ class DynamicSymbolLoader:
         with open(schematic_path, "r", encoding="utf-8") as f:
             content = f.read()
 
-        # KiCad keys per-project annotation off (project "<name>") (path "/<root_sheet_uuid>").
+        # KiCad keys per-project annotation off (project "<name>") (path "/<hierarchy>").
         # Without real values KiCad can't match the open project to the placement-time
         # reference and shows every component as un-annotated ("R?", "SW?", ...).
+        #
+        # For a HIERARCHICAL sub-sheet, the path must be
+        #     /{parent_root_uuid}/{this_sheet_uuid_as_it_appears_in_parent}
+        # and the project name must be the parent project's name (not the
+        # sub-sheet's own stem).  For a STANDALONE schematic, the path is
+        # /{own_root_uuid} and the project name is the file's own stem.
         sch_path_obj = schematic_path if hasattr(schematic_path, "stem") else Path(schematic_path)
-        project_name = sch_path_obj.stem
-        root_uuid_match = re.search(r"\(uuid\s+\"?([0-9a-fA-F-]+)\"?\)", content)
-        if not root_uuid_match:
-            raise ValueError(
-                f"Could not find root sheet UUID in {schematic_path}; "
-                "schematic file appears malformed."
-            )
-        root_sheet_uuid = root_uuid_match.group(1)
+        project_name, hier_path = _resolve_instance_path(sch_path_obj, content)
 
         instance_block = f"""  (symbol (lib_id "{full_lib_id}") (at {x} {y} {int(rotation)}) (unit {unit})
     (in_bom yes) (on_board yes) (dnp no)
@@ -446,7 +545,7 @@ class DynamicSymbolLoader:
     )
     (instances
       (project "{project_name}"
-        (path "/{root_sheet_uuid}"
+        (path "{hier_path}"
           (reference "{reference}")
           (unit {unit})
         )
