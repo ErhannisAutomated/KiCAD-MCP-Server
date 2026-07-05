@@ -358,6 +358,138 @@ class TestRoundTrip:
             apply_to_schematic(sess, target_path=None, strip_connections=True)
             assert '(label "SIG"' not in sch.read_text()
 
+    def _make_hier_project(self, tmp: Path):
+        """Root .kicad_sch + sub-sheet layout with known UUIDs.
+
+        Returns (root_sch, sub_sch, root_uuid, sub_sheet_uuid_in_root)."""
+        root_uuid = "aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"
+        sub_sheet_uuid = "bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb"
+        sub_own_uuid = "cccccccc-cccc-cccc-cccc-cccccccccccc"
+
+        (tmp / "power_module.kicad_pro").write_text("{}")
+
+        root_sch = tmp / "power_module.kicad_sch"
+        root_sch.write_text(textwrap.dedent(f"""\
+            (kicad_sch (version 20250114) (generator "test")
+              (uuid "{root_uuid}")
+              (lib_symbols)
+              (sheet (at 40 40) (size 20 20) (fields_autoplaced yes)
+                (stroke (width 0.1524) (type solid))
+                (fill (color 0 0 0 0.0000))
+                (uuid "{sub_sheet_uuid}")
+                (property "Sheetname" "child" (at 40 39 0))
+                (property "Sheetfile" "child.kicad_sch" (at 40 61 0))
+              )
+              (sheet_instances (path "/" (page "1")))
+            )
+        """))
+
+        # A minimal sub-sheet with one placed R1 whose (instances)
+        # block ALREADY has the wrong path — simulates the state a
+        # previous standalone apply pass would leave behind.  apply()
+        # in auto-detect mode should rewrite this to the correct
+        # /root_uuid/sub_sheet_uuid form.
+        wrong_path = f"/{sub_own_uuid}"
+        sub_sch = tmp / "child.kicad_sch"
+        sub_sch.write_text(textwrap.dedent(f"""\
+            (kicad_sch (version 20250114) (generator "test")
+              (uuid "{sub_own_uuid}")
+              (lib_symbols
+                (symbol "Device:R" (pin_numbers hide) (pin_names (offset 0))
+                  (symbol "R_1_1"
+                    (pin passive line (at 0 3.81 270) (length 1.27)
+                      (name "~") (number "1"))
+                    (pin passive line (at 0 -3.81 90) (length 1.27)
+                      (name "~") (number "2"))
+                  )
+                )
+              )
+              (symbol (lib_id "Device:R") (at 100 100 0) (unit 1)
+                (uuid "11111111-1111-1111-1111-111111111111")
+                (property "Reference" "R1" (at 100 100 0))
+                (property "Value" "10k" (at 100 100 0))
+                (instances
+                  (project "child"
+                    (path "{wrong_path}"
+                      (reference "R1")
+                      (unit 1)
+                    )
+                  )
+                )
+              )
+              (sheet_instances (path "/" (page "1")))
+            )
+        """))
+        return root_sch, sub_sch, root_uuid, sub_sheet_uuid, sub_own_uuid
+
+    def test_apply_autodetect_hierarchical_rewrites_instances_path(self):
+        """apply(standalone=None) on a sub-sheet must detect that the
+        target is part of a hierarchical project and rewrite the
+        (instances (project ... (path ...))) block to the correct
+        /root_uuid/sheet_uuid_in_root form + parent project name.
+
+        Regression: before the auto-detect fix, `standalone is None`
+        always meant `use_standalone=True` — so every autoplace pass on
+        a v2alt sub-sheet reset the paths back to /own_uuid + own stem,
+        breaking KiCad's per-sheet-instance annotation lookup and
+        producing C?/R?/U? refs in the project view (issue seen at
+        project commit 0b2cfa5, re-fixed post-hoc at fed7f29).
+        """
+        from commands.autoplacer import load_session, apply_to_schematic
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _root, sub_sch, root_uuid, sub_sheet_uuid, sub_own_uuid = (
+                self._make_hier_project(tmp)
+            )
+            sess = load_session(sub_sch)
+            apply_to_schematic(sess, target_path=None)  # standalone=None → autodetect
+
+            text = sub_sch.read_text()
+            expected_path = f'(path "/{root_uuid}/{sub_sheet_uuid}"'
+            assert expected_path in text, (
+                f"expected hierarchical path {expected_path!r} in output; "
+                f"got instance snippet: "
+                f"{text[text.find('(instances'):text.find('(instances')+250]!r}"
+            )
+            assert '(project "power_module"' in text
+            assert f'(path "/{sub_own_uuid}"' not in text, (
+                "wrong /own_uuid path should have been rewritten"
+            )
+
+    def test_apply_standalone_true_still_writes_standalone_form(self):
+        """Explicit standalone=True must still produce the standalone
+        rewrite — auto-detect is opt-out via passing False, not by
+        silently overriding an explicit True."""
+        from commands.autoplacer import load_session, apply_to_schematic
+
+        with tempfile.TemporaryDirectory() as tmp:
+            tmp = Path(tmp)
+            _root, sub_sch, root_uuid, _, sub_own_uuid = self._make_hier_project(tmp)
+            sess = load_session(sub_sch)
+            apply_to_schematic(sess, target_path=None, standalone=True)
+
+            text = sub_sch.read_text()
+            # Standalone form: path uses dst's own uuid, project = dst stem
+            assert f'(path "/{sub_own_uuid}"' in text
+            assert '(project "child"' in text
+            # And should NOT carry the hierarchical two-level path
+            assert f"/{root_uuid}/" not in text
+
+    def test_apply_standalone_none_on_orphan_defaults_to_standalone(self):
+        """A .kicad_sch that isn't part of any project (no .kicad_pro
+        anywhere) — standalone=None should fall back to standalone
+        form, not error out."""
+        from commands.autoplacer import load_session, apply_to_schematic
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sch = _make_two_r_with_net(Path(tmp))
+            sess = load_session(sch)
+            # Should not raise; instance blocks stay in standalone form.
+            apply_to_schematic(sess, target_path=None)
+            text = sch.read_text()
+            assert '(project ' in text  # rewrote something
+
 
 @pytest.mark.unit
 class TestPolarityTorque:

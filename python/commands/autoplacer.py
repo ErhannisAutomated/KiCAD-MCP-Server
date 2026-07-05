@@ -1886,26 +1886,55 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
             new_sexp.append(item)
         sexp = new_sexp
 
-    # When ``standalone`` is True, rewrite each placed-symbol's
-    # (instances (project … (path …))) to point to the destination's
-    # stem and root UUID — so KiCad can resolve annotations when the
-    # file is opened on its own (no parent .kicad_pro hierarchy).
-    # Default behaviour: auto-detect — standalone if writing to a
-    # different file from the source, OR if the source itself isn't
-    # the file referenced by its (instances …) blocks.  Pass
-    # standalone=False explicitly to preserve hierarchical paths.
-    # Default: True.  Most placer uses are tests / iterations on a
-    # copy of the file, where opening the result standalone is the
-    # natural way to inspect it.  Hierarchical-preserve mode (the
-    # original child-sheet uses its parent's path) is opt-in via
-    # standalone=False — typically used when applying placement
-    # back to a real project's child sheet without breaking
-    # the parent's references.
-    use_standalone: bool
+    # Decide whether to rewrite each placed-symbol's (instances (project
+    # … (path …))) block:
+    #   * standalone=True  → point at dst's own stem + root UUID (so the
+    #     file opens cleanly outside any parent .kicad_pro).
+    #   * standalone=False → point at the parent project's stem +
+    #     /root_uuid/sheet_uuid_in_root (so KiCad's hierarchical
+    #     annotation resolves when opened as part of the project).
+    #   * standalone=None  → auto-detect from dst.  If dst is a
+    #     hierarchical sub-sheet of some .kicad_pro (its filename
+    #     appears as a (Sheetfile) property on a (sheet ...) node of a
+    #     root .kicad_sch we can find by walking up), preserve
+    #     hierarchical mode.  Otherwise default to standalone — the
+    #     safe assumption when we can't locate a parent project (test
+    #     copies, tuning notebook, one-off placements).
+    #
+    # Both modes REWRITE the instances block, not just standalone —
+    # apply()'s caller may have loaded a source file whose paths are
+    # already wrong (e.g. from a prior standalone-apply pass), and we
+    # want the corrected form written on every apply, not just when
+    # the caller happens to know to pass the right flag.
+    hierarchical_path = None  # set when we detect / are told to preserve hierarchy
     if standalone is None:
-        use_standalone = True
+        from commands.dynamic_symbol_loader import (
+            _find_parent_project_sheet, _sheet_uuid_in_root,
+        )
+        parent_root = _find_parent_project_sheet(dst)
+        if parent_root is not None:
+            pair = _sheet_uuid_in_root(parent_root, dst.name)
+            if pair is not None:
+                root_uuid, sheet_uuid = pair
+                hierarchical_path = (parent_root.stem, f"/{root_uuid}/{sheet_uuid}")
+        use_standalone = hierarchical_path is None
+    elif standalone is False:
+        from commands.dynamic_symbol_loader import (
+            _find_parent_project_sheet, _sheet_uuid_in_root,
+        )
+        parent_root = _find_parent_project_sheet(dst)
+        if parent_root is not None:
+            pair = _sheet_uuid_in_root(parent_root, dst.name)
+            if pair is not None:
+                root_uuid, sheet_uuid = pair
+                hierarchical_path = (parent_root.stem, f"/{root_uuid}/{sheet_uuid}")
+        # If we asked for hierarchical but couldn't find a parent, that's
+        # a caller mistake — bail on rewriting and hope the existing
+        # paths are correct.
+        use_standalone = False
     else:
-        use_standalone = standalone
+        use_standalone = True
+
     if use_standalone:
         # Need the destination's root uuid — find the first (uuid …) in
         # the (about-to-be-written) sexp.
@@ -1931,6 +1960,22 @@ def apply_to_schematic(sess: Session, target_path: Optional[Path] = None,
                         for pp in proj[2:]:
                             if isinstance(pp, list) and pp and pp[0] == Symbol("path") and len(pp) >= 2:
                                 pp[1] = f"/{dst_uuid}"
+    elif hierarchical_path is not None:
+        proj_name, hier_path = hierarchical_path
+        for top in sexp:
+            if not (isinstance(top, list) and len(top) > 1 and top[0] == Symbol("symbol")):
+                continue
+            for sub in top[1:]:
+                if not (isinstance(sub, list) and sub and sub[0] == Symbol("instances")):
+                    continue
+                for proj in sub[1:]:
+                    if not (isinstance(proj, list) and proj and proj[0] == Symbol("project")):
+                        continue
+                    if len(proj) >= 2:
+                        proj[1] = proj_name
+                    for pp in proj[2:]:
+                        if isinstance(pp, list) and pp and pp[0] == Symbol("path") and len(pp) >= 2:
+                            pp[1] = hier_path
 
     dst.write_text(sexpdata.dumps(sexp))
     return {
