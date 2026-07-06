@@ -440,6 +440,7 @@ class KiCADInterface:
             "export_netlist": self._handle_export_netlist,
             "generate_netlist": self._handle_generate_netlist,
             "sync_schematic_to_board": self._handle_sync_schematic_to_board,
+            "check_sourcing_readiness": self._handle_check_sourcing_readiness,
             "list_schematic_libraries": self._handle_list_schematic_libraries,
             "get_schematic_view": self._handle_get_schematic_view,
             "list_schematic_components": self._handle_list_schematic_components,
@@ -3679,6 +3680,26 @@ class KiCADInterface:
 
         SchematicManager.save_schematic(schematic, schematic_path)
         return {"success": True, "annotated": annotated}
+
+    def _handle_check_sourcing_readiness(self, params: Dict[str, Any]) -> Dict[str, Any]:
+        """Report per-category gaps that would block sync_schematic_to_board:
+        missing_footprint / missing_lcsc / missing_mpn / unresolvable_footprint
+        (and, if boardPath is given, retroactive_sync_gap — symbols with a
+        Footprint set but not yet on the .kicad_pcb, where sync_schematic_to_
+        board's auto-import only runs on a fresh sync).
+        """
+        try:
+            schematic_path = params.get("schematicPath")
+            if not schematic_path:
+                return {"success": False, "message": "schematicPath is required"}
+            board_path = params.get("boardPath")
+            from commands.sourcing_readiness import check_sourcing_readiness
+            return check_sourcing_readiness(schematic_path, board_path)
+        except Exception as e:
+            logger.error(f"Error checking sourcing readiness: {e}")
+            import traceback
+            logger.error(traceback.format_exc())
+            return {"success": False, "message": str(e)}
 
     def _handle_annotate_schematic(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """Annotate unannotated components in a schematic (R? -> R1, R2, ...).

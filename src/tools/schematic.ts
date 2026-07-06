@@ -1634,6 +1634,22 @@ edit_schematic_component and set its value to an empty string.`,
     },
   );
 
+  // Sourcing readiness — pre-sync audit
+  server.tool(
+    "check_sourcing_readiness",
+    "Report per-category gaps that would block sync_schematic_to_board or JLCPCB SMT upload: missing_footprint / missing_lcsc / missing_mpn / unresolvable_footprint (project-local .kicad_mod file not on disk). If boardPath is given, also flags the retroactive-sync gap — symbols with a Footprint set on the schematic but not yet on the .kicad_pcb, where sync_schematic_to_board's auto-import only runs on a first-fresh sync. Run BEFORE sync_schematic_to_board on any new project or after any sourcing pass.",
+    {
+      schematicPath: z.string().describe("Absolute path to the root .kicad_sch (walks all sub-sheets)"),
+      boardPath: z.string().optional().describe("Optional .kicad_pcb path — enables the retroactive-sync-gap check"),
+    },
+    async (args: { schematicPath: string; boardPath?: string }) => {
+      const result = await callKicadScript("check_sourcing_readiness", args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(result, null, 2) }],
+      };
+    },
+  );
+
   // ============================================================
   // Schematic Analysis Tools (read-only)
   // ============================================================

@@ -96,11 +96,29 @@ need to be filled in:
 - **`Footprint`** — `Library:Name` reference (e.g. `Resistor_SMD:R_0603_1608Metric`).
   Required: `sync_schematic_to_board` silently *skips* any component whose
   `Footprint` property is empty, leaving you with an empty PCB even though
-  the sync call reports "success".
+  the sync call reports "success".  **Set Footprint in the SAME pass as
+  LCSC/MPN** — a sourcing pass that only writes LCSC is very easy to do
+  and produces a schematic where `check_sourcing_readiness` (below) will
+  report every affected component as `missing_footprint`.
 - **`LCSC`** — JLCPCB part number (e.g. `C25804`). Required for `export_bom`
   to populate the LCSC column; otherwise every row in the BOM has a blank
   LCSC field. This is the field JLCPCB SMT assembly reads to know what to
   populate each footprint with.
+
+**Verify with `check_sourcing_readiness` (2026-07-08)** — one call before
+`sync_schematic_to_board` walks the whole hierarchy and reports:
+
+- `missing_footprint`, `missing_lcsc`, `missing_mpn` — property gaps
+- `unresolvable_footprint` — Footprint points at a project-local
+  `.kicad_mod` file that isn't on disk (system libs are trusted and
+  skipped)
+- `retroactive_sync_gap` (when `boardPath` is passed) — symbols with
+  Footprint set on the schematic but not yet on the .kicad_pcb.  This
+  is the classic post-first-sync-fill-in-missing-footprint pitfall:
+  `sync_schematic_to_board` only auto-imports footprints on a first-
+  fresh sync.  If the audit reports a gap, reset the .kicad_pcb to its
+  template state (git checkout if tracked, otherwise recreate empty)
+  and rerun sync.
 
 ```
 Set Footprint on R1, R2, R3 to Resistor_SMD:R_0603_1608Metric.
