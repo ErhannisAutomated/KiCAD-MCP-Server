@@ -3628,82 +3628,129 @@ class KiCADInterface:
             logger.error(traceback.format_exc())
             return {"success": False, "message": str(e)}
 
+    def _annotate_single_sheet(self, schematic_path: str) -> Dict[str, Any]:
+        """Resolve `?` refs in ONE .kicad_sch by assigning the next
+        available number per prefix within that file.  Does not touch
+        sub-sheets or run hierarchical disambiguation — those are handled
+        by the top-level `_handle_annotate_schematic`.
+
+        Returns `{success, annotated: [...], message?}`.  Callers use
+        `annotated` to build the rename map.
+        """
+        import re
+
+        schematic = SchematicManager.load_schematic(schematic_path)
+        if not schematic:
+            return {"success": False, "message": "Failed to load schematic"}
+
+        existing_refs: Dict[str, set] = {}
+        unannotated: List[Tuple[Any, str]] = []
+
+        for symbol in schematic.symbol:
+            if not hasattr(symbol.property, "Reference"):
+                continue
+            ref = symbol.property.Reference.value
+            if ref.startswith("_TEMPLATE"):
+                continue
+            match = re.match(r"^([A-Za-z_]+)(\d+)$", ref)
+            if match:
+                prefix = match.group(1)
+                num = int(match.group(2))
+                existing_refs.setdefault(prefix, set()).add(num)
+            elif ref.endswith("?"):
+                prefix = ref[:-1]
+                unannotated.append((symbol, prefix))
+
+        if not unannotated:
+            return {"success": True, "annotated": [], "message": "All components already annotated"}
+
+        annotated: List[Dict[str, str]] = []
+        for symbol, prefix in unannotated:
+            existing_refs.setdefault(prefix, set())
+            next_num = 1
+            while next_num in existing_refs[prefix]:
+                next_num += 1
+            old_ref = symbol.property.Reference.value
+            new_ref = f"{prefix}{next_num}"
+            symbol.setAllReferences(new_ref)
+            existing_refs[prefix].add(next_num)
+            uuid_val = str(symbol.uuid.value) if hasattr(symbol, "uuid") else ""
+            annotated.append({"uuid": uuid_val, "oldReference": old_ref, "newReference": new_ref})
+
+        SchematicManager.save_schematic(schematic, schematic_path)
+        return {"success": True, "annotated": annotated}
+
     def _handle_annotate_schematic(self, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Annotate unannotated components in schematic (R? -> R1, R2, ...)"""
+        """Annotate unannotated components in a schematic (R? -> R1, R2, ...).
+
+        When the target has sub-sheets, also walks every sub-sheet to
+        resolve their local `?` refs and then runs a hierarchical
+        disambiguation pass that suffixes every sub-sheet's refs with
+        `_{SHEETNAME}{instance_num}` so refs are globally unique.
+        Without this pass, kicad-cli warns "schematic has annotation
+        errors" and BOM/netlist output collapses colliding refs across
+        sheets.  Idempotent — already-suffixed refs are left alone.
+        """
         logger.info("Annotating schematic")
         try:
-            import re
+            from pathlib import Path
 
             schematic_path = params.get("schematicPath")
             if not schematic_path:
                 return {"success": False, "message": "schematicPath is required"}
 
-            schematic = SchematicManager.load_schematic(schematic_path)
-            if not schematic:
-                return {"success": False, "message": "Failed to load schematic"}
+            root_path_obj = Path(schematic_path).resolve()
 
-            # Collect existing references by prefix
-            existing_refs = {}  # prefix -> set of numbers
-            unannotated = []  # (symbol, prefix)
-
-            for symbol in schematic.symbol:
-                if not hasattr(symbol.property, "Reference"):
-                    continue
-                ref = symbol.property.Reference.value
-                if ref.startswith("_TEMPLATE"):
-                    continue
-
-                # Split reference into prefix and number
-                match = re.match(r"^([A-Za-z_]+)(\d+)$", ref)
-                if match:
-                    prefix = match.group(1)
-                    num = int(match.group(2))
-                    if prefix not in existing_refs:
-                        existing_refs[prefix] = set()
-                    existing_refs[prefix].add(num)
-                elif ref.endswith("?"):
-                    prefix = ref[:-1]
-                    unannotated.append((symbol, prefix))
-
-            if not unannotated:
-                return {
-                    "success": True,
-                    "annotated": [],
-                    "message": "All components already annotated",
-                }
-
-            annotated = []
-            for symbol, prefix in unannotated:
-                if prefix not in existing_refs:
-                    existing_refs[prefix] = set()
-
-                # Find next available number
-                next_num = 1
-                while next_num in existing_refs[prefix]:
-                    next_num += 1
-
-                old_ref = symbol.property.Reference.value
-                new_ref = f"{prefix}{next_num}"
-                symbol.setAllReferences(new_ref)
-                existing_refs[prefix].add(next_num)
-
-                uuid_val = str(symbol.uuid.value) if hasattr(symbol, "uuid") else ""
-                annotated.append(
-                    {
-                        "uuid": uuid_val,
-                        "oldReference": old_ref,
-                        "newReference": new_ref,
-                    }
+            try:
+                from commands.hierarchical_annotate import (
+                    _find_sheet_instances_in_root,
+                    hierarchical_disambiguate,
                 )
+                sheet_instances = _find_sheet_instances_in_root(root_path_obj)
+            except Exception as e:
+                logger.warning(f"Could not inspect sheets in root: {e}")
+                sheet_instances = {}
+                hierarchical_disambiguate = None  # type: ignore
 
-            SchematicManager.save_schematic(schematic, schematic_path)
+            # Resolve `?` in every sub-sheet first, then in the root.
+            sub_annotated: List[Dict[str, str]] = []
+            if sheet_instances:
+                sub_sheet_files = {
+                    (root_path_obj.parent / fname).resolve()
+                    for _u, (_n, fname) in sheet_instances.items()
+                }
+                for sub in sorted(sub_sheet_files):
+                    if not sub.exists():
+                        continue
+                    sub_result = self._annotate_single_sheet(str(sub))
+                    for entry in sub_result.get("annotated", []):
+                        e2 = dict(entry)
+                        e2["sheet"] = sub.name
+                        sub_annotated.append(e2)
 
-            # Propagate the renames through Placement_Anchor refs in
-            # every sheet of the project.
+            root_result = self._annotate_single_sheet(schematic_path)
+            if not root_result.get("success", False):
+                return root_result
+            annotated: List[Dict[str, str]] = list(root_result.get("annotated", []))
+            for entry in annotated:
+                entry.setdefault("sheet", root_path_obj.name)
+            annotated.extend(sub_annotated)
+
+            # Hierarchical disambiguation (only makes sense when we have
+            # sub-sheets to disambiguate against).
+            disambiguation: Dict[str, Any] = {}
+            if sheet_instances and hierarchical_disambiguate is not None:
+                try:
+                    disambiguation = hierarchical_disambiguate(str(root_path_obj))
+                except Exception as e:
+                    logger.warning(f"Hierarchical disambiguation failed: {e}")
+                    disambiguation = {"success": False, "message": str(e)}
+
+            # Propagate Placement_Anchor renames — union of all sheet-local renames.
             propagation: Dict[str, Any] = {}
-            rename_map = {a["oldReference"]: a["newReference"] for a in annotated}
-            # Only renames where the old ref didn't just end in "?" matter,
-            # but include every entry — propagate_rename ignores irrelevant ones.
+            rename_map: Dict[str, str] = {a["oldReference"]: a["newReference"] for a in annotated}
+            for r in disambiguation.get("renamed", []) or []:
+                rename_map[r["oldRef"]] = r["newRef"]
             if rename_map:
                 try:
                     from commands.placement_constraints import (
@@ -3716,10 +3763,16 @@ class KiCADInterface:
                     logger.warning(f"Placement_Anchor propagation failed: {e}")
                     propagation = {"error": str(e)}
 
+            message = None
+            if not annotated and not disambiguation.get("renamed"):
+                message = "All components already annotated"
+
             return {
                 "success": True,
                 "annotated": annotated,
+                "hierarchicalDisambiguation": disambiguation,
                 "placementAnchorPropagation": propagation,
+                **({"message": message} if message else {}),
             }
 
         except Exception as e:

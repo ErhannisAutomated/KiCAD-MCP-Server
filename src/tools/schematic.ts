@@ -1229,7 +1229,7 @@ edit_schematic_component and set its value to an empty string.`,
   // Annotate schematic
   server.tool(
     "annotate_schematic",
-    "Assign reference designators to unannotated components (R? → R1, R2, ...). Must be called before tools that require known references.",
+    "Assign reference designators to unannotated components (R? → R1, R2, ...). When the target has sub-sheets, ALSO walks every sub-sheet to resolve its own `?` refs and then runs a hierarchical disambiguation pass that suffixes each sub-sheet's refs with `_{SHEETNAME}{instance_num}` so refs are globally unique (avoids kicad-cli's `schematic has annotation errors` warning and the resulting collapsed-BOM/netlist output). Idempotent — already-suffixed refs are left alone. Must be called before tools that require known references.",
     {
       schematicPath: z.string().describe("Path to the .kicad_sch file"),
     },
@@ -1237,19 +1237,24 @@ edit_schematic_component and set its value to an empty string.`,
       const result = await callKicadScript("annotate_schematic", args);
       if (result.success) {
         const annotated = result.annotated || [];
-        if (annotated.length === 0) {
+        const disamb = result.hierarchicalDisambiguation || {};
+        const renamed = disamb.renamed || [];
+        const parts: string[] = [];
+        if (annotated.length === 0 && renamed.length === 0) {
           return {
             content: [{ type: "text", text: "All components are already annotated." }],
           };
         }
-        const lines = annotated.map((a: any) => `  ${a.oldReference} → ${a.newReference}`);
+        if (annotated.length > 0) {
+          const lines = annotated.map((a: any) => `  ${a.oldReference} → ${a.newReference}${a.sheet ? ` (${a.sheet})` : ""}`);
+          parts.push(`Annotated ${annotated.length} component(s):\n${lines.join("\n")}`);
+        }
+        if (renamed.length > 0) {
+          const lines = renamed.map((r: any) => `  ${r.oldRef} → ${r.newRef} (${r.sheet})`);
+          parts.push(`Hierarchically disambiguated ${renamed.length} ref(s):\n${lines.join("\n")}`);
+        }
         return {
-          content: [
-            {
-              type: "text",
-              text: `Annotated ${annotated.length} component(s):\n${lines.join("\n")}`,
-            },
-          ],
+          content: [{ type: "text", text: parts.join("\n\n") }],
         };
       }
       return {
