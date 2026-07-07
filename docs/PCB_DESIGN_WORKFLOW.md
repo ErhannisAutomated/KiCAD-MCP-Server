@@ -142,6 +142,23 @@ holes, and decorative symbols don't need either.)
 
 ### Annotate Placement Intent (Pin_Spring_Class)
 
+**Author Pin_Spring_Class AT PLACEMENT TIME, not retroactively.**  When
+you're adding a bypass cap next to an IC, you know exactly which IC
+pin it's decoupling — capture that intent in the same call that adds
+the component:
+
+```
+Add C29 (100nF, 0603) at (35, 60).
+Set Pin_Spring_Class:1 on C29 to {"U3.4": "DECOUPLING"}.
+```
+
+A "figure it out later from netlist geometry" pass will always miss
+cases: bulk output caps on multi-pin rails (VSYS, VOUT with two IC
+pins), rail names other than literal "GND" (`/bms/VSS`, `/charger/
+PGND`), compensation-network caps that sit mid-way in an RC filter.
+Manual capture at add-time is O(1) work; retroactive analysis is
+O(rules) and grows every project.
+
 The auto-placer (`relax_placement`) defaults every connection to a
 medium-strength `LOCAL_SIGNAL` spring. For most circuits that's fine,
 but two cases benefit from explicit intent:

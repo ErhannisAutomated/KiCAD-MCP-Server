@@ -23,6 +23,33 @@ The property name carries the *pad number* as a suffix, not the pad
 matches how KiCad numbers pads internally and lets a single component
 hold per-pin overrides.
 
+## When to author
+
+**Author the class at placement time, not as a later analysis pass.**
+When you're adding a bypass cap next to an IC, you know exactly which
+IC pin it's decoupling — that's the reason the cap is in the design.
+Capture the intent in the same step:
+
+```
+Add C29 (100nF, 0603) at (35, 60).
+Set Pin_Spring_Class:1 on C29 to {"U3.4": "DECOUPLING"}.
+```
+
+A retroactive "figure it out from netlist geometry" pass will always
+miss cases:
+
+- Bulk output caps on multi-pin rails (VSYS with pins 19 + 20, VOUT
+  with pins 12/13/14) don't fit "cap between GND and one IC pin"
+  detectors.
+- Local ground names (`/bms/VSS`, `/charger/PGND`) don't match a
+  detector that looks for literal `"GND"`.
+- Compensation-network caps that live mid-way in an RC filter (COMP
+  pin → R → C → GND) look like decoupling caps to a shape-based
+  detector but should stay `LOCAL_SIGNAL`.
+
+Adding the annotation at add-time is O(1) work per component; a
+detector grows a new rule for every case class discovered downstream.
+
 ## Class table
 
 | Class           | Spring constant | When to use                                                                                                                  |
