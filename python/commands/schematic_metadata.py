@@ -317,14 +317,18 @@ def _find_matching_close(text: str, open_idx: int) -> int:
 
 def _find_lib_symbols_close(text: str) -> Optional[int]:
     """Return the index of the `)` that closes the top-level
-    `(lib_symbols ...)` block, or None if not found."""
-    # Match the indented form KiCad uses: `\t(lib_symbols\n`.
-    needle = "\t(lib_symbols"
-    pos = text.find(needle)
-    if pos < 0:
-        return None
-    open_paren = text.index("(", pos)
-    return _find_matching_close(text, open_paren)
+    `(lib_symbols ...)` block, or None if not found.
+
+    KiCad uses tab indentation by default (`\t(lib_symbols`), but
+    schematics that have been round-tripped through sexpdata or hand
+    tools may use spaces.  Try both — either indentation is valid.
+    """
+    for needle in ("\t(lib_symbols", "  (lib_symbols", "\n(lib_symbols"):
+        pos = text.find(needle)
+        if pos >= 0:
+            open_paren = text.index("(", pos)
+            return _find_matching_close(text, open_paren)
+    return None
 
 
 def _find_kicad_sch_close(text: str) -> int:
